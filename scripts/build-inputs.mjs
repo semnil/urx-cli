@@ -45,7 +45,10 @@ export function checkBuildInputs({ manifest, nodeVersionFile, packageJson }) {
     }
   }
 
-  if (nodeVersionFile !== `${version}\n`) problems.push(`.node-version is not "${version}" on one line`);
+  // A checkout with CRLF line endings (Git for Windows' default) ends the line with \r\n.
+  if (nodeVersionFile.replace(/\r\n$/, "\n") !== `${version}\n`) {
+    problems.push(`.node-version is not "${version}" on one line`);
+  }
   const engine = packageJson?.engines?.node;
   const major = version.split(".")[0];
   if (engine !== `>=${version} <${Number(major) + 1}`) {

@@ -15,9 +15,28 @@ describe("build inputs", () => {
     expect(checkBuildInputs(actual())).toEqual([]);
   });
 
+  it("accept .node-version with an LF or a CRLF line ending, and nothing else around the version", () => {
+    const { version } = actual().manifest.node;
+    for (const [content, problems] of [
+      [`${version}\n`, 0],
+      [`${version}\r\n`, 0],
+      [version, 1],
+      [`${version}\n\n`, 1],
+      [`${version}\r\n\r\n`, 1],
+      [`${version} \n`, 1],
+      [`\n${version}\n`, 1],
+    ]) {
+      const files = actual();
+      files.nodeVersionFile = content;
+      expect(checkBuildInputs(files), JSON.stringify(content)).toHaveLength(problems);
+    }
+  });
+
   it("report each disagreement", () => {
+    const pinned = actual().manifest.node.version.split(".").map(Number);
+    const otherVersion = `${pinned[0]}.${pinned[1]}.${pinned[2] + 1}`;
     const cases = [
-      [(f) => (f.nodeVersionFile = "26.13.1\n"), ".node-version"],
+      [(f) => (f.nodeVersionFile = `${otherVersion}\n`), ".node-version"],
       [(f) => (f.packageJson.engines.node = ">=26 <27"), "engines.node"],
       [(f) => (f.packageJson.packageManager = "pnpm@10.7.1"), "packageManager"],
       [(f) => (f.manifest.node.checksums = "https://example.com/SHASUMS256.txt"), "node.checksums"],
