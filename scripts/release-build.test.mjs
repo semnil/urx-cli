@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { exportRelease, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -150,6 +150,13 @@ describe("release output", () => {
     writeFileSync(file, "the user's");
     expect(() => publishOutput(directory("staging", "new"), file, { label: "bundle build" })).toThrow(/already exists; the bundle build leaves it/);
     expect(readFileSync(file, "utf8")).toBe("the user's");
+  });
+
+  it("stop before building anything when the output exists", () => {
+    const output = join(scratch, "dist-bundle");
+    expect(() => requireNoOutput(output, "bundle build")).not.toThrow();
+    mkdirSync(output);
+    expect(() => requireNoOutput(output, "bundle build")).toThrow(/already exists; the bundle build leaves it as it is/);
   });
 
   it("leave a link at the output as it is", () => {

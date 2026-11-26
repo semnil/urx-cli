@@ -179,6 +179,17 @@ export function removeExport(root, destination) {
   rmSync(destination, { recursive: true, force: true });
 }
 
+/** Throws when anything is at `output`, a link included: a build never removes a previous output. */
+export function requireNoOutput(output, label = "release build") {
+  try {
+    lstatSync(output);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw new Error(`${output} could not be examined`, { cause: error });
+  }
+  throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
+}
+
 /**
  * Moves `staging` into place as `output` in one rename. A build never removes
  * a previous output: when anything is at `output`, a link included, it is left
@@ -201,14 +212,11 @@ export function publishOutput(
     }
     throw error;
   };
-  let exists = true;
   try {
-    lstatSync(output);
+    requireNoOutput(output, label);
   } catch (error) {
-    if (error?.code !== "ENOENT") abandon(new Error(`${output} could not be examined`, { cause: error }));
-    exists = false;
+    abandon(error);
   }
-  if (exists) abandon(new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`));
   try {
     rename(staging, output);
   } catch (error) {
@@ -218,6 +226,9 @@ export function publishOutput(
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL("../", import.meta.url));
+  const output = join(root, "dist-release");
+  // Checked again when the output is moved into place; this stops before building anything.
+  requireNoOutput(output);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
   try {
@@ -247,7 +258,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       stdio: ["ignore", "pipe", "inherit"],
       env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
     });
-    const output = join(root, "dist-release");
     // Copied next to the output first, so the final rename stays on one file system.
     const staging = mkdtempSync(join(root, "dist-release-"));
     try {

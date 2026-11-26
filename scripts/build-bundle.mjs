@@ -23,7 +23,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describeFiles, filesUnder, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
+import { describeFiles, filesUnder, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
@@ -161,6 +161,8 @@ async function main(argv) {
   if (argv.length !== 2 || argv[0] !== "--node-archive") throw new Error(USAGE);
   const release = join(root, "dist-release");
   const output = join(root, "dist-bundle");
+  // Checked again when the bundle is moved into place; this stops before reading anything.
+  requireNoOutput(output, "bundle build");
   const recorded = inputs.node.archives[platform.key];
   const archive = verifiedArchive(argv[1], recorded.sha256);
 
