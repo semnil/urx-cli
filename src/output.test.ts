@@ -96,9 +96,35 @@ describe("file output", () => {
     const slow = ((_fd: number, _buffer: Buffer, offset: number) => (calls.push(offset), (clock += 2800), 2)) as unknown as NonNullable<
       NonNullable<Parameters<typeof fileOutput>[1]>["write"]
     >;
-    const output = fileOutput(1, { write: slow, now: () => clock, deadlineMs: 5000 });
+    const output = fileOutput(1, { write: slow, now: () => clock });
     expect(await writeWithDeadline(output, "abcdefgh", 5000, () => clock)).toBe("output_timeout");
     expect(calls).toEqual([0, 2]);
+  });
+
+  it("judge the remainder against the operation's own deadline, not a later start time", async () => {
+    for (const [returned, expected, remainder] of [
+      [4999, null, true],
+      [5000, "output_timeout", false],
+      [5000.5, "output_timeout", false],
+      [5001, "output_timeout", false],
+    ] as const) {
+      // The clock moves 1 ms between the operation's start and the file write's start.
+      let clock = 0;
+      const tick = () => clock;
+      const calls: number[] = [];
+      const write = ((_fd: number, _buffer: Buffer, offset: number, length: number) => {
+        calls.push(offset);
+        if (offset === 0) {
+          clock = returned;
+          return 1;
+        }
+        return length;
+      }) as unknown as NonNullable<NonNullable<Parameters<typeof fileOutput>[1]>["write"]>;
+      const output = fileOutput(1, { write, now: tick });
+      const stepped: OutputStream = { write: output.write, writeBefore: (chunk, deadline, done) => ((clock += 1), output.writeBefore?.(chunk, deadline, done)) };
+      expect(await writeWithDeadline(stepped, "abc", 5000, tick), String(returned)).toBe(expected);
+      expect(calls.length > 1, String(returned)).toBe(remainder);
+    }
   });
 
   it("fail when the remainder cannot be written or no byte is accepted", async () => {

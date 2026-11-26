@@ -9,6 +9,11 @@ export const OUTPUT_DEADLINE_MS = 5000;
 /** The part of a Node writable stream an output operation needs. */
 export interface OutputStream {
   write(chunk: string, callback: (error?: Error | null) => void): boolean;
+  /**
+   * Writes with the operation's deadline, a `performance.now()` time. An output
+   * that writes in several steps (a file) starts no step at or after it.
+   */
+  writeBefore?(chunk: string, deadline: number, callback: (error?: Error | null) => void): void;
 }
 
 export type OutputFailure = "output_error" | "output_timeout";
@@ -27,16 +32,19 @@ export function writeWithDeadline(
 ): Promise<OutputFailure | null> {
   return new Promise((resolve) => {
     let settled = false;
-    const started = now();
+    // One deadline for the operation, used both here and by a stepwise output.
+    const deadline = now() + deadlineMs;
     const settle = (failure: OutputFailure | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(now() - started >= deadlineMs ? "output_timeout" : failure);
+      resolve(now() >= deadline ? "output_timeout" : failure);
     };
     const timer = setTimeout(() => settle("output_timeout"), deadlineMs);
+    const done = (error?: Error | null) => settle(error ? "output_error" : null);
     try {
-      stream.write(text, (error) => settle(error ? "output_error" : null));
+      if (stream.writeBefore === undefined) stream.write(text, done);
+      else stream.writeBefore(text, deadline, done);
     } catch {
       settle("output_error");
     }
@@ -45,8 +53,8 @@ export function writeWithDeadline(
 
 export interface FileOutputOptions {
   readonly write?: typeof writeSync;
+  /** The clock the deadline is measured on; `writeWithDeadline` must use the same one. */
   readonly now?: () => number;
-  readonly deadlineMs?: number;
 }
 
 /**
@@ -55,26 +63,29 @@ export interface FileOutputOptions {
  * truncated output (a full disk, a file size limit) as complete. After a short
  * write that returns at or past the deadline, the rest is not written.
  */
-export function fileOutput(fd: number, { write = writeSync, now = () => performance.now(), deadlineMs = OUTPUT_DEADLINE_MS }: FileOutputOptions = {}): OutputStream {
-  return {
+export function fileOutput(fd: number, { write = writeSync, now = () => performance.now() }: FileOutputOptions = {}): OutputStream {
+  const output: Required<OutputStream> = {
     write(chunk, callback) {
-      const started = now();
+      output.writeBefore(chunk, Number.POSITIVE_INFINITY, callback);
+      return true;
+    },
+    writeBefore(chunk, deadline, callback) {
       const bytes = Buffer.from(chunk, "utf8");
       try {
         for (let offset = 0; offset < bytes.length; ) {
-          if (offset > 0 && now() - started >= deadlineMs) throw new Error("the output deadline passed");
+          if (offset > 0 && now() >= deadline) throw new Error("the output deadline passed");
           const written = write(fd, bytes, offset, bytes.length - offset);
           if (written <= 0) throw new Error("the output accepted no bytes");
           offset += written;
         }
       } catch (error) {
         callback(error instanceof Error ? error : new Error(String(error)));
-        return false;
+        return;
       }
       callback(null);
-      return true;
     },
   };
+  return output;
 }
 
 /** The parts of process.stdout and process.stderr that `processOutput` uses. */
