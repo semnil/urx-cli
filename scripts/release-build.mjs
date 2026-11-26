@@ -9,6 +9,7 @@
 // mix their halves.
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { cpSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,18 +68,49 @@ export function removeExport(root, destination) {
 }
 
 /**
- * Makes `staging` the directory at `output`: the old output is removed and
- * `staging` is renamed into its place. When another release has put its own
- * output there in between, the rename fails and this release fails, so
- * `output` always holds one release's complete result.
+ * Makes `staging` the directory at `output`, one directory rename at a time:
+ *
+ * 1. the previous output is renamed aside, whole, to `<output>-previous-<id>`;
+ * 2. `staging` is renamed into its place;
+ * 3. the set-aside output is removed.
+ *
+ * When step 2 fails (another release put its output there in between, or the
+ * rename itself failed), the previous output is renamed back, so `output`
+ * always holds one release's complete result, never a partly removed one. An
+ * interruption between the steps leaves the previous output complete under its
+ * set-aside name. A failed step 3 leaves it there too, and only warns.
  */
-export function publishOutput(staging, output, rename = renameSync) {
-  rmSync(output, { recursive: true, force: true });
+export function publishOutput(staging, output, { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`) } = {}) {
+  const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
+  let setAside = false;
+  try {
+    rename(output, aside);
+    setAside = true;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      remove(staging);
+      throw new Error(`the previous ${output} could not be set aside`, { cause: error });
+    }
+  }
   try {
     rename(staging, output);
   } catch (error) {
-    rmSync(staging, { recursive: true, force: true });
-    throw new Error(`another release build replaced ${output} while this one finished`, { cause: error });
+    remove(staging);
+    if (setAside) {
+      try {
+        rename(aside, output);
+      } catch {
+        warn(`release build: the previous output is kept at ${aside}`);
+      }
+    }
+    throw new Error(`${output} could not be replaced; another release build may have replaced it first`, { cause: error });
+  }
+  if (setAside) {
+    try {
+      remove(aside);
+    } catch {
+      warn(`release build: the previous output could not be removed from ${aside}`);
+    }
   }
 }
 

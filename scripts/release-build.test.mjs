@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -20,6 +20,8 @@ let root;
 let common;
 let first;
 let second;
+/** The worktrees registered for the CLI repository, its main one included. */
+const worktreeCount = () => git(root, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length;
 /** File contents without the CRLF line endings a Windows checkout gives them. */
 const text = (path) => readFileSync(path, "utf8").replaceAll("\r\n", "\n");
 
@@ -72,7 +74,7 @@ describe("release export", () => {
       removeExport(root, destination);
     }
     expect(existsSync(destination)).toBe(false);
-    expect(git(root, "worktree", "list", "--porcelain")).not.toContain(destination);
+    expect(worktreeCount()).toBe(1);
   });
 
   it("export every tracked file when the caller has a sparse checkout, and leave the caller's sparse checkout as it is", () => {
@@ -105,7 +107,8 @@ describe("release export", () => {
     const destination = join(scratch, "export");
     exportRelease(root, destination);
     removeExport(root, destination);
-    expect(git(root, "worktree", "list", "--porcelain")).toContain(other);
+    expect(worktreeCount()).toBe(2);
+    // A pruned registration would leave the moved-back worktree unusable.
     renameSync(moved, other);
     expect(git(other, "status", "--porcelain")).toBe("");
   });
@@ -117,31 +120,85 @@ describe("release export", () => {
 });
 
 describe("release output", () => {
-  it("replace the output with one complete staging directory", () => {
+  const directory = (name, content) => {
+    const path = join(scratch, name);
+    mkdirSync(join(path, "native"), { recursive: true });
+    writeFileSync(join(path, "main.js"), content);
+    writeFileSync(join(path, "native", "urx-native.node"), content);
+    return path;
+  };
+  const contents = (path) => [readFileSync(join(path, "main.js"), "utf8"), readFileSync(join(path, "native", "urx-native.node"), "utf8")];
+  const asides = () => readdirSync(scratch).filter((name) => name.startsWith("dist-release-previous-"));
+
+  it("replace the output with one complete staging directory and remove the previous one", () => {
     const output = join(scratch, "dist-release");
-    for (const content of ["first", "second"]) {
-      const staging = join(scratch, `staging-${content}`);
-      mkdirSync(staging);
-      writeFileSync(join(staging, "main.js"), content);
-      publishOutput(staging, output);
-      expect(readFileSync(join(output, "main.js"), "utf8")).toBe(content);
-      expect(existsSync(staging)).toBe(false);
-    }
+    publishOutput(directory("staging-1", "first"), output);
+    expect(contents(output)).toEqual(["first", "first"]);
+    publishOutput(directory("staging-2", "second"), output);
+    expect(contents(output)).toEqual(["second", "second"]);
+    expect(asides()).toEqual([]);
+    expect(existsSync(join(scratch, "staging-2"))).toBe(false);
   });
 
-  it("fail, and leave the other release's output, when another release put its output there first", () => {
-    const output = join(scratch, "dist-release");
-    const staging = join(scratch, "staging");
-    mkdirSync(staging);
-    writeFileSync(join(staging, "main.js"), "this release");
-    const raced = (from, to) => {
-      // Another release finishes between this one's removal and rename.
-      mkdirSync(to);
-      writeFileSync(join(to, "main.js"), "other release");
+  it("restore the previous output whole when the new one cannot be put in place", () => {
+    const output = directory("dist-release", "previous");
+    const staging = directory("staging", "new");
+    const failing = (from, to) => {
+      if (from === staging) throw Object.assign(new Error("busy"), { code: "EBUSY" });
       renameSync(from, to);
     };
-    expect(() => publishOutput(staging, output, raced)).toThrow(/another release build replaced/);
-    expect(readFileSync(join(output, "main.js"), "utf8")).toBe("other release");
+    expect(() => publishOutput(staging, output, { rename: failing })).toThrow(/could not be replaced/);
+    expect(contents(output)).toEqual(["previous", "previous"]);
     expect(existsSync(staging)).toBe(false);
+    expect(asides()).toEqual([]);
+  });
+
+  it("leave the other release's output when it got there first, and keep this release's previous output aside", () => {
+    const output = directory("dist-release", "previous");
+    const staging = directory("staging", "this");
+    const warnings = [];
+    const raced = (from, to) => {
+      if (from === staging) {
+        // Another release finishes between this one's set-aside and rename.
+        directory("dist-release", "other");
+      }
+      renameSync(from, to);
+    };
+    expect(() => publishOutput(staging, output, { rename: raced, warn: (message) => warnings.push(message) })).toThrow(/could not be replaced/);
+    expect(contents(output)).toEqual(["other", "other"]);
+    expect(asides()).toHaveLength(1);
+    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("keep the new output and only warn when the previous one cannot be removed", () => {
+    const output = directory("dist-release", "previous");
+    const warnings = [];
+    const stuck = (path) => {
+      if (path.includes("-previous-")) throw Object.assign(new Error("read-only"), { code: "EACCES" });
+      rmSync(path, { recursive: true, force: true });
+    };
+    publishOutput(directory("staging", "new"), output, { remove: stuck, warn: (message) => warnings.push(message) });
+    expect(contents(output)).toEqual(["new", "new"]);
+    expect(asides()).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("leave the previous output complete under its set-aside name when interrupted between the renames", () => {
+    const output = directory("dist-release", "previous");
+    const staging = directory("staging", "new");
+    const interrupted = (from, to) => {
+      if (from === staging) throw new Error("interrupted");
+      renameSync(from, to);
+    };
+    // Restoring is part of the same failure path; without it, the set-aside copy is complete.
+    const noRestore = (from, to) => {
+      if (from.includes("-previous-")) throw new Error("interrupted again");
+      interrupted(from, to);
+    };
+    expect(() => publishOutput(staging, output, { rename: noRestore, warn: () => {} })).toThrow();
+    expect(existsSync(output)).toBe(false);
+    expect(asides()).toHaveLength(1);
+    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
   });
 });
