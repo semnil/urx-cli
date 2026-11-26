@@ -8,12 +8,14 @@ import {
   dryRunSetting,
   OperationContext,
   operationFailureOf,
+  previewSetting,
   readSetting,
   validateSetting,
   writeSetting,
   type OperationFailure,
   type Reading,
   type VerifiedPlan,
+  type WritePlan,
   type WriteProgress,
   type WriteResult,
 } from "@urx/device-control/operations";
@@ -22,11 +24,11 @@ import { CommandRun } from "./command-run.js";
 import { connect, disconnect, type VerifiedDevice } from "./connect.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { ABANDONED, type CommandInterruption } from "./interrupts.js";
-import { addonFailure, operationFailure } from "./messages.js";
+import { addonFailure, failure, operationFailure } from "./messages.js";
 import type { AddonCheck } from "./native/addon.js";
 import { AddonTransport } from "./native/transport.js";
 import type { OutputStream } from "./output.js";
-import { baseExitCode, EXIT, type ResultError } from "./result.js";
+import { baseExitCode, EXIT, type CauseCode, type ResultError } from "./result.js";
 import { isSupported, parseValue, valueJson, valueRuleOf, valueText } from "./values.js";
 
 export interface SettingIo {
@@ -86,6 +88,7 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
   let reading: Reading<unknown> | null = null;
   let plan: VerifiedPlan<unknown> | WriteResult<unknown> | null = null;
   let progress: WriteProgress<unknown> | null = null;
+  let intended: WritePlan<unknown> | null = null;
 
   const check = run.first() === null ? io.addon() : null;
   if (check !== null && !check.ok) run.stop(addonFailure(check.problem));
@@ -102,22 +105,38 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
         const executing = run.mark();
         const stopped = (error: unknown) => {
           const operation = operationFailureOf(error);
-          if (operation !== undefined) {
-            // Only a write's own failure carries write evidence.
-            const evidence = operation.progress as WriteProgress<unknown> | null;
-            if (verb === "set" && progress === null && evidence !== null && typeof evidence === "object" && "outcome" in evidence) progress = evidence;
-            run.stop(operationFailure(operation as OperationFailure));
-          } else run.stop({ code: "internal_error", message: "An internal error occurred." });
+          if (operation === undefined) {
+            run.stop({ code: "internal_error", message: "An internal error occurred." });
+            return;
+          }
+          // Only a write's own failure carries write evidence.
+          const evidence = operation.progress as (WriteProgress<unknown> & { cleanup?: unknown }) | null;
+          if (verb === "set" && progress === null && evidence !== null && typeof evidence === "object" && "outcome" in evidence) progress = evidence;
+          // The cancellation a Ctrl+C asked for is that Ctrl+C, already the stop.
+          if (!(operation.code === "interrupted" && run.interruption.interrupted)) run.stop(operationFailure(operation as OperationFailure));
+          // A guard that could not release its own resources after failing reports that cause too.
+          if (typeof evidence?.cleanup === "string") run.stop(failure(evidence.cleanup as CauseCode));
         };
         try {
-          if (verb === "get") {
+          // No request starts once the command has stopped, as after a failed standard error (U5).
+          if (run.first() !== null) {
+            // Nothing to run.
+          } else if (verb === "get") {
             const read = await run.interruption.race(readSetting(context, binding.setting as never, target as never));
             if (read !== ABANDONED) reading = read;
-          } else if (dryRun) {
-            const preview = await run.interruption.race(dryRunSetting(context, binding.setting as never, target as never, requested as never));
-            if (preview !== ABANDONED) plan = preview as VerifiedPlan<unknown>;
           } else {
-            plan = await write(run, context, binding, target, requested, stopped);
+            // A dry run takes the same guard as the write it previews and sends no setting (F20-L-A, O13).
+            const operate = (): Promise<VerifiedPlan<unknown> | WriteResult<unknown>> =>
+              dryRun
+                ? (dryRunSetting(context, binding.setting as never, target as never, requested as never) as Promise<VerifiedPlan<unknown>>)
+                : (writeSetting(context, binding.setting as never, target as never, requested as never) as Promise<WriteResult<unknown>>);
+            // The plan without traffic, so a write that is never sent still shows what it would have sent.
+            try {
+              intended = previewSetting(device.model, binding.setting as never, target as never, requested as never) as WritePlan<unknown>;
+            } catch {
+              // The guarded path's own validation reports the refusal.
+            }
+            plan = await guarded(run, context, binding, target, requested, operate, stopped);
           }
         } catch (error) {
           stopped(error);
@@ -140,12 +159,12 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
     (error) => {
       const base = { mode: dryRun ? "dry_run" : "execute", device: deviceJson, target };
       if (verb === "get") {
-        const observed = error === null ? reading : null;
-        const data = { ...base, reading: observed === null ? null : { ...asReading(present(observed.value)), observed_at: observed.observedAt } };
-        const human = observed === null || !isSupported(rule) ? null : `${where}: ${valueText(rule, observed.value)} (observed ${observed.observedAt})\n`;
+        // A value read before a later failure, such as a failed close, is still the result's.
+        const data = { ...base, reading: reading === null ? null : { ...asReading(present(reading.value)), observed_at: reading.observedAt } };
+        const human = reading === null || !isSupported(rule) ? null : `${where}: ${valueText(rule, reading.value)} (observed ${reading.observedAt})\n`;
         return { data, human };
       }
-      const written = (plan ?? progress) as { requested: unknown; planned: unknown; outcome?: string } | null;
+      const written = (plan ?? progress ?? intended) as { requested: unknown; planned: unknown; outcome?: string } | null;
       const outcome = dryRun ? "not_sent" : (written?.outcome ?? "not_sent");
       const data = {
         ...base,
@@ -155,12 +174,16 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
         // A single setting's dry run has no earlier unsent write, so each condition has no step (O13).
         ...(dryRun ? { unverified: ((plan as VerifiedPlan<unknown> | null)?.unverified ?? []).map((code) => ({ code, message: UNVERIFIED, step: null })) } : {}),
       };
+      // The write's own outcome is shown whatever else failed, so acceptance, rejection and uncertainty stay apart (O2).
       let human: string | null = null;
-      if (error === null && written !== null && isSupported(rule)) {
+      if (written !== null && written.planned !== null && written.planned !== undefined && isSupported(rule)) {
         const asked = written.requested === written.planned ? "" : ` (requested ${valueText(rule, written.requested)})`;
-        human = dryRun
-          ? `${where}: would send ${valueText(rule, written.planned)}${asked}; nothing was sent (dry run)\n`
-          : `${where}: ${valueText(rule, written.planned)} accepted${asked}\n`;
+        const value = valueText(rule, written.planned);
+        if (dryRun) human = error === null ? `${where}: would send ${value}${asked}; nothing was sent (dry run)\n` : null;
+        else if (outcome === "accepted") human = `${where}: ${value} accepted${asked}\n`;
+        else if (outcome === "rejected") human = `${where}: ${value} rejected by the device${asked}\n`;
+        else if (outcome === "uncertain") human = `${where}: ${value} sent; whether the device accepted it is unknown${asked}\n`;
+        else human = `${where}: ${value} not sent${asked}\n`;
       }
       return { data, human };
     },
@@ -175,30 +198,34 @@ function asReading(value: unknown): Record<string, unknown> {
 }
 
 /**
- * The single write under the Console Lock guard (F20-L-A): the shared
- * validation first, so a refused write sends nothing, then the guard's
- * registration and fresh lock read, then the write. The guard is released
- * whatever happened, after the write's own failure is recorded, so that
- * failure stays the first (E3).
+ * A write, or its dry run, under the Console Lock guard (F20-L-A): the shared
+ * validation first, so a refused value sends nothing, then the guard's
+ * registration and fresh lock read, then `operate`. Nothing starts once the
+ * command has stopped. The guard is released whatever happened, after the
+ * operation's own failure is recorded, so that failure stays the first (E3).
  */
-async function write(
+async function guarded<T>(
   run: CommandRun,
   context: OperationContext,
   binding: SettingBinding,
   target: Target | null,
   requested: unknown,
+  operate: () => Promise<T>,
   stopped: (error: unknown) => void,
-): Promise<WriteResult<unknown> | null> {
+): Promise<T | null> {
   validateSetting(context.model, binding.setting as never, target as never, requested as never);
+  if (run.first() !== null) return null;
   const opened = await run.interruption.race(ConsoleLockGuard.open(context));
   if (opened === ABANDONED) return null;
-  let result: WriteResult<unknown> | null = null;
+  let result: T | null = null;
   try {
-    const detach = await run.interruption.race(opened.begin(context));
-    if (detach !== ABANDONED) {
+    const detach = run.first() === null ? await run.interruption.race(opened.begin(context)) : null;
+    if (detach !== null && detach !== ABANDONED) {
       try {
-        const written = await run.interruption.race(writeSetting(context, binding.setting as never, target as never, requested as never));
-        if (written !== ABANDONED) result = written as WriteResult<unknown>;
+        if (run.first() === null) {
+          const done = await run.interruption.race(operate());
+          if (done !== ABANDONED) result = done;
+        }
       } finally {
         detach();
       }
@@ -206,7 +233,7 @@ async function write(
   } catch (error) {
     stopped(error);
   }
-  // A release that fails is reported beside the write's outcome; it changes no write evidence.
+  // A release that fails is reported beside the operation's outcome; it changes no write evidence.
   const released = await run.interruption.race(opened.release().then(() => null, (error: unknown) => error));
   if (released !== ABANDONED && released !== null) {
     const operation = operationFailureOf(released);

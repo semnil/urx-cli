@@ -30,7 +30,10 @@ class Stops {
   }
 }
 
-/** What a decided result contributes: its record's data, and its human-readable text when it has no error. */
+/**
+ * What a decided result contributes: its record's data, and its human-readable
+ * text, which a failed result can have too, such as a write's outcome.
+ */
 export interface Outcome {
   readonly data: Readonly<Record<string, unknown>> | null;
   readonly human: string | null;
@@ -111,8 +114,9 @@ export class CommandRun {
     const error = this.first();
     const outcome = decide(error);
     const record = { type: "result" as const, command, data: outcome.data, error };
-    // JSON carries a failure in its record; human-readable output reports it on standard error.
-    const text = json ? jsonLine(record) : error === null ? outcome.human : null;
+    // JSON carries a failure in its record; human-readable output reports it on standard error,
+    // beside whatever the result still has to show.
+    const text = json ? jsonLine(record) : outcome.human;
     const written = text === null ? null : await interruption.race(writeWithDeadline(stdout, text));
     if (written === ABANDONED) return EXIT.interrupted;
     // A failed write of the result stops the command where the CLI detects it, after any earlier stop.

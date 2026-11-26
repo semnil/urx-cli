@@ -61,6 +61,17 @@ describe("the setting commands (K35, F03-H)", () => {
     expect(parse(["channel", "fader", "get", "--channel", "1", "--dry-run"], "one-shot")).toMatchObject({ kind: "error" });
   });
 
+  it("select a device and choose JSON only where the line may (D13, O8)", () => {
+    const get = ["channel", "on", "get", "--channel", "1"];
+    expect(parse([...get, "--device", "x"], "one-shot")).toMatchObject({ kind: "command" });
+    expect(parse([...get, "--device", "x"], "console")).toMatchObject({ kind: "error" });
+    expect(parse([...get, "--device", "x"], "command-file")).toMatchObject({ kind: "error" });
+    expect(parse([...get, "--json"], "console")).toMatchObject({ kind: "command" });
+    expect(parse([...get, "--json"], "command-file")).toMatchObject({ kind: "error" });
+    expect(renderHelp(["channel", "on", "get"], "console")).not.toContain("--device");
+    expect(renderHelp(["channel", "on", "get"], "command-file")).not.toContain("--json");
+  });
+
   it("name a stereo channel by its first number in help", () => {
     const help = renderHelp(["channel", "fader", "get"], "one-shot");
     expect(help).toContain("5 (CH 5/6)");

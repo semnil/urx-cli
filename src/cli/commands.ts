@@ -67,6 +67,12 @@ const ONE_SHOT_DRY_RUN: ArgumentSpec = Object.freeze({
   modes: Object.freeze(["one-shot"] as const),
 });
 
+/** A setting line selects no device: the console's and the command file's connection is the session's (D13). */
+const SETTING_DEVICE: ArgumentSpec = Object.freeze({ ...DEVICE_ARGUMENT, modes: Object.freeze(["one-shot"] as const) });
+
+/** `--json` on a setting line in the console; a command file's output format is the whole file's (O8). */
+const SETTING_JSON: ArgumentSpec = Object.freeze({ ...JSON_FLAG, modes: Object.freeze(["one-shot", "console"] as const) });
+
 const command = (spec: CommandSpec): CommandSpec =>
   Object.freeze({ ...spec, path: Object.freeze([...spec.path]), modes: Object.freeze([...spec.modes]), arguments: Object.freeze([...spec.arguments]) });
 
@@ -78,12 +84,12 @@ function settingCommands(setting: SettingBinding): CommandSpec[] {
   }
   const modes: Mode[] = ["one-shot", "console", "command-file"];
   return [
-    command({ path: [...setting.path, "get"], summary: `Read ${lowerFirst(setting.summary)}`, modes, arguments: [...target, DEVICE_ARGUMENT, JSON_FLAG, VERBOSE_FLAG] }),
+    command({ path: [...setting.path, "get"], summary: `Read ${lowerFirst(setting.summary)}`, modes, arguments: [...target, SETTING_DEVICE, SETTING_JSON, VERBOSE_FLAG] }),
     command({
       path: [...setting.path, "set"],
       summary: `Write ${lowerFirst(setting.summary)}`,
       modes,
-      arguments: [...target, { name: "value", kind: "value", placeholder: setting.placeholder, description: setting.value, required: true }, DEVICE_ARGUMENT, JSON_FLAG, VERBOSE_FLAG, ONE_SHOT_DRY_RUN],
+      arguments: [...target, { name: "value", kind: "value", placeholder: setting.placeholder, description: setting.value, required: true }, SETTING_DEVICE, SETTING_JSON, VERBOSE_FLAG, ONE_SHOT_DRY_RUN],
     }),
   ];
 }
