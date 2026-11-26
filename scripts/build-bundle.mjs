@@ -23,7 +23,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describeFiles, filesUnder, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { describeFiles, filesUnder, isRecordedPath, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
@@ -133,6 +133,10 @@ export function assemble({ release, releaseFiles, node, notices, staging, platfo
   };
   const launcher = `launcher/urx${platform.exe}`;
   const addon = "native/urx-native.node";
+  // Each named file is one file inside `release`, and lands in one place inside `staging`.
+  const bad = releaseFiles.find((path) => !isRecordedPath(path));
+  if (bad !== undefined) throw new Error(`the release output's record names a path outside it: ${JSON.stringify(bad)}`);
+  if (new Set(releaseFiles.map((path) => path.toLowerCase())).size !== releaseFiles.length) throw new Error("the release output's record names a file twice");
   for (const required of [launcher, addon, "main.js"]) {
     if (!releaseFiles.includes(required)) throw new Error(`the release output's record names no ${required}`);
   }
@@ -172,7 +176,7 @@ async function main(argv) {
     snapshotRelease(release, snapshot);
     // Only what the release build made goes into the bundle, each file as it was built.
     const recordedFiles = releaseRecord(snapshot);
-    if (recordedFiles === null) throw new Error(`${release} has no record of the files a release build made; run pnpm build:release`);
+    if (recordedFiles === null) throw new Error(`${release} has no well-formed record of the files a release build made; run pnpm build:release`);
     const problems = recordedProblems(snapshot, recordedFiles);
     if (problems.length > 0) throw new Error(`${release} is not as the release build made it: ${problems.join("; ")}`);
     const { BUILD_INFO } = await import(pathToFileURL(join(snapshot, "build-info.js")).href);

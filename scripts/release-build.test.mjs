@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { exportRelease, isRecordedPath, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -220,6 +220,47 @@ describe("release output", () => {
     const output = directory("dist-release", "previous");
     writeFileSync(join(output, "release-files.json"), JSON.stringify({ product: "urx-cli", output: "release", files: ["main.js"] }));
     expect(releaseRecord(output)).toBe(null);
+  });
+
+  it("read no record with a path that is not one file inside the output, or with one file named twice", () => {
+    const entry = (path) => ({ path, sha256: sha256(Buffer.from("previous")), size: 8 });
+    const record = (...paths) => {
+      const output = directory("dist-release", "previous");
+      writeFileSync(join(output, "release-files.json"), JSON.stringify({ product: "urx-cli", output: "release", files: paths.map(entry) }));
+      return releaseRecord(output);
+    };
+    expect(record("main.js", "native/urx-native.node")).toEqual([entry("main.js"), entry("native/urx-native.node")]);
+    for (const path of ["", "/main.js", "../main.js", "native/../main.js", "./main.js", "native//urx-native.node", "native/", "native\\urx-native.node", "C:/main.js", "main.js\u0000"]) {
+      expect(isRecordedPath(path), JSON.stringify(path)).toBe(false);
+      expect(record(path), JSON.stringify(path)).toBe(null);
+    }
+    expect(record("main.js", "main.js")).toBe(null);
+    expect(record("main.js", "MAIN.js")).toBe(null);
+    expect(record("main.js", "release-files.json")).toBe(null);
+  });
+
+  it("read a recorded path only as a regular file under the output, reached through no link", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    // A directory where the record names a file is missing.
+    rmSync(join(output, "main.js"));
+    mkdirSync(join(output, "main.js"));
+    expect(recordedProblems(output, files)).toEqual(["main.js is missing"]);
+    // A path the record could not have named, outside the output, is never read.
+    writeFileSync(join(scratch, "outside.js"), "previous");
+    expect(recordedProblems(output, [{ path: "../outside.js", sha256: sha256(Buffer.from("previous")), size: 8 }])).toEqual(["../outside.js is missing"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuse an output that holds a link, where a recorded file could be read through it", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    rmSync(join(output, "native"), { recursive: true });
+    mkdirSync(join(scratch, "elsewhere"));
+    writeFileSync(join(scratch, "elsewhere", "urx-native.node"), "previous");
+    symlinkSync(join(scratch, "elsewhere"), join(output, "native"));
+    expect(() => recordedProblems(output, files)).toThrow(/may hold no link/);
   });
 
 });

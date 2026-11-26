@@ -25,7 +25,7 @@ const fail = (message) => {
 
 const output = resolve(process.argv[2] ?? "dist-release");
 const recorded = releaseRecord(output);
-if (recorded === null) fail("the output has no record of the files the release build made");
+if (recorded === null) fail("the output has no well-formed record of the files the release build made");
 const problems = recordedProblems(output, recorded);
 const unrecorded = filesUnder(output).filter((path) => path !== RELEASE_FILES && !recorded.some((file) => file.path === path));
 if (problems.length > 0 || unrecorded.length > 0) {

@@ -118,26 +118,50 @@ export function writeReleaseFiles(output) {
   writeFileSync(join(output, RELEASE_FILES), `${JSON.stringify({ product: "urx-cli", output: "release", files }, null, 2)}\n`);
 }
 
-const isFileRecord = (file) =>
-  typeof file?.path === "string" && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "") && Number.isSafeInteger(file?.size) && file.size >= 0;
+/**
+ * Whether `path` is a file path as `filesUnder` gives one: relative, with `/`
+ * between non-empty segments, none of them `.` or `..`, and no character that
+ * Windows cannot hold in a name, so it names one file inside the directory it
+ * is joined to on either platform.
+ */
+export function isRecordedPath(path) {
+  return typeof path === "string" && path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".." && !/[\\:*?"<>|\u0000-\u001f]/.test(segment));
+}
 
-/** The files the record at `path` says a release build made there, with their hashes, or null when it is not a release output. */
+const isFileRecord = (file) => isRecordedPath(file?.path) && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "") && Number.isSafeInteger(file?.size) && file.size >= 0;
+
+/**
+ * The files the record at `path` says a release build made there, with their
+ * hashes, or null when it is not a release output: a record whose paths are
+ * not each one file inside the output, or name one file twice (letter case
+ * aside, as the file systems of both platforms compare names), is not one.
+ */
 export function releaseRecord(path) {
   try {
     const record = JSON.parse(readFileSync(join(path, RELEASE_FILES), "utf8"));
     if (record?.product !== "urx-cli" || record?.output !== "release" || !Array.isArray(record.files) || !record.files.every(isFileRecord)) return null;
+    const names = new Set(record.files.map((file) => file.path.toLowerCase()));
+    if (names.size !== record.files.length || names.has(RELEASE_FILES)) return null;
     return record.files;
   } catch {
     return null;
   }
 }
 
-/** How the files under `root` differ from `files` (path, SHA-256, size): each one missing or changed, by path. */
+/**
+ * How the files under `root` differ from `files` (path, SHA-256, size): each
+ * one missing or changed, by path. A recorded path is read only when it is a
+ * regular file under `root` reached through no link, as `filesUnder` lists
+ * them; anything else at that path is missing. A link anywhere under `root`
+ * throws, as in `filesUnder`.
+ */
 export function recordedProblems(root, files) {
+  const present = new Set(filesUnder(root));
   const problems = [];
   for (const file of files) {
     let bytes;
     try {
+      if (!present.has(file.path)) throw new Error("not a regular file under the root");
       bytes = readFileSync(join(root, ...file.path.split("/")));
     } catch {
       problems.push(`${file.path} is missing`);

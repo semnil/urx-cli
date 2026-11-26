@@ -100,6 +100,20 @@ describe("the installed bundle (K18, K38)", () => {
     expect(readFileSync(join(staging, "runtime", "node"), "utf8")).toBe("node");
   });
 
+  it("refuses a record path outside the release output, and a file named twice", () => {
+    const dir = scratch();
+    const release = join(dir, "release");
+    for (const path of ["main.js", "native/urx-native.node", "launcher/urx"]) write(release, path);
+    write(dir, "outside.js");
+    const lay = (...extra) => {
+      const staging = mkdtempSync(join(dir, "bundle-"));
+      assemble({ release, releaseFiles: ["main.js", "native/urx-native.node", "launcher/urx", ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
+    };
+    expect(() => lay("../outside.js")).toThrow(/a path outside it/);
+    expect(() => lay("/outside.js")).toThrow(/a path outside it/);
+    expect(() => lay("Main.js")).toThrow(/a file twice/);
+  });
+
   it("lists every file but the manifest itself, with its hash and size, after the identities", () => {
     const dir = scratch();
     write(dir, "b.txt", "bb");
