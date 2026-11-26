@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { closeConnection, discoverDevices, openDevice, selectDevice, type LifecycleAddon, type NativeConnection } from "./device.js";
+import { closeConnection, discoverDevices, openDevice, selectDevice, type LifecycleAddon, type NativeConnection, type NativeHandlers } from "./device.js";
+import { NotificationRouter } from "./notifications.js";
 
 const unused = () => {
   throw new Error("not used by these tests");
@@ -17,13 +18,15 @@ class FakeConnection implements NativeConnection {
   readonly adoptResult = unused;
   readonly failDelivery = unused;
   readonly terminate = unused;
+  readonly prepareSubscription = unused;
+  readonly adoptNotifications = unused;
   constructor(private readonly closing: () => Promise<unknown>) {}
   close() {
     return this.closing();
   }
 }
 
-const fake = (discover: () => Promise<unknown>, open: () => Promise<unknown> = () => Promise.resolve(null)): LifecycleAddon => ({
+const fake = (discover: () => Promise<unknown>, open: (deviceId: string, control: unknown, handlers: NativeHandlers) => Promise<unknown> = () => Promise.resolve(null)): LifecycleAddon => ({
   Control: class {
     cancel() {}
   },
@@ -68,12 +71,23 @@ describe("native lifecycle records", () => {
     expect(await discoverDevices(fake(() => Promise.reject(new Error("binding"))), control, false)).toEqual(internal);
   });
 
-  it("adopt only a connection object the addon created", async () => {
+  it("adopt only a connection object the addon created, opened with its notification router", async () => {
     const connection = new FakeConnection(() => Promise.resolve({ kind: "success", value: null }));
-    expect(await openDevice(fake(() => Promise.resolve(null), () => Promise.resolve({ kind: "success", value: connection })), control, "<id-a>")).toEqual({
-      kind: "success",
-      value: connection,
-    });
+    const handed: NativeHandlers[] = [];
+    const opened = await openDevice(
+      fake(
+        () => Promise.resolve(null),
+        (_id, _control, handlers) => (handed.push(handlers), Promise.resolve({ kind: "success", value: connection })),
+      ),
+      control,
+      "<id-a>",
+    );
+    if (opened.kind !== "success") throw new Error(JSON.stringify(opened));
+    expect(opened.value.connection).toBe(connection);
+    expect(opened.value.notifications).toBeInstanceOf(NotificationRouter);
+    // The router receives what the addon calls the handler with.
+    expect(Object.keys(handed[0] ?? {})).toEqual(["notifications"]);
+    expect(handed[0]?.notifications).toBe(opened.value.notifications.receive);
     const unconfirmed = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "connect" }, cleanup: { state: "incomplete", failure: null } };
     for (const value of [{ firmware: "x", close: () => Promise.resolve(null) }, null, "connection"]) {
       expect(await openDevice(fake(() => Promise.resolve(null), () => Promise.resolve({ kind: "success", value })), control, "<id-a>")).toEqual(unconfirmed);

@@ -1,5 +1,14 @@
+import { operationFailureOf } from "@urx/device-control/operations";
 import { describe, expect, it } from "vitest";
-import { AddonTransport, type NativeOperation, type NativeRequests } from "./transport.js";
+import { NotificationRouter, type NativeNotifications } from "./notifications.js";
+import { AddonTransport as Adapter, type NativeOperation, type NativeRequests, type NativeSubscription } from "./transport.js";
+
+/** An adapter with a router of its own, for tests that route nothing. */
+class AddonTransport extends Adapter {
+  constructor(connection: NativeRequests, notifications: NotificationRouter = new NotificationRouter()) {
+    super(connection, notifications);
+  }
+}
 
 function native(overrides: Partial<NativeRequests> = {}) {
   const calls: unknown[][] = [];
@@ -19,6 +28,9 @@ function native(overrides: Partial<NativeRequests> = {}) {
     adoptResult: () => true,
     failDelivery: () => Promise.resolve(true),
     terminate: () => Promise.resolve(true),
+    prepareSubscription: () => {
+      throw new Error("not used by this test");
+    },
     ...overrides,
   };
   return { connection, calls, operation };
@@ -86,8 +98,129 @@ describe("the addon transport", () => {
     await expect(new AddonTransport(native({ terminate: () => Promise.resolve(false) }).connection).terminate("t")).resolves.toBeUndefined();
   });
 
-  it("refuse a subscription admission by throwing", () => {
-    const transport = new AddonTransport(native().connection);
+});
+
+const complete = { state: "complete", failure: null };
+const success = { kind: "success", value: null };
+
+/** A native subscription answering activation and release with the given records. */
+function subscription(token: string, activation: unknown = success, release: unknown = success) {
+  const calls: unknown[] = [];
+  const native: NativeSubscription = {
+    token,
+    activate: (operation) => (calls.push(["activate", operation]), Promise.resolve(activation)),
+    release: () => (calls.push(["release"]), Promise.resolve(release)),
+  };
+  return { native, calls };
+}
+
+/** A router bound to a connection that acknowledges every batch. */
+function bound() {
+  const router = new NotificationRouter();
+  const native: NativeNotifications = { adoptNotifications: () => true, close: () => Promise.resolve(success) };
+  router.bind(native);
+  return router;
+}
+
+const batch = (ticket: string, recipients: string[], value: string) => ({
+  generation: "1",
+  batchTicket: ticket,
+  records: [{ recipients, receivedAtMs: "1700000000000", payload: { kind: "numeric", paramId: 140, x: "0", y: "-1", value } }],
+});
+
+const failureOf = (promise: Promise<unknown>) => promise.then(
+  () => undefined,
+  (error: unknown) => operationFailureOf(error),
+);
+
+describe("subscriptions through the addon transport", () => {
+  it("admit parameter addresses with their family, and deliver the token's notifications from activation until release", async () => {
+    const admitted: unknown[] = [];
+    const { native: sub, calls } = subscription("token-1");
+    const { connection, operation } = native({ prepareSubscription: (addresses) => (admitted.push(addresses), { kind: "success", value: sub }) });
+    const router = bound();
+    const transport = new AddonTransport(connection, router);
+    const delivered: unknown[] = [];
+    const handle = transport.prepareSubscription([address], transport.createOperation(), (notification) => delivered.push(notification));
+    expect(admitted).toEqual([[{ family: "parameter", paramId: 140, x: "0", y: "-1" }]]);
+    router.receive(batch("batch-1", ["token-1"], "1"));
+    expect(delivered).toEqual([]);
+    await handle.activate();
+    expect(calls).toEqual([["activate", operation]]);
+    router.receive(batch("batch-2", ["token-1"], "2"));
+    expect(delivered).toEqual([{ kind: "numeric", address, value: "2" }]);
+    const releases = [handle.release(), handle.release()];
+    expect(releases[0]).toBe(releases[1]);
+    await Promise.all(releases);
+    router.receive(batch("batch-3", ["token-1"], "3"));
+    expect(delivered).toHaveLength(1);
+    expect(calls).toEqual([["activate", operation], ["release"]]);
+  });
+
+  it("throw an admission refusal with its cause and cleanup", () => {
+    const refusal = { kind: "failure", failure: { kind: "cause", code: "precondition_failed", phase: "admission" }, cleanup: complete };
+    const transport = new AddonTransport(native({ prepareSubscription: () => refusal }).connection);
+    let thrown: unknown;
+    try {
+      transport.prepareSubscription([address], transport.createOperation(), () => {});
+    } catch (error) {
+      thrown = error;
+    }
+    expect(operationFailureOf(thrown)).toEqual({ code: "precondition_failed", phase: "admission", progress: { cleanup: complete } });
+  });
+
+  it("refuse an untrusted admission as internal_error: a foreign operation, a binding failure or an invalid record", () => {
+    const internal = { code: "internal_error", phase: "admission", progress: null };
+    const attempt = (transport: Adapter, operation = transport.createOperation()) => {
+      try {
+        transport.prepareSubscription([address], operation, () => {});
+      } catch (error) {
+        return operationFailureOf(error);
+      }
+      return undefined;
+    };
+    let admitted = 0;
+    const counting = native({ prepareSubscription: () => (admitted++, { kind: "success", value: subscription("token-1").native }) }).connection;
+    expect(attempt(new AddonTransport(counting), new AddonTransport(native().connection).createOperation())).toEqual(internal);
+    expect(admitted).toBe(0);
+    expect(attempt(new AddonTransport(native().connection))).toEqual(internal);
+    for (const record of [null, { kind: "success", value: { token: "", activate() {}, release() {} } }, { kind: "success", value: { token: "t" } }, { kind: "failure" }]) {
+      expect(attempt(new AddonTransport(native({ prepareSubscription: () => record }).connection)), JSON.stringify(record)).toEqual(internal);
+    }
+  });
+
+  it("give up a subscription whose token is already routed", () => {
+    const first = subscription("token-1");
+    const second = subscription("token-1");
+    const subs = [first.native, second.native];
+    const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: subs.shift() }) }).connection);
+    transport.prepareSubscription([address], transport.createOperation(), () => {});
     expect(() => transport.prepareSubscription([address], transport.createOperation(), () => {})).toThrow();
+    expect(second.calls).toEqual([["release"]]);
+  });
+
+  it("reject a failed activation or release with its cause, and an untrusted record as internal_error", async () => {
+    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription" }, cleanup: complete };
+    const lost = {
+      kind: "failure",
+      failure: { kind: "cause", code: "connection_lost", phase: "subscription" },
+      cleanup: { state: "connection_closed", failure: null },
+    };
+    const make = (activation: unknown, release: unknown = success) => {
+      const sub = subscription("token-1", activation, release).native;
+      const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: sub }) }).connection);
+      return transport.prepareSubscription([address], transport.createOperation(), () => {});
+    };
+    expect(await failureOf(make(rejected).activate())).toEqual({ code: "device_rejected", phase: "response", progress: { cleanup: complete } });
+    expect(await failureOf(make(success, lost).release())).toEqual({
+      code: "connection_lost",
+      phase: "send",
+      progress: { cleanup: { state: "connection_closed", failure: null } },
+    });
+    const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
+    expect(await failureOf(make(cancelled).activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete } });
+    for (const record of [{ kind: "success", value: 1 }, {}, null]) {
+      expect(await failureOf(make(record).activate()), JSON.stringify(record)).toEqual({ code: "internal_error", phase: "send", progress: null });
+    }
   });
 });

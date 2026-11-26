@@ -37,10 +37,11 @@ async function connected(unit: Omit<PeerUnit, "id" | "model">) {
   await device.discoverDevices(addon, control, false, peer.listPort);
   const opened = await device.openDevice(addon, control, "<id-a>");
   if (opened.kind !== "success") throw new Error(JSON.stringify(opened));
-  close = () => device.closeConnection(opened.value);
-  const transport = new transportModule.AddonTransport(opened.value);
+  const { connection, notifications } = opened.value;
+  close = () => device.closeConnection(connection);
+  const transport = new transportModule.AddonTransport(connection, notifications);
   const opening = peer.requests.length;
-  return { transport, operations, connection: opened.value, newRequests: () => (peer as Peer).requests.slice(opening) };
+  return { transport, operations, connection, notifications, newRequests: () => (peer as Peer).requests.slice(opening) };
 }
 
 describe("reads and writes through urx-device's operations", () => {
@@ -145,14 +146,14 @@ describe("the native request records", () => {
   });
 
   it("keep the connection after an undeliverable unsent result, and give two adapters over one connection distinct tickets", async () => {
-    const { transport, connection, newRequests } = await connected({ parameters: { "140:0:0": 1 } });
+    const { transport, connection, notifications, newRequests } = await connected({ parameters: { "140:0:0": 1 } });
     const cancelled = transport.createOperation();
     cancelled.cancel();
     const unsentTicket = transport.newRequestTicket();
     expect(await transport.getNumeric(address, { operation: cancelled, requestTicket: unsentTicket })).toMatchObject({ evidence: { state: "not_sent" } });
     await transport.failDelivery(unsentTicket);
     const { AddonTransport } = (await import(new URL("native/transport.js", dist).href)) as typeof import("../src/native/transport.js");
-    const other = new AddonTransport(connection);
+    const other = new AddonTransport(connection, notifications);
     const tickets = new Set([transport.newRequestTicket(), other.newRequestTicket(), transport.newRequestTicket(), other.newRequestTicket()]);
     expect(tickets.size).toBe(4);
     const operation = other.createOperation();

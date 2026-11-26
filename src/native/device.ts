@@ -9,6 +9,7 @@ import {
   type DiscoveredDevice,
   type LifecycleOutcome,
 } from "@urx/device-control/operations";
+import { NotificationRouter, type NativeNotifications } from "./notifications.js";
 import type { NativeRequests } from "./transport.js";
 
 /** The addon's control object (K37): created before discovery, cancelled by the CLI. */
@@ -16,10 +17,16 @@ export interface NativeControl {
   cancel(): void;
 }
 
-/** The addon's connection object (K31): its lifecycle and its requests. */
-export interface NativeConnection extends NativeRequests {
+/** The addon's connection object (K31): its lifecycle, requests and subscriptions. */
+export interface NativeConnection extends NativeRequests, NativeNotifications {
   readonly firmware: string | null;
   close(): Promise<unknown>;
+}
+
+/** The handlers a connection is opened with (K37). */
+export interface NativeHandlers {
+  /** Receives each notification batch; it must not throw. */
+  readonly notifications: (batch: unknown) => void;
 }
 
 /** The lifecycle exports of the addon. */
@@ -27,7 +34,13 @@ export interface LifecycleAddon {
   readonly Control: new () => NativeControl;
   readonly Connection: abstract new (...args: never[]) => NativeConnection;
   discover(control: NativeControl, metadata: boolean, listPort?: number): Promise<unknown>;
-  openConnection(deviceId: string, control: NativeControl): Promise<unknown>;
+  openConnection(deviceId: string, control: NativeControl, handlers: NativeHandlers): Promise<unknown>;
+}
+
+/** An opened connection and the router its notification batches go to. */
+export interface DeviceConnection {
+  readonly connection: NativeConnection;
+  readonly notifications: NotificationRouter;
 }
 
 /** The failure the CLI reports for a record it could not trust. */
@@ -75,14 +88,22 @@ export function selectDevice(devices: readonly DiscoveredDevice[], requestedId: 
   return { kind: "none", code: devices.length === 0 ? "device_not_found" : "multiple_devices" };
 }
 
-/** Opens the device `control`'s discovery found, verifying its identity (N2). */
-export function openDevice(addon: LifecycleAddon, control: NativeControl, deviceId: string): Promise<LifecycleOutcome<NativeConnection>> {
-  return settled(
-    () => addon.openConnection(deviceId, control),
+/**
+ * Opens the device `control`'s discovery found, verifying its identity (N2).
+ * Its notification router exists before the open starts, so no batch can
+ * arrive before there is somewhere to route it (K37).
+ */
+export async function openDevice(addon: LifecycleAddon, control: NativeControl, deviceId: string): Promise<LifecycleOutcome<DeviceConnection>> {
+  const notifications = new NotificationRouter();
+  const outcome = await settled(
+    () => addon.openConnection(deviceId, control, { notifications: notifications.receive }),
     (record) => validateLifecycle(record, (value) => (value instanceof addon.Connection ? value : undefined)),
     // An open that could not be confirmed may have left a connection behind.
     internal<NativeConnection>("connect", "incomplete"),
   );
+  if (outcome.kind === "failure") return outcome;
+  notifications.bind(outcome.value);
+  return { kind: "success", value: { connection: outcome.value, notifications } };
 }
 
 /** Closes a connection (K4, N2); repeated calls join the same close. */
