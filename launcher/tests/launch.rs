@@ -189,11 +189,14 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
     let (root, maintenance) = installation("gate");
     let ready = root.join("ready");
     let release = root.join("release");
+    let held = root.join("held");
     let done = root.join("done");
-    // The runtime runs until the test releases it, so the last check is made while it still runs.
+    let gate = maintenance.join("gate.lock");
+    // The runtime runs until the test releases it, and checks the hold itself as its last step.
     let arguments = [
         format!("ready={}", ready.display()),
         format!("release={}", release.display()),
+        format!("held={},{}", gate.display(), held.display()),
         format!("done={}", done.display()),
     ];
     let mut launcher = launched(
@@ -201,7 +204,6 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
         &maintenance,
         &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
     );
-    let gate = maintenance.join("gate.lock");
     // Checked once the runtime itself runs: the hold has survived the handoff.
     assert!(
         wait_for(&ready, Duration::from_secs(10)),
@@ -222,17 +224,16 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
             "maintenance could start once only the launcher had ended"
         );
     }
-    // Still held after the runtime has run for a while, just before it may exit.
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(!done.exists(), "the runtime ended before it was released");
-    assert!(
-        exclusive_refused(&gate),
-        "maintenance could start before the runtime exited"
-    );
     fs::write(&release, b"").unwrap();
     assert!(
         wait_for(&done, Duration::from_secs(10)),
         "the runtime did not finish"
+    );
+    // The runtime's own last check, just before it exits, leaves no gap after the test's.
+    assert_eq!(
+        fs::read_to_string(&held).unwrap(),
+        "held",
+        "the runtime had lost the gate before it exited"
     );
     // On Windows this is the killed launcher's status, already reaped.
     let status = launcher.wait().unwrap();

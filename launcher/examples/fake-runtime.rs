@@ -2,7 +2,9 @@
 //! argument on its own line, then the names of any `NODE_` variables it was
 //! given and whether `KEPT` arrived. With `ready=<path>` it creates that file
 //! once it runs; with `release=<path>` it waits until that file exists; it
-//! sleeps for `sleep=<ms>`, creates `done=<path>` and exits
+//! sleeps for `sleep=<ms>`; with `held=<gate>,<report>` it then tries an
+//! exclusive hold on the gate itself and writes `held` to the report when it
+//! is refused, `free` when it is not; it creates `done=<path>` and exits
 //! with `exit=<code>`, all read from its arguments.
 
 fn main() {
@@ -42,8 +44,40 @@ fn main() {
     if let Some(ms) = value("sleep") {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
+    // The last step before exiting: is the gate still held by this process?
+    if let Some(spec) = path("held") {
+        let (gate, report) = spec.split_once(',').unwrap();
+        let held = if exclusive_refused(std::path::Path::new(gate)) {
+            "held"
+        } else {
+            "free"
+        };
+        std::fs::write(report, held).unwrap();
+    }
     if let Some(done) = path("done") {
         std::fs::write(done, b"").unwrap();
     }
     std::process::exit(value("exit").unwrap_or(0) as i32);
+}
+
+/// Whether an exclusive hold on `gate` is refused. A new open of the gate is a
+/// separate holder from the inherited one, so this process's own shared hold
+/// refuses it while that hold lasts.
+#[cfg(unix)]
+fn exclusive_refused(gate: &std::path::Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(gate).unwrap();
+    // SAFETY: the descriptor is open for this call; the lock does not wait.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+}
+
+/// Whether an exclusive open of `gate` is refused, as maintenance's would be.
+#[cfg(windows)]
+fn exclusive_refused(gate: &std::path::Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(gate)
+        .is_err()
 }
