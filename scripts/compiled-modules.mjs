@@ -1,5 +1,5 @@
-// The modules a release's commits compile to, for the release output and
-// bundle checks: one `.js` file for every `.ts` file under the CLI's `src` and
+// The modules a release's commits compile to, for the bundle build and the
+// release output and bundle checks: one `.js` file for every `.ts` file under the CLI's `src` and
 // under the common package's `packages/control/src`, tests and declarations
 // left out, as the two tsconfig.json files include and exclude them. A copy
 // is checked to hold exactly these, so one that lacks a module a command
@@ -37,6 +37,30 @@ export function compiledModules(root, build) {
     cli: modulesOf(root, build.appCommit, "src"),
     common: modulesOf(join(root, COMMON_PATH), build.commonCommit, "packages/control/src"),
   };
+}
+
+/** Where the common package's compiled modules lie, relative to the compiled CLI. */
+export const COMMON_DIST = "node_modules/@urx/device-control/dist/";
+
+/**
+ * How the `.js` files among `paths` (relative to the compiled CLI) differ
+ * from the modules `expected` names, the CLI's, the common package's and no
+ * other package's: one message for each group that differs, none when they
+ * agree.
+ */
+export function moduleProblems(paths, expected) {
+  const scripts = paths.filter((path) => path.endsWith(".js"));
+  const groups = [
+    ["CLI", scripts.filter((path) => !path.startsWith("node_modules/")), expected.cli],
+    ["common package", scripts.filter((path) => path.startsWith(COMMON_DIST)).map((path) => path.slice(COMMON_DIST.length)), expected.common],
+    ["other package", scripts.filter((path) => path.startsWith("node_modules/") && !path.startsWith(COMMON_DIST)), []],
+  ];
+  return groups.flatMap(([name, present, wanted]) => {
+    const { missing, extra } = moduleDifference(present, wanted);
+    return missing.length > 0 || extra.length > 0
+      ? [`the ${name} modules are not those its commit compiles to; missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}`]
+      : [];
+  });
 }
 
 /** What `present` lacks of `expected` and holds beyond it, both sorted. */

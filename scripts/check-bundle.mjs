@@ -16,10 +16,9 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { filesUnder, platformOf, sha256 } from "./build-bundle.mjs";
-import { compiledModules, moduleDifference } from "./compiled-modules.mjs";
+import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const COMMON_DIST = "node_modules/@urx/device-control/dist/";
 
 const bundle = resolve(process.argv[2] ?? "dist-bundle");
 const platform = platformOf();
@@ -79,17 +78,8 @@ try {
   const { BUILD_INFO } = await import(pathToFileURL(join(APP, "build-info.js")).href);
   const expected = compiledModules(root, BUILD_INFO);
   const scripts = filesUnder(APP).filter((path) => path.endsWith(".js"));
-  const groups = [
-    ["CLI", scripts.filter((path) => !path.startsWith("node_modules/")), expected.cli],
-    ["common package", scripts.filter((path) => path.startsWith(COMMON_DIST)).map((path) => path.slice(COMMON_DIST.length)), expected.common],
-    ["other package", scripts.filter((path) => path.startsWith("node_modules/") && !path.startsWith(COMMON_DIST)), []],
-  ];
-  for (const [name, present, wanted] of groups) {
-    const { missing, extra } = moduleDifference(present, wanted);
-    if (missing.length > 0 || extra.length > 0) {
-      fail(`the ${name} modules are not those its commit compiles to; missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}`);
-    }
-  }
+  const moduleIssues = moduleProblems(scripts, expected);
+  if (moduleIssues.length > 0) fail(moduleIssues.join("; "));
   const modules = scripts.map((path) => pathToFileURL(join(APP, path)).href);
   node([
     "--input-type=module",

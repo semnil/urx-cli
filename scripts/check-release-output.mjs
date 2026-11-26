@@ -15,10 +15,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { filesUnder } from "./build-bundle.mjs";
 import { recordedProblems, RELEASE_FILES, releaseRecord } from "./release-build.mjs";
-import { compiledModules, moduleDifference } from "./compiled-modules.mjs";
+import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const COMMON_DIST = "node_modules/@urx/device-control/dist/";
 const fail = (message) => {
   throw new Error(`release output check: ${message}`);
 };
@@ -44,17 +43,8 @@ try {
   const { BUILD_INFO } = await import(pathToFileURL(join(APP, "build-info.js")).href);
   const expected = compiledModules(root, BUILD_INFO);
   const scripts = filesUnder(APP).filter((path) => path.endsWith(".js"));
-  const groups = [
-    ["CLI", scripts.filter((path) => !path.startsWith("node_modules/")), expected.cli],
-    ["common package", scripts.filter((path) => path.startsWith(COMMON_DIST)).map((path) => path.slice(COMMON_DIST.length)), expected.common],
-    ["other package", scripts.filter((path) => path.startsWith("node_modules/") && !path.startsWith(COMMON_DIST)), []],
-  ];
-  for (const [name, present, wanted] of groups) {
-    const { missing, extra } = moduleDifference(present, wanted);
-    if (missing.length > 0 || extra.length > 0) {
-      fail(`the ${name} modules are not those its commit compiles to; missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}`);
-    }
-  }
+  const moduleIssues = moduleProblems(scripts, expected);
+  if (moduleIssues.length > 0) fail(moduleIssues.join("; "));
   const modules = scripts.map((path) => pathToFileURL(join(APP, path)).href);
   const node = (args) => execFileSync(process.execPath, args, { cwd: scratch, encoding: "utf8" });
   node([join(copy, "main.js"), "--help"]);

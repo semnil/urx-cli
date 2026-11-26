@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describeFiles, filesUnder, isRecordedPath, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
@@ -179,7 +180,13 @@ async function main(argv) {
     if (recordedFiles === null) throw new Error(`${release} has no well-formed record of the files a release build made; run pnpm build:release`);
     const problems = recordedProblems(snapshot, recordedFiles);
     if (problems.length > 0) throw new Error(`${release} is not as the release build made it: ${problems.join("; ")}`);
+    const recordedPaths = recordedFiles.map((file) => file.path);
+    // The build information is read only as recorded and checked above.
+    if (!recordedPaths.includes("build-info.js")) throw new Error(`${release}'s record names no build-info.js; run pnpm build:release`);
     const { BUILD_INFO } = await import(pathToFileURL(join(snapshot, "build-info.js")).href);
+    // The record names exactly the modules the release's commits compile to, so the bundle holds every one.
+    const moduleIssues = moduleProblems(recordedPaths, compiledModules(root, BUILD_INFO));
+    if (moduleIssues.length > 0) throw new Error(`${release}'s record is not of the release its commits compile to: ${moduleIssues.join("; ")}`);
     // The checked bytes, written where nothing else replaces them, are what is extracted.
     const archiveCopy = join(scratch, recorded.file);
     writeFileSync(archiveCopy, archive);
@@ -199,7 +206,7 @@ async function main(argv) {
     try {
       assemble({
         release: snapshot,
-        releaseFiles: recordedFiles.map((file) => file.path),
+        releaseFiles: recordedPaths,
         node,
         staging,
         platform,
