@@ -18,6 +18,10 @@ export interface OutputStream {
 
 export type OutputFailure = "output_error" | "output_timeout";
 
+/** The standard-error line that reports a failure to write standard output. */
+export const stdoutFailureLine = (failure: OutputFailure): string =>
+  `urx: standard output ${failure === "output_timeout" ? "did not accept the output within 5 seconds" : "could not be written"}.\n`;
+
 /**
  * Resolves with `null` once the write completes, or with the failure that ended
  * it. Whatever arrives at or after the deadline, success or error, is a timeout:
