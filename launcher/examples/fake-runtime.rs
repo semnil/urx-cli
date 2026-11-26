@@ -2,9 +2,9 @@
 //! argument on its own line, then the names of any `NODE_` variables it was
 //! given and whether `KEPT` arrived. With `ready=<path>` it creates that file
 //! once it runs; with `release=<path>` it waits until that file exists; it
-//! sleeps for `sleep=<ms>`; with `held=<gate>,<report>` it then tries an
-//! exclusive hold on the gate itself and writes `held` to the report when it
-//! is refused, `free` when it is not; it creates `done=<path>` and exits
+//! sleeps for `sleep=<ms>`; with `gate=<path>` and `held=<report>` it then
+//! tries an exclusive hold on the gate itself and writes `held` to the report
+//! when it is refused, `free` when it is not; it creates `done=<path>` and exits
 //! with `exit=<code>`, all read from its arguments.
 
 fn main() {
@@ -45,9 +45,8 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     // The last step before exiting: is the gate still held by this process?
-    if let Some(spec) = path("held") {
-        let (gate, report) = spec.split_once(',').unwrap();
-        let held = if exclusive_refused(std::path::Path::new(gate)) {
+    if let (Some(gate), Some(report)) = (path("gate"), path("held")) {
+        let held = if exclusive_refused(std::path::Path::new(&gate)) {
             "held"
         } else {
             "free"

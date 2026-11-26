@@ -196,7 +196,9 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
     let arguments = [
         format!("ready={}", ready.display()),
         format!("release={}", release.display()),
-        format!("held={},{}", gate.display(), held.display()),
+        // Each path is its own argument, so no character in it can split them.
+        format!("gate={}", gate.display()),
+        format!("held={}", held.display()),
         format!("done={}", done.display()),
     ];
     let mut launcher = launched(
