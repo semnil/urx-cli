@@ -134,19 +134,53 @@ pub struct Connection {
     pub(crate) slots: SharedSlots,
     /// The last request ticket issued on this connection.
     pub(crate) tickets: std::sync::atomic::AtomicU64,
+    /// Hands an undeliverable result's slot to this connection's fatal
+    /// thread, which ends the connection; dropping it lets the thread exit.
+    pub(crate) fatal: Mutex<Option<FatalSender>>,
+}
+
+/// One undeliverable result for the fatal thread: the slot it holds, and
+/// where to report once the connection has ended.
+pub struct FatalRequest {
+    pub held: urx_device_transport::connection::ResultAdoption,
+    pub done: napi::tokio::sync::oneshot::Sender<bool>,
+}
+
+pub type FatalSender = std::sync::mpsc::Sender<FatalRequest>;
+
+/// Starts the thread that ends `connection` for an undeliverable result. It
+/// exists from the moment the connection becomes usable, so ending one never
+/// depends on starting a thread or queueing work later.
+fn start_fatal_thread(connection: Arc<connection::Connection>) -> std::io::Result<FatalSender> {
+    let (sender, receiver) = std::sync::mpsc::channel::<FatalRequest>();
+    std::thread::Builder::new()
+        .name("urx-fatal-close".to_owned())
+        .spawn(move || {
+            for request in receiver {
+                // The connection closes with the result still held; only
+                // then is it released.
+                connection.close(TEARDOWN_DEADLINE);
+                drop(request.held);
+                let _ = request.done.send(true);
+            }
+        })?;
+    Ok(sender)
+}
+
+/// An opened connection with its fatal thread already running.
+pub struct Opened {
+    connection: Arc<connection::Connection>,
+    fatal: FatalSender,
 }
 
 impl Connection {
-    fn new(opened: connection::Connection) -> Self {
+    fn new(opened: Opened) -> Self {
         Connection {
-            inner: Arc::new(opened),
+            inner: opened.connection,
             slots: SharedSlots::default(),
             tickets: std::sync::atomic::AtomicU64::new(0),
+            fatal: Mutex::new(Some(opened.fatal)),
         }
-    }
-
-    pub(crate) fn handle(&self) -> Arc<connection::Connection> {
-        Arc::clone(&self.inner)
     }
 }
 
@@ -194,7 +228,7 @@ pub struct OpenTask {
 }
 
 impl Task for OpenTask {
-    type Output = Result<connection::Connection, Failure>;
+    type Output = Result<Opened, Failure>;
     type JsValue = OpenRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
@@ -211,12 +245,25 @@ impl Task for OpenTask {
             send_deadline: REQUEST_DEADLINE,
             response_deadline: REQUEST_DEADLINE,
         };
-        Ok(connection::open(
-            port,
-            &self.device_id,
-            &options,
-            &self.control,
-        ))
+        let opened = match connection::open(port, &self.device_id, &options, &self.control) {
+            Ok(opened) => Arc::new(opened),
+            Err(failure) => return Ok(Err(failure)),
+        };
+        match start_fatal_thread(Arc::clone(&opened)) {
+            Ok(fatal) => Ok(Ok(Opened {
+                connection: opened,
+                fatal,
+            })),
+            // Without its fatal thread the connection is not usable: it is
+            // closed here, so the failed open owns nothing.
+            Err(_) => {
+                opened.close(TEARDOWN_DEADLINE);
+                Ok(Err(Failure::Cause {
+                    code: Cause::InternalError,
+                    phase: Phase::Connect,
+                }))
+            }
+        }
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

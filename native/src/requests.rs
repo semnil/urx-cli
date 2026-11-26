@@ -20,7 +20,7 @@ use urx_device_transport::request::{
 };
 use urx_device_transport::wire::{NameValue, ParameterAddress};
 
-use crate::lifecycle::{lock, Connection};
+use crate::lifecycle::{lock, Connection, FatalRequest};
 
 #[napi(string_enum = "snake_case")]
 pub enum RequestCauseName {
@@ -516,11 +516,10 @@ impl Connection {
 }
 
 impl Connection {
-    /// Takes `ticket`'s entry now and, when its result holds a slot, starts
-    /// ending the connection on a thread of its own before any Promise is
-    /// made: the end takes the slot even if the Promise cannot be created.
-    /// The Promise only waits for that end. When the thread cannot be
-    /// started, the entry is put back for a later `terminate`.
+    /// Takes `ticket`'s entry now and, when its result holds a slot, hands it
+    /// to the connection's fatal thread, which has run since the connection
+    /// became usable: the end takes the slot without starting a thread or
+    /// queueing work. The Promise only waits for that end.
     fn fatal<'env>(
         &self,
         env: &'env Env,
@@ -537,27 +536,18 @@ impl Connection {
                 let _ = tx.send(true);
             }
             Some(Some(held)) => {
-                let connection = self.handle();
-                // Kept here only until the thread owns it.
-                let slot = Arc::new(Mutex::new(Some(held)));
-                let for_thread = Arc::clone(&slot);
-                let started = std::thread::Builder::new()
-                    .name("urx-fatal-close".to_owned())
-                    .spawn(move || {
-                        let held = lock(&for_thread).take();
-                        // The connection closes with the result still held;
-                        // only then is it released.
-                        connection.close(crate::lifecycle::TEARDOWN_DEADLINE);
-                        drop(held);
-                        let _ = tx.send(true);
-                    });
-                if let Err(error) = started {
-                    if let Some(held) = lock(&slot).take() {
-                        lock(&self.slots).held.insert(ticket, Some(held));
-                    }
-                    return Err(napi::Error::from_reason(format!(
-                        "the connection's end could not be started: {error}"
-                    )));
+                let sent = match lock(&self.fatal).as_ref() {
+                    Some(fatal) => fatal
+                        .send(FatalRequest { held, done: tx })
+                        .map_err(|failed| failed.0),
+                    None => Err(FatalRequest { held, done: tx }),
+                };
+                if let Err(request) = sent {
+                    // The thread is gone: put the slot back for a later call.
+                    lock(&self.slots).held.insert(ticket, Some(request.held));
+                    return Err(napi::Error::from_reason(
+                        "the connection's fatal thread is not running",
+                    ));
                 }
             }
         }
