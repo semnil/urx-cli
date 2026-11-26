@@ -19,11 +19,19 @@ export interface PeerUnit {
 export interface PeerOptions {
   /** Answer the list request with a reply that has no `list`. */
   readonly malformedList?: boolean;
+  /** Tests of the peer itself: make the server at this index (units first, then the list port) fail to listen. */
+  readonly failListenAt?: number;
+  /** Tests of the peer itself: called with each port that started listening. */
+  readonly onListen?: (port: number) => void;
 }
 
 export interface Peer {
   readonly listPort: number;
-  /** Every request URI the peer received, in order, prefixed with the port's role. */
+  /**
+   * Every line the peer received, in order, recorded before it decides
+   * whether to answer: `<port> <method> <uri>`, where `<port>` is `list` or a
+   * unit's ID and an unparsable line is `<port> unreadable`.
+   */
   readonly requests: readonly string[];
   /** Sockets the peer accepted that are still open. */
   readonly openSockets: () => number;
@@ -32,7 +40,13 @@ export interface Peer {
 
 const line = (message: unknown) => `${JSON.stringify(message)}\n`;
 
-function serveLines(onLine: (socket: Socket, message: Record<string, unknown>) => void, sockets: Set<Socket>): Server {
+/** `<method> <uri>` of a request under `envelope`, or `unreadable`. */
+function describe(message: unknown, envelope: "vdp" | "vddp"): string {
+  const body = (message as Record<string, unknown> | null)?.[envelope] as { method?: unknown; uri?: unknown } | undefined;
+  return typeof body?.method === "string" && typeof body.uri === "string" ? `${body.method} ${body.uri}` : "unreadable";
+}
+
+function serveLines(onLine: (socket: Socket, message: Record<string, unknown> | null) => void, sockets: Set<Socket>): Server {
   return createServer((socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
@@ -44,58 +58,85 @@ function serveLines(onLine: (socket: Socket, message: Record<string, unknown>) =
       for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
         const text = buffer.slice(0, end);
         buffer = buffer.slice(end + 1);
+        let message: Record<string, unknown> | null = null;
         try {
-          onLine(socket, JSON.parse(text) as Record<string, unknown>);
+          message = JSON.parse(text) as Record<string, unknown>;
         } catch {
-          // Not JSON: ignored, as a peer that does not understand it would.
+          // Not JSON: recorded as unreadable and not answered.
         }
+        onLine(socket, message);
       }
     });
   });
 }
 
-const listen = (server: Server) =>
-  new Promise<number>((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port)));
+/** A documentation address (RFC 5737) no local interface has, so listening on it fails. */
+const UNASSIGNED = "192.0.2.1";
 
+/** Listens on a free port of `host`; a failure to listen rejects with the original error. */
+const listen = (server: Server, host = "127.0.0.1") =>
+  new Promise<number>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      server.off("error", reject);
+      resolve((server.address() as { port: number }).port);
+    });
+  });
+
+async function closeAll(servers: readonly Server[], sockets: ReadonlySet<Socket>): Promise<void> {
+  for (const socket of sockets) socket.destroy();
+  await Promise.all(servers.map((server) => new Promise<void>((resolve) => (server.listening ? server.close(() => resolve()) : resolve()))));
+}
+
+/**
+ * Starts the list port and one port per unit. When any of them cannot listen,
+ * everything this call opened is closed and the original error is thrown.
+ */
 export async function startPeer(units: readonly PeerUnit[], options: PeerOptions = {}): Promise<Peer> {
   const requests: string[] = [];
   const sockets = new Set<Socket>();
   const servers: Server[] = [];
   const ports: number[] = [];
-  for (const unit of units) {
-    let synchronizations = 0;
-    const server = serveLines((socket, message) => {
-      const vdp = message["vdp"] as { method?: string; uri?: string } | undefined;
-      if (vdp?.method !== "get") return;
-      requests.push(`${unit.id} ${vdp.uri}`);
-      if (vdp.uri === "/vd/synchronize") {
-        synchronizations += 1;
-        const id = synchronizations > 1 && unit.laterId !== undefined ? unit.laterId : unit.id;
-        socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { sync_status: unit.status ?? "online", usb_id: id } } }));
-      } else if (vdp.uri === "/vd/device") {
-        const firmList = unit.firmware === null ? [{ firm_name: "Boot", firm_version: "1.0" }] : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
-        socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { firm_list: firmList } } }));
-      }
-    }, sockets);
+  const opened = async (server: Server) => {
+    const host = servers.length === options.failListenAt ? UNASSIGNED : undefined;
     servers.push(server);
-    ports.push(await listen(server));
+    const port = await listen(server, host);
+    options.onListen?.(port);
+    return port;
+  };
+  try {
+    for (const unit of units) ports.push(await opened(unitServer(unit, requests, sockets)));
+    const listPort = await opened(listServer(units, ports, requests, sockets, options));
+    return { listPort, requests, openSockets: () => sockets.size, close: () => closeAll(servers, sockets) };
+  } catch (error) {
+    await closeAll(servers, sockets);
+    throw error;
   }
-  const list = serveLines((socket, message) => {
-    const vddp = message["vddp"] as { method?: string; uri?: string } | undefined;
+}
+
+function unitServer(unit: PeerUnit, requests: string[], sockets: Set<Socket>): Server {
+  let synchronizations = 0;
+  return serveLines((socket, message) => {
+    requests.push(`${unit.id} ${describe(message, "vdp")}`);
+    const vdp = message?.["vdp"] as { method?: string; uri?: string } | undefined;
+    if (vdp?.method !== "get") return;
+    if (vdp.uri === "/vd/synchronize") {
+      synchronizations += 1;
+      const id = synchronizations > 1 && unit.laterId !== undefined ? unit.laterId : unit.id;
+      socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { sync_status: unit.status ?? "online", usb_id: id } } }));
+    } else if (vdp.uri === "/vd/device") {
+      const firmList = unit.firmware === null ? [{ firm_name: "Boot", firm_version: "1.0" }] : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
+      socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { firm_list: firmList } } }));
+    }
+  }, sockets);
+}
+
+function listServer(units: readonly PeerUnit[], ports: readonly number[], requests: string[], sockets: Set<Socket>, options: PeerOptions): Server {
+  return serveLines((socket, message) => {
+    requests.push(`list ${describe(message, "vddp")}`);
+    const vddp = message?.["vddp"] as { method?: string; uri?: string } | undefined;
     if (vddp?.method !== "get" || vddp.uri !== "/vddp_srv/devices") return;
-    requests.push(`list ${vddp.uri}`);
     const data = options.malformedList === true ? {} : { list: units.map((unit, index) => ({ vdpport: ports[index], model: unit.model })) };
     socket.write(line({ vddp: { method: "get", uri: vddp.uri, data } }));
   }, sockets);
-  servers.push(list);
-  const listPort = await listen(list);
-  return {
-    listPort,
-    requests,
-    openSockets: () => sockets.size,
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
-    },
-  };
 }
