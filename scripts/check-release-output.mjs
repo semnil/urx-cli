@@ -1,7 +1,7 @@
 // Checks a release output away from the checkout: copies it to a new
 // temporary directory, under a package.json that declares CommonJS, then runs
-// `--help` and `--version`, loads every one of its modules, opens the addon
-// and loads the device module there.
+// `--help` and `--version`, loads every one of its modules and those they
+// import on demand, opens the addon and loads the device module there.
 // Reading anything from outside the copy (the checkout's vendor directory or
 // node_modules), or depending on the module format of a directory above it,
 // makes the check fail.
@@ -22,10 +22,11 @@ try {
   const copy = join(scratch, "tools", "urx");
   cpSync(output, copy, { recursive: true });
   const url = (path) => JSON.stringify(pathToFileURL(join(copy, path)).href);
-  // Every module of the CLI loads from the copy, with the modules it imports.
+  // Every module in the copy loads from it, with the modules it imports, on demand too.
   const modules = filesUnder(copy)
-    .filter((path) => path.endsWith(".js") && !path.startsWith("node_modules/"))
+    .filter((path) => path.endsWith(".js"))
     .map((path) => pathToFileURL(join(copy, path)).href);
+  const loader = JSON.stringify(new URL("./load-modules.mjs", import.meta.url).href);
   const node = (args) => execFileSync(process.execPath, args, { cwd: scratch, encoding: "utf8" });
   node([join(copy, "main.js"), "--help"]);
   process.stdout.write(node([join(copy, "main.js"), "--version"]));
@@ -34,7 +35,8 @@ try {
     "-e",
     `
     import { createRequire } from "node:module";
-    for (const module of ${JSON.stringify(modules)}) await import(module);
+    const { loadModules } = await import(${loader});
+    await loadModules(${JSON.stringify(modules)});
     const addon = await import(${url("native/addon.js")});
     const device = await import(${url("native/device.js")});
     const build = await import(${url("build-info.js")});

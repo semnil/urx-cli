@@ -2,10 +2,11 @@
 // (K18, K38): the release manifest lists exactly the bundle's files with
 // their hashes; on macOS its directories and executables are 0755 and its
 // other files 0644; a copy under a directory that declares CommonJS runs the
-// CLI with the bundled Node, loads every one of its modules, opens the addon
-// from the bundle's `native` and loads the common package from the bundle's
-// own `app`; and the launcher, run away from any bundle, starts nothing and
-// exits 1 with one line, whatever is installed on this machine.
+// CLI with the bundled Node, loads every one of its modules and those they
+// import on demand, opens the addon from the bundle's `native` and loads the
+// common package from the bundle's own `app`; and the launcher, run away from
+// any bundle, starts nothing and exits 1 with one line, whatever is installed
+// on this machine.
 //
 // Usage: node scripts/check-bundle.mjs [dist-bundle]
 
@@ -69,16 +70,18 @@ try {
   node([join(copy, "app", "main.js"), "--help"]);
   process.stdout.write(node([join(copy, "app", "main.js"), "--version"]));
   const url = (path) => JSON.stringify(pathToFileURL(join(copy, path)).href);
-  // Every module of the CLI loads from the bundle, with the modules it imports.
+  // Every module in the bundle's app loads from it, with the modules it imports, on demand too.
   const modules = filesUnder(join(copy, "app"))
-    .filter((path) => path.endsWith(".js") && !path.startsWith("node_modules/"))
+    .filter((path) => path.endsWith(".js"))
     .map((path) => pathToFileURL(join(copy, "app", path)).href);
+  const loader = JSON.stringify(new URL("./load-modules.mjs", import.meta.url).href);
   node([
     "--input-type=module",
     "-e",
     `
     import { createRequire } from "node:module";
-    for (const module of ${JSON.stringify(modules)}) await import(module);
+    const { loadModules } = await import(${loader});
+    await loadModules(${JSON.stringify(modules)});
     const addon = await import(${url("app/native/addon.js")});
     const build = await import(${url("app/build-info.js")});
     if (addon.ADDON_URL.href !== ${url("native/urx-native.node")}) throw new Error("the addon is looked for at " + addon.ADDON_URL.href);
