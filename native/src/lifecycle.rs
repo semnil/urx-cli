@@ -132,6 +132,8 @@ pub struct Connection {
     pub(crate) inner: Arc<connection::Connection>,
     /// The completion slots of this connection's requests, by ticket.
     pub(crate) slots: SharedSlots,
+    /// The last request ticket issued on this connection.
+    pub(crate) tickets: std::sync::atomic::AtomicU64,
 }
 
 impl Connection {
@@ -139,6 +141,7 @@ impl Connection {
         Connection {
             inner: Arc::new(opened),
             slots: SharedSlots::default(),
+            tickets: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

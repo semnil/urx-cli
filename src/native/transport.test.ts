@@ -7,6 +7,10 @@ function native(overrides: Partial<NativeRequests> = {}) {
   const record = (name: string) => (...args: unknown[]) => (calls.push([name, ...args.slice(1)]), Promise.resolve({ name }));
   const connection: NativeRequests = {
     createOperation: () => operation,
+    newRequestTicket: (() => {
+      let next = 0;
+      return () => `request-${++next}`;
+    })(),
     getNumeric: record("getNumeric"),
     getText: record("getText"),
     getName: record("getName"),
@@ -45,9 +49,11 @@ describe("the addon transport", () => {
     expect(calls.slice(-2)).toEqual([["cancel"], ["finish"]]);
   });
 
-  it("issue a ticket never issued before", () => {
-    const transport = new AddonTransport(native().connection);
-    const tickets = new Set(Array.from({ length: 1000 }, () => transport.newRequestTicket()));
+  it("take tickets from the connection, so two adapters over one connection never share one", () => {
+    const { connection } = native();
+    const first = new AddonTransport(connection);
+    const second = new AddonTransport(connection);
+    const tickets = new Set(Array.from({ length: 500 }, () => [first.newRequestTicket(), second.newRequestTicket()]).flat());
     expect(tickets.size).toBe(1000);
   });
 

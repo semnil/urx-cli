@@ -8,6 +8,7 @@ const unused = () => {
 class FakeConnection implements NativeConnection {
   readonly firmware = "1.5.0.1";
   readonly createOperation = unused;
+  readonly newRequestTicket = unused;
   readonly getNumeric = unused;
   readonly getText = unused;
   readonly getName = unused;

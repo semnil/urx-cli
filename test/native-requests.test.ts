@@ -120,6 +120,48 @@ describe("the native request records", () => {
     expect(newRequests()).toEqual([`<id-a> get ${CHANNEL_1_ON}`]);
   });
 
+  it("refuse a parameter ID outside u32 before sending, in every request method", async () => {
+    const { transport, newRequests } = await connected({ parameters: { "140:0:0": 1 } });
+    const operation = transport.createOperation();
+    for (const paramId of [140.9, -1, 4294967296, 4294967436, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const id = { paramId, x: "0", y: "0" };
+      for (const call of [
+        (requestTicket: string) => transport.getNumeric(id, { operation, requestTicket }),
+        (requestTicket: string) => transport.getText(id, { operation, requestTicket }),
+        (requestTicket: string) => transport.getName(id, { operation, requestTicket }),
+        (requestTicket: string) => transport.setNumeric(id, "1", { operation, requestTicket }),
+        (requestTicket: string) => transport.setText(id, "x", { operation, requestTicket }),
+      ]) {
+        const requestTicket = transport.newRequestTicket();
+        expect(await call(requestTicket), String(paramId)).toEqual({
+          kind: "failure",
+          failure: { kind: "cause", code: "invalid_input", phase: "validation" },
+          evidence: { state: "not_sent" },
+        });
+        await transport.adoptResult(requestTicket);
+      }
+    }
+    expect(newRequests()).toEqual([]);
+  });
+
+  it("keep the connection after an undeliverable unsent result, and give two adapters over one connection distinct tickets", async () => {
+    const { transport, connection, newRequests } = await connected({ parameters: { "140:0:0": 1 } });
+    const cancelled = transport.createOperation();
+    cancelled.cancel();
+    const unsentTicket = transport.newRequestTicket();
+    expect(await transport.getNumeric(address, { operation: cancelled, requestTicket: unsentTicket })).toMatchObject({ evidence: { state: "not_sent" } });
+    await transport.failDelivery(unsentTicket);
+    const { AddonTransport } = (await import(new URL("native/transport.js", dist).href)) as typeof import("../src/native/transport.js");
+    const other = new AddonTransport(connection);
+    const tickets = new Set([transport.newRequestTicket(), other.newRequestTicket(), transport.newRequestTicket(), other.newRequestTicket()]);
+    expect(tickets.size).toBe(4);
+    const operation = other.createOperation();
+    const requestTicket = other.newRequestTicket();
+    expect(await other.getNumeric(address, { operation, requestTicket })).toEqual({ kind: "success", value: "1", evidence: { state: "read" } });
+    await other.adoptResult(requestTicket);
+    expect(newRequests()).toEqual([`<id-a> get ${CHANNEL_1_ON}`]);
+  });
+
   it("refuse requests of a finished or cancelled operation unsent", async () => {
     const { transport, newRequests } = await connected({ parameters: { "140:0:0": 1 } });
     const finished = transport.createOperation();

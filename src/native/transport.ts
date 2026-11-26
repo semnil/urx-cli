@@ -20,6 +20,8 @@ export interface NativeOperation {
 /** The request side of the addon's connection object. */
 export interface NativeRequests {
   createOperation(): NativeOperation;
+  /** A ticket the connection never issued before, whichever adapter asks. */
+  newRequestTicket(): string;
   getNumeric(operation: NativeOperation, ticket: string, paramId: number, x: string, y: string): Promise<unknown>;
   getText(operation: NativeOperation, ticket: string, paramId: number, x: string, y: string): Promise<unknown>;
   getName(operation: NativeOperation, ticket: string, paramId: number, x: string, y: string): Promise<unknown>;
@@ -45,7 +47,6 @@ export class AddonTransport implements Transport {
   readonly #connection: NativeRequests;
   /** The operations this transport created; no other is forwarded to its connection. */
   readonly #operations = new WeakSet<AdapterOperation>();
-  #tickets = 0;
 
   constructor(connection: NativeRequests) {
     this.#connection = connection;
@@ -57,10 +58,9 @@ export class AddonTransport implements Transport {
     return operation;
   }
 
-  /** Unique for the adapter's life, which is the connection's. */
+  /** Issued by the connection, so two adapters over one connection never share a ticket. */
   newRequestTicket(): string {
-    this.#tickets += 1;
-    return `request-${this.#tickets}`;
+    return this.#connection.newRequestTicket();
   }
 
   getNumeric(address: ParameterAddress, request: TransportRequest): Promise<unknown> {

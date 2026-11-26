@@ -253,9 +253,9 @@ impl Operation {
     }
 }
 
-/// Each submitted request's completion slot, by the CLI's request ticket:
-/// pending until its outcome arrives, then held until adopted. A held `None`
-/// is an outcome that keeps no slot (refused, unsent or ended).
+/// Each submitted request's completion slot, by its request ticket: pending
+/// until its outcome arrives, then held until adopted. A held `None` is an
+/// outcome that keeps no slot: refused here or reported unsent.
 #[derive(Default)]
 pub struct Slots {
     pending: HashSet<String>,
@@ -275,19 +275,46 @@ impl Slots {
 
 pub type SharedSlots = Arc<Mutex<Slots>>;
 
-/// The parameter address of a call, or a validation refusal.
-fn address(param_id: u32, x: &str, y: &str) -> Result<ParameterAddress, Outcome> {
-    match (i64_text::parse(x), i64_text::parse(y)) {
-        (Ok(x), Ok(y)) => Ok(ParameterAddress { param_id, x, y }),
-        _ => Err(refused(
-            RequestCause::InvalidInput,
-            RequestPhase::Validation,
-        )),
+/// The parameter address of a call, or a validation refusal. `param_id` is the
+/// JavaScript number itself, so a value outside `u32` is refused rather than
+/// converted into another valid identifier.
+fn address(param_id: f64, x: &str, y: &str) -> Result<ParameterAddress, Outcome> {
+    let invalid = || refused(RequestCause::InvalidInput, RequestPhase::Validation);
+    let in_range = param_id.is_finite()
+        && param_id.fract() == 0.0
+        && (0.0..=f64::from(u32::MAX)).contains(&param_id);
+    if !in_range {
+        return Err(invalid());
     }
+    match (i64_text::parse(x), i64_text::parse(y)) {
+        (Ok(x), Ok(y)) => Ok(ParameterAddress {
+            // In range and integral, so the conversion is exact.
+            param_id: param_id as u32,
+            x,
+            y,
+        }),
+        _ => Err(invalid()),
+    }
+}
+
+/// Whether an outcome says nothing was sent: such a result holds no slot.
+fn unsent(outcome: &Outcome) -> bool {
+    matches!(
+        outcome,
+        Outcome::Failure {
+            evidence: Evidence::NotSent,
+            ..
+        }
+    )
 }
 
 impl Connection {
     /// Submits `request` under `ticket` and returns its outcome's Promise.
+    ///
+    /// The Promise exists before anything is submitted, so a request whose
+    /// result could not be returned is never sent. A result whose receiver is
+    /// gone when it arrives releases its slot at once, so it cannot hold up the
+    /// connection's later requests.
     fn issue<'env, R>(
         &self,
         env: &'env Env,
@@ -299,60 +326,65 @@ impl Connection {
         R: From<Outcome> + napi::bindgen_prelude::ToNapiValue + Send + 'static,
     {
         let (tx, rx) = oneshot::channel::<Outcome>();
-        let slots = Arc::clone(&self.slots);
-        // An outcome decided here, before anything reaches the transport, and
-        // whether its ticket keeps an (empty) slot to adopt.
-        let early = if !lock(&slots).reserve(&ticket) {
-            // A ticket already in use owns another call's slot: refuse
-            // without touching it.
-            Some((
-                refused(RequestCause::InternalError, RequestPhase::Admission),
-                false,
-            ))
-        } else {
-            match (request, lock(&operation.inner).clone()) {
-                (Err(outcome), _) => Some((outcome, true)),
-                // A finished owner, or one the closing connection refused.
-                (Ok(_), None) => Some((
-                    refused(RequestCause::NotConnected, RequestPhase::Admission),
-                    true,
-                )),
-                (Ok(request), Some(owner)) => {
-                    let completed = Arc::clone(&slots);
-                    let ticket = ticket.clone();
-                    self.inner
-                        .submit(&owner, request, move |outcome, adoption| {
-                            // The slot is recorded before the Promise settles, so
-                            // the CLI can adopt it as soon as it sees the record.
-                            lock(&completed).complete(&ticket, Some(adoption));
-                            let _ = tx.send(outcome);
-                        });
-                    None
-                }
-            }
-        };
-        let rx = match early {
-            None => rx,
-            Some((outcome, keep)) => {
-                if keep {
-                    lock(&slots).complete(&ticket, None);
-                }
-                let (tx, rx) = oneshot::channel::<Outcome>();
-                let _ = tx.send(outcome);
-                rx
-            }
-        };
-        env.spawn_future(async move {
+        let promise = env.spawn_future(async move {
             let outcome = rx
                 .await
                 .map_err(|_| napi::Error::from_reason("the request ended without an outcome"))?;
             Ok(R::from(outcome))
-        })
+        })?;
+        let slots = Arc::clone(&self.slots);
+        if !lock(&slots).reserve(&ticket) {
+            // A ticket already in use owns another call's slot: refuse
+            // without touching it.
+            let _ = tx.send(refused(
+                RequestCause::InternalError,
+                RequestPhase::Admission,
+            ));
+            return Ok(promise);
+        }
+        match (request, lock(&operation.inner).clone()) {
+            (Err(outcome), _) => {
+                lock(&slots).complete(&ticket, None);
+                let _ = tx.send(outcome);
+            }
+            // A finished owner, or one the closing connection refused.
+            (Ok(_), None) => {
+                lock(&slots).complete(&ticket, None);
+                let _ = tx.send(refused(RequestCause::NotConnected, RequestPhase::Admission));
+            }
+            (Ok(request), Some(owner)) => {
+                self.inner
+                    .submit(&owner, request, move |outcome, adoption| {
+                        // Recorded before the Promise settles, so the CLI can
+                        // adopt the slot as soon as it sees the record. An
+                        // unsent outcome holds none.
+                        let held = (!unsent(&outcome)).then_some(adoption);
+                        lock(&slots).complete(&ticket, held);
+                        if tx.send(outcome).is_err() {
+                            if let Some(Some(adoption)) = lock(&slots).held.remove(&ticket) {
+                                adoption.adopt();
+                            }
+                        }
+                    });
+            }
+        }
+        Ok(promise)
     }
 }
 
 #[napi]
 impl Connection {
+    /// A request ticket this connection has never issued, whichever adapter
+    /// asks: one counter per connection (K37).
+    #[napi]
+    pub fn new_request_ticket(&self) -> String {
+        let next = self
+            .tickets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        format!("request-{next}")
+    }
+
     /// A new owner for one logical operation; refused on a closing or ended
     /// connection, in which case every request it submits is refused unsent.
     #[napi]
@@ -368,7 +400,7 @@ impl Connection {
         env: &'env Env,
         operation: &Operation,
         ticket: String,
-        param_id: u32,
+        param_id: f64,
         x: String,
         y: String,
     ) -> napi::Result<PromiseRaw<'env, NumericRecord>> {
@@ -382,7 +414,7 @@ impl Connection {
         env: &'env Env,
         operation: &Operation,
         ticket: String,
-        param_id: u32,
+        param_id: f64,
         x: String,
         y: String,
     ) -> napi::Result<PromiseRaw<'env, TextRecord>> {
@@ -396,7 +428,7 @@ impl Connection {
         env: &'env Env,
         operation: &Operation,
         ticket: String,
-        param_id: u32,
+        param_id: f64,
         x: String,
         y: String,
     ) -> napi::Result<PromiseRaw<'env, NameRecord>> {
@@ -411,7 +443,7 @@ impl Connection {
         env: &'env Env,
         operation: &Operation,
         ticket: String,
-        param_id: u32,
+        param_id: f64,
         x: String,
         y: String,
         value: String,
@@ -431,7 +463,7 @@ impl Connection {
         env: &'env Env,
         operation: &Operation,
         ticket: String,
-        param_id: u32,
+        param_id: f64,
         x: String,
         y: String,
         value: String,
@@ -590,7 +622,7 @@ mod tests {
 
     #[test]
     fn an_address_needs_canonical_coordinates() {
-        assert!(address(140, "0", "-1").is_ok());
+        assert!(address(140.0, "0", "-1").is_ok());
         for (x, y) in [
             ("00", "0"),
             ("0", "+1"),
@@ -598,7 +630,49 @@ mod tests {
             ("", "0"),
             ("9223372036854775808", "0"),
         ] {
-            assert!(address(140, x, y).is_err(), "{x}:{y}");
+            assert!(address(140.0, x, y).is_err(), "{x}:{y}");
         }
+    }
+
+    #[test]
+    fn a_parameter_id_is_an_exact_u32_or_refused() {
+        for id in [0.0, 140.0, f64::from(u32::MAX)] {
+            assert_eq!(
+                address(id, "0", "0").map(|a| a.param_id).ok(),
+                Some(id as u32),
+                "{id}"
+            );
+        }
+        for id in [
+            140.9,
+            -1.0,
+            4294967296.0,
+            4294967436.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.5,
+        ] {
+            assert!(address(id, "0", "0").is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn only_an_unsent_outcome_is_known_to_hold_no_slot() {
+        assert!(unsent(&refused(
+            RequestCause::NotConnected,
+            RequestPhase::Admission
+        )));
+        assert!(!unsent(&Outcome::Failure {
+            failure: RequestFailure::Cause {
+                code: RequestCause::ResponseTimeout,
+                phase: RequestPhase::Response
+            },
+            evidence: Evidence::Unconfirmed
+        }));
+        assert!(!unsent(&Outcome::Success {
+            value: Some(ReadValue::Numeric(1)),
+            evidence: Evidence::Read
+        }));
     }
 }
