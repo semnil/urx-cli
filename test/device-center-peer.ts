@@ -14,6 +14,12 @@ export interface PeerUnit {
   readonly firmware?: string | null;
   /** The identity reported after the first `/vd/synchronize` (the discovery's). */
   readonly laterId?: string;
+  /** Parameter values by `paramId:x:y`; a write replaces the value it accepts. */
+  readonly parameters?: Record<string, number | string>;
+  /** The response code every write is answered with; 200 when omitted. */
+  readonly writeResponse?: number;
+  /** Parameter URIs (`/vd/parameters/...`) the unit never answers. */
+  readonly silent?: readonly string[];
 }
 
 export interface PeerOptions {
@@ -114,11 +120,27 @@ export async function startPeer(units: readonly PeerUnit[], options: PeerOptions
   }
 }
 
+const PARAMETERS = "/vd/parameters/";
+
 function unitServer(unit: PeerUnit, requests: string[], sockets: Set<Socket>): Server {
   let synchronizations = 0;
+  const parameters = new Map(Object.entries(unit.parameters ?? {}));
   return serveLines((socket, message) => {
     requests.push(`${unit.id} ${describe(message, "vdp")}`);
-    const vdp = message?.["vdp"] as { method?: string; uri?: string } | undefined;
+    const vdp = message?.["vdp"] as { method?: string; uri?: string; data?: { current_value?: unknown } } | undefined;
+    if (typeof vdp?.uri === "string" && vdp.uri.startsWith(PARAMETERS)) {
+      const [path] = vdp.uri.split("?") as [string];
+      if (unit.silent?.includes(path)) return;
+      const key = path.slice(PARAMETERS.length);
+      if (vdp.method === "get" && parameters.has(key)) {
+        socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { current_value: parameters.get(key) } } }));
+      } else if (vdp.method === "post") {
+        const code = unit.writeResponse ?? 200;
+        if (code === 200) parameters.set(key, vdp.data?.current_value as number | string);
+        socket.write(line({ vdp: { method: "post", uri: vdp.uri, data: { response_code: code } } }));
+      }
+      return;
+    }
     if (vdp?.method !== "get") return;
     if (vdp.uri === "/vd/synchronize") {
       synchronizations += 1;

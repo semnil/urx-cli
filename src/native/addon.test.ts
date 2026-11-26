@@ -2,16 +2,24 @@ import { describe, expect, it } from "vitest";
 import { checkIdentity, expectedIdentity, loadAddon, openAddon, type ExpectedIdentity } from "./addon.js";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
-const expected: ExpectedIdentity = { bridgeRevision: 1, commonVersion: "0.1.0", commonCommit: commit };
-const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 1, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
+const expected: ExpectedIdentity = { bridgeRevision: 2, commonVersion: "0.1.0", commonCommit: commit };
+const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 2, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
 const url = new URL("file:///nowhere/urx-native.node");
 /** An addon module with every export the loader requires. */
-const addonWith = (buildIdentity: () => unknown) => ({
+/** A connection class with every method the loader requires. */
+const method = () => undefined;
+class CompleteConnection {
+  close = method;
+}
+for (const name of ["close", "createOperation", "newRequestTicket", "getNumeric", "getText", "getName", "setNumeric", "setText", "adoptResult", "failDelivery", "terminate"]) {
+  (CompleteConnection.prototype as unknown as Record<string, unknown>)[name] = method;
+}
+const addonWith = (buildIdentity: () => unknown, Connection: unknown = CompleteConnection) => ({
   buildIdentity,
   discover: () => Promise.resolve(null),
   openConnection: () => Promise.resolve(null),
   Control: class {},
-  Connection: class {},
+  Connection,
 });
 
 describe("addon identity check", () => {
@@ -20,7 +28,7 @@ describe("addon identity check", () => {
   });
 
   it("refuse a different bridge revision, version or commit", () => {
-    expect(checkIdentity(reported({ bridgeRevision: 2 }), expected)).toBe("bridge_mismatch");
+    expect(checkIdentity(reported({ bridgeRevision: 1 }), expected)).toBe("bridge_mismatch");
     expect(checkIdentity(reported({ commonVersion: "0.2.0" }), expected)).toBe("common_mismatch");
     expect(checkIdentity(reported({ commonCommit: "f".repeat(40) }), expected)).toBe("common_mismatch");
   });
@@ -61,6 +69,26 @@ describe("addon loading", () => {
       delete module[name];
       expect(loadAddon(url, () => module), name).toEqual({ ok: false, problem: "malformed" });
     }
+  });
+
+  it("refuse an addon of another bridge revision as bridge_mismatch whatever it exports", () => {
+    class Lifecycle {
+      close() {}
+    }
+    // As the revision-1 addon: its connections have no request methods.
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 }), Lifecycle))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 3 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+  });
+
+  it("refuse an addon of this revision that lacks an export or a connection method as malformed", () => {
+    class Lifecycle {
+      close() {}
+    }
+    expect(openAddon(expected, url, () => addonWith(() => reported(), Lifecycle))).toEqual({ ok: false, problem: "malformed" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported() }))).toEqual({ ok: false, problem: "malformed" });
+    expect(loadAddon(url, () => addonWith(() => reported(), Lifecycle))).toEqual({ ok: false, problem: "malformed" });
+    expect(openAddon(expected, url, () => addonWith(() => reported()))).toMatchObject({ ok: true });
   });
 
   it("open only an addon whose identity matches", () => {

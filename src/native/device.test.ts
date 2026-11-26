@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { closeConnection, discoverDevices, openDevice, selectDevice, type LifecycleAddon, type NativeConnection } from "./device.js";
 
+const unused = () => {
+  throw new Error("not used by these tests");
+};
+
 class FakeConnection implements NativeConnection {
   readonly firmware = "1.5.0.1";
+  readonly createOperation = unused;
+  readonly newRequestTicket = unused;
+  readonly getNumeric = unused;
+  readonly getText = unused;
+  readonly getName = unused;
+  readonly setNumeric = unused;
+  readonly setText = unused;
+  readonly adoptResult = unused;
+  readonly failDelivery = unused;
+  readonly terminate = unused;
   constructor(private readonly closing: () => Promise<unknown>) {}
   close() {
     return this.closing();

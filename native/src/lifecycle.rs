@@ -18,6 +18,7 @@ use urx_device_transport::discovery::{
 use urx_device_transport::lifecycle::{self, Cause, Cleanup, CleanupState, Failure, Phase};
 
 use crate::records::{CleanupRecord, DeviceRecord, DiscoveryRecord, FailureRecord, UnitRecord};
+use crate::requests::SharedSlots;
 
 /// Whole discovery (N2).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
@@ -26,7 +27,7 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 /// Sending one request, and one response once it is sent (N1, N2).
 const REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 /// Stop and teardown in total (N2).
-const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
+pub const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The caller-owned control of one discovery and the connection opened from
 /// it (K37). Cancelling it stops the discovery or the opening in progress.
@@ -38,7 +39,7 @@ pub struct Control {
     ports: Arc<Mutex<HashMap<String, u16>>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -128,7 +129,65 @@ pub fn discover(
 /// object is not a close.
 #[napi]
 pub struct Connection {
-    inner: Arc<connection::Connection>,
+    pub(crate) inner: Arc<connection::Connection>,
+    /// The completion slots of this connection's requests, by ticket.
+    pub(crate) slots: SharedSlots,
+    /// The last request ticket issued on this connection.
+    pub(crate) tickets: std::sync::atomic::AtomicU64,
+    /// Hands an undeliverable result's slot to this connection's fatal
+    /// thread, which ends the connection; dropping it lets the thread exit.
+    pub(crate) fatal: Arc<Mutex<Option<FatalSender>>>,
+}
+
+/// One undeliverable result for the fatal thread: the slot it holds, and
+/// where to report once the connection has ended.
+pub struct FatalRequest {
+    pub held: urx_device_transport::connection::ResultAdoption,
+    pub done: napi::tokio::sync::oneshot::Sender<bool>,
+}
+
+pub type FatalSender = std::sync::mpsc::Sender<FatalRequest>;
+
+/// Starts the thread that ends `connection` for an undeliverable result. It
+/// exists from the moment the connection becomes usable, so ending one never
+/// depends on starting a thread or queueing work later.
+fn start_fatal_thread(connection: Arc<connection::Connection>) -> std::io::Result<FatalSender> {
+    let (sender, receiver) = std::sync::mpsc::channel::<FatalRequest>();
+    std::thread::Builder::new()
+        .name("urx-fatal-close".to_owned())
+        .spawn(move || {
+            // Waits until a slot arrives or the connection's own close drops
+            // the sender.
+            let Ok(first) = receiver.recv() else {
+                return;
+            };
+            // The connection closes with the result still held; only then is
+            // it released. One end serves every slot handed over by then, and
+            // the thread exits: a later slot finds the connection ended.
+            connection.close(TEARDOWN_DEADLINE);
+            for request in std::iter::once(first).chain(receiver.try_iter()) {
+                drop(request.held);
+                let _ = request.done.send(true);
+            }
+        })?;
+    Ok(sender)
+}
+
+/// An opened connection with its fatal thread already running.
+pub struct Opened {
+    connection: Arc<connection::Connection>,
+    fatal: FatalSender,
+}
+
+impl Connection {
+    fn new(opened: Opened) -> Self {
+        Connection {
+            inner: opened.connection,
+            slots: SharedSlots::default(),
+            tickets: std::sync::atomic::AtomicU64::new(0),
+            fatal: Arc::new(Mutex::new(Some(opened.fatal))),
+        }
+    }
 }
 
 #[napi]
@@ -148,6 +207,7 @@ impl Connection {
     pub fn close(&self) -> AsyncTask<CloseTask> {
         AsyncTask::new(CloseTask {
             inner: Arc::clone(&self.inner),
+            fatal: Arc::clone(&self.fatal),
         })
     }
 }
@@ -175,16 +235,19 @@ pub struct OpenTask {
 }
 
 impl Task for OpenTask {
-    type Output = Result<connection::Connection, Failure>;
+    type Output = Result<Opened, (Failure, Cleanup)>;
     type JsValue = OpenRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         // Only a unit this control's discovery found online can be opened.
         let Some(port) = lock(&self.ports).get(&self.device_id).copied() else {
-            return Ok(Err(Failure::Cause {
-                code: Cause::DeviceNotFound,
-                phase: Phase::Connect,
-            }));
+            return Ok(Err((
+                Failure::Cause {
+                    code: Cause::DeviceNotFound,
+                    phase: Phase::Connect,
+                },
+                Cleanup::COMPLETE,
+            )));
         };
         let options = ConnectionOptions {
             connect_deadline: CONNECT_DEADLINE,
@@ -192,25 +255,37 @@ impl Task for OpenTask {
             send_deadline: REQUEST_DEADLINE,
             response_deadline: REQUEST_DEADLINE,
         };
-        Ok(connection::open(
-            port,
-            &self.device_id,
-            &options,
-            &self.control,
-        ))
+        let opened = match connection::open(port, &self.device_id, &options, &self.control) {
+            Ok(opened) => Arc::new(opened),
+            // A failed open owns nothing afterwards (K37).
+            Err(failure) => return Ok(Err((failure, Cleanup::COMPLETE))),
+        };
+        match start_fatal_thread(Arc::clone(&opened)) {
+            Ok(fatal) => Ok(Ok(Opened {
+                connection: opened,
+                fatal,
+            })),
+            // Without its fatal thread the connection is not usable: it is
+            // closed here, so the failed open owns nothing.
+            // Its cleanup is what that close established.
+            Err(_) => Ok(Err((
+                Failure::Cause {
+                    code: Cause::InternalError,
+                    phase: Phase::Connect,
+                },
+                closed_cleanup(opened.close(TEARDOWN_DEADLINE)),
+            ))),
+        }
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(match output {
             Ok(opened) => OpenRecord::Success {
-                value: Connection {
-                    inner: Arc::new(opened),
-                },
+                value: Connection::new(opened),
             },
-            // A failed open owns nothing afterwards (K37).
-            Err(failure) => OpenRecord::Failure {
+            Err((failure, cleanup)) => OpenRecord::Failure {
                 failure: failure.into(),
-                cleanup: CleanupRecord::complete(),
+                cleanup: cleanup.into(),
             },
         })
     }
@@ -229,6 +304,7 @@ pub fn open_connection(device_id: String, control: &Control) -> AsyncTask<OpenTa
 
 pub struct CloseTask {
     inner: Arc<connection::Connection>,
+    fatal: Arc<Mutex<Option<FatalSender>>>,
 }
 
 impl Task for CloseTask {
@@ -236,11 +312,34 @@ impl Task for CloseTask {
     type JsValue = UnitRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.inner.close(TEARDOWN_DEADLINE))
+        let outcome = self.inner.close(TEARDOWN_DEADLINE);
+        // Only once the connection has ended is its fatal thread let go, so
+        // it exits instead of waiting until the object is collected; until
+        // then an undeliverable slot can still be handed to it.
+        lock(&self.fatal).take();
+        Ok(outcome)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(close_record(output))
+    }
+}
+
+/// The cleanup of a connection a failed call closed: the connection's end,
+/// with the teardown failure, if any, or unconfirmed termination.
+pub fn closed_cleanup(outcome: CloseOutcome) -> Cleanup {
+    let ended = |state, failure| Cleanup { state, failure };
+    match outcome {
+        CloseOutcome::Closed => ended(CleanupState::ConnectionClosed, None),
+        CloseOutcome::Failed(failure) => ended(CleanupState::ConnectionClosed, Some(failure)),
+        CloseOutcome::Incomplete(failure) => ended(CleanupState::Incomplete, Some(failure)),
+        CloseOutcome::Started => ended(
+            CleanupState::Incomplete,
+            Some(Failure::Cause {
+                code: Cause::InternalError,
+                phase: Phase::Teardown,
+            }),
+        ),
     }
 }
 
@@ -282,6 +381,35 @@ mod tests {
             code,
             phase: Phase::Teardown,
         }
+    }
+
+    #[test]
+    fn a_failed_open_reports_what_closing_its_connection_established() {
+        let closed = closed_cleanup(CloseOutcome::Closed);
+        assert_eq!(
+            (closed.state, closed.failure),
+            (CleanupState::ConnectionClosed, None)
+        );
+        let failed = closed_cleanup(CloseOutcome::Failed(teardown(Cause::DeviceRejected)));
+        assert_eq!(
+            (failed.state, failed.failure),
+            (
+                CleanupState::ConnectionClosed,
+                Some(teardown(Cause::DeviceRejected))
+            )
+        );
+        let expired = closed_cleanup(CloseOutcome::Incomplete(teardown(Cause::TeardownTimeout)));
+        assert_eq!(
+            (expired.state, expired.failure),
+            (
+                CleanupState::Incomplete,
+                Some(teardown(Cause::TeardownTimeout))
+            )
+        );
+        assert_eq!(
+            closed_cleanup(CloseOutcome::Started).state,
+            CleanupState::Incomplete
+        );
     }
 
     #[test]
