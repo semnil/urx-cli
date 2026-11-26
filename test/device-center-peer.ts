@@ -1,7 +1,9 @@
 // A controlled local peer for the addon's integration tests (K30): a Device
 // Center list port and one port per unit, answering the transport's requests
-// with newline-delimited JSON. It supplies protocol replies and deliberate
-// faults, not a model of a unit.
+// and registrations with newline-delimited JSON, and pushing the
+// notifications a test asks for. It supplies protocol replies and deliberate
+// faults, not a model of a unit: it keeps no registrations and pushes
+// whatever it is told to.
 
 import { createServer, type Server, type Socket } from "node:net";
 
@@ -20,6 +22,13 @@ export interface PeerUnit {
   readonly writeResponse?: number;
   /** Parameter URIs (`/vd/parameters/...`) the unit never answers. */
   readonly silent?: readonly string[];
+  /**
+   * Response codes for registration and unregistration POSTs by request URI,
+   * such as `/vd/parameters/895:0:0?operation=regist`; 200 for any other.
+   */
+  readonly registrationResponses?: Readonly<Record<string, number>>;
+  /** Hold every registration and unregistration reply until `Peer.answerHeld`. */
+  readonly holdRegistrations?: boolean;
 }
 
 export interface PeerOptions {
@@ -41,6 +50,13 @@ export interface Peer {
   readonly requests: readonly string[];
   /** Sockets the peer accepted that are still open. */
   readonly openSockets: () => number;
+  /**
+   * Pushes a notification for `uri` to every open connection of unit `id`,
+   * with `current_value` when `value` is given.
+   */
+  notify(id: string, uri: string, value?: number | string): void;
+  /** Sends the registration and unregistration replies held so far, in order. */
+  answerHeld(): void;
   close(): Promise<void>;
 }
 
@@ -52,10 +68,12 @@ function describe(message: unknown, envelope: "vdp" | "vddp"): string {
   return typeof body?.method === "string" && typeof body.uri === "string" ? `${body.method} ${body.uri}` : "unreadable";
 }
 
-function serveLines(onLine: (socket: Socket, message: Record<string, unknown> | null) => void, sockets: Set<Socket>): Server {
+function serveLines(onLine: (socket: Socket, message: Record<string, unknown> | null) => void, ...trackers: Set<Socket>[]): Server {
   return createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
+    for (const sockets of trackers) sockets.add(socket);
+    socket.on("close", () => {
+      for (const sockets of trackers) sockets.delete(socket);
+    });
     socket.on("error", () => {});
     let buffer = "";
     socket.setEncoding("utf8");
@@ -101,6 +119,8 @@ async function closeAll(servers: readonly Server[], sockets: ReadonlySet<Socket>
 export async function startPeer(units: readonly PeerUnit[], options: PeerOptions = {}): Promise<Peer> {
   const requests: string[] = [];
   const sockets = new Set<Socket>();
+  const unitSockets = new Map(units.map((unit) => [unit.id, new Set<Socket>()]));
+  const held: (() => void)[] = [];
   const servers: Server[] = [];
   const ports: number[] = [];
   const opened = async (server: Server) => {
@@ -111,9 +131,21 @@ export async function startPeer(units: readonly PeerUnit[], options: PeerOptions
     return port;
   };
   try {
-    for (const unit of units) ports.push(await opened(unitServer(unit, requests, sockets)));
+    for (const unit of units) ports.push(await opened(unitServer(unit, requests, held, sockets, unitSockets.get(unit.id) as Set<Socket>)));
     const listPort = await opened(listServer(units, ports, requests, sockets, options));
-    return { listPort, requests, openSockets: () => sockets.size, close: () => closeAll(servers, sockets) };
+    return {
+      listPort,
+      requests,
+      openSockets: () => sockets.size,
+      notify: (id, uri, value) => {
+        const frame = line({ vdp: { method: "notify", uri, data: value === undefined ? {} : { current_value: value } } });
+        for (const socket of unitSockets.get(id) ?? []) socket.write(frame);
+      },
+      answerHeld: () => {
+        for (const answer of held.splice(0)) answer();
+      },
+      close: () => closeAll(servers, sockets),
+    };
   } catch (error) {
     await closeAll(servers, sockets);
     throw error;
@@ -121,16 +153,26 @@ export async function startPeer(units: readonly PeerUnit[], options: PeerOptions
 }
 
 const PARAMETERS = "/vd/parameters/";
+const METERS = "/vd/meters/";
+const REGISTRATIONS = ["regist", "unregist"];
 
-function unitServer(unit: PeerUnit, requests: string[], sockets: Set<Socket>): Server {
+function unitServer(unit: PeerUnit, requests: string[], held: (() => void)[], ...trackers: Set<Socket>[]): Server {
   let synchronizations = 0;
   const parameters = new Map(Object.entries(unit.parameters ?? {}));
   return serveLines((socket, message) => {
     requests.push(`${unit.id} ${describe(message, "vdp")}`);
     const vdp = message?.["vdp"] as { method?: string; uri?: string; data?: { current_value?: unknown } } | undefined;
-    if (typeof vdp?.uri === "string" && vdp.uri.startsWith(PARAMETERS)) {
-      const [path] = vdp.uri.split("?") as [string];
+    if (typeof vdp?.uri === "string" && (vdp.uri.startsWith(PARAMETERS) || vdp.uri.startsWith(METERS))) {
+      const [path, query] = vdp.uri.split("?") as [string, string | undefined];
       if (unit.silent?.includes(path)) return;
+      const operation = new URLSearchParams(query).get("operation");
+      if (vdp.method === "post" && operation !== null && REGISTRATIONS.includes(operation)) {
+        const answer = () => socket.write(line({ vdp: { method: "post", uri: vdp.uri, data: { response_code: unit.registrationResponses?.[vdp.uri as string] ?? 200 } } }));
+        if (unit.holdRegistrations === true) held.push(answer);
+        else answer();
+        return;
+      }
+      if (path.startsWith(METERS)) return;
       const key = path.slice(PARAMETERS.length);
       if (vdp.method === "get" && parameters.has(key)) {
         socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { current_value: parameters.get(key) } } }));
@@ -150,7 +192,7 @@ function unitServer(unit: PeerUnit, requests: string[], sockets: Set<Socket>): S
       const firmList = unit.firmware === null ? [{ firm_name: "Boot", firm_version: "1.0" }] : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
       socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { firm_list: firmList } } }));
     }
-  }, sockets);
+  }, ...trackers);
 }
 
 function listServer(units: readonly PeerUnit[], ports: readonly number[], requests: string[], sockets: Set<Socket>, options: PeerOptions): Server {
