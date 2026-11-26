@@ -9,9 +9,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::{AsyncTask, Null, PromiseRaw};
+use napi::bindgen_prelude::{Null, PromiseRaw};
 use napi::tokio::sync::oneshot;
-use napi::{Env, Task};
+use napi::Env;
 use napi_derive::napi;
 use urx_device_transport::connection::{self, ResultAdoption};
 use urx_device_transport::i64_text;
@@ -494,61 +494,77 @@ impl Connection {
     /// The CLI could not adopt `ticket`'s result. Its fatal rule ends the
     /// connection when the result still holds a slot, since an unadopted slot
     /// would stop every later request. Resolves false for an unknown ticket.
-    #[napi]
-    pub fn fail_delivery(&self, ticket: String) -> AsyncTask<FatalTask> {
-        self.fatal(ticket, false)
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn fail_delivery<'env>(
+        &self,
+        env: &'env Env,
+        ticket: String,
+    ) -> napi::Result<PromiseRaw<'env, bool>> {
+        self.fatal(env, ticket, false)
     }
 
     /// Ends the connection if, and only if, `ticket` still owns an unreleased
     /// slot; resolves true otherwise as well.
-    #[napi]
-    pub fn terminate(&self, ticket: String) -> AsyncTask<FatalTask> {
-        self.fatal(ticket, true)
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn terminate<'env>(
+        &self,
+        env: &'env Env,
+        ticket: String,
+    ) -> napi::Result<PromiseRaw<'env, bool>> {
+        self.fatal(env, ticket, true)
     }
 }
 
 impl Connection {
-    fn fatal(&self, ticket: String, unknown_is_done: bool) -> AsyncTask<FatalTask> {
-        // The ticket stays in the table until the task runs: when the task
-        // cannot be queued, the slot is still there for `terminate` to take.
-        AsyncTask::new(FatalTask {
-            connection: self.handle(),
-            slots: Arc::clone(&self.slots),
-            ticket,
-            unknown_is_done,
-        })
-    }
-}
-
-/// Ends a connection for a result that could not be adopted (K6, K37).
-pub struct FatalTask {
-    connection: Arc<connection::Connection>,
-    slots: SharedSlots,
-    ticket: String,
-    unknown_is_done: bool,
-}
-
-impl Task for FatalTask {
-    type Output = bool;
-    type JsValue = bool;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        let taken = lock(&self.slots).held.remove(&self.ticket);
-        Ok(match taken {
-            None => self.unknown_is_done,
-            Some(None) => true,
-            Some(Some(held)) => {
-                // The end takes the slot: the connection closes with the
-                // result still held, and only then is it released.
-                self.connection.close(crate::lifecycle::TEARDOWN_DEADLINE);
-                drop(held);
-                true
+    /// Takes `ticket`'s entry now and, when its result holds a slot, starts
+    /// ending the connection on a thread of its own before any Promise is
+    /// made: the end takes the slot even if the Promise cannot be created.
+    /// The Promise only waits for that end. When the thread cannot be
+    /// started, the entry is put back for a later `terminate`.
+    fn fatal<'env>(
+        &self,
+        env: &'env Env,
+        ticket: String,
+        unknown_is_done: bool,
+    ) -> napi::Result<PromiseRaw<'env, bool>> {
+        let (tx, rx) = oneshot::channel::<bool>();
+        let taken = lock(&self.slots).held.remove(&ticket);
+        match taken {
+            None => {
+                let _ = tx.send(unknown_is_done);
             }
+            Some(None) => {
+                let _ = tx.send(true);
+            }
+            Some(Some(held)) => {
+                let connection = self.handle();
+                // Kept here only until the thread owns it.
+                let slot = Arc::new(Mutex::new(Some(held)));
+                let for_thread = Arc::clone(&slot);
+                let started = std::thread::Builder::new()
+                    .name("urx-fatal-close".to_owned())
+                    .spawn(move || {
+                        let held = lock(&for_thread).take();
+                        // The connection closes with the result still held;
+                        // only then is it released.
+                        connection.close(crate::lifecycle::TEARDOWN_DEADLINE);
+                        drop(held);
+                        let _ = tx.send(true);
+                    });
+                if let Err(error) = started {
+                    if let Some(held) = lock(&slot).take() {
+                        lock(&self.slots).held.insert(ticket, Some(held));
+                    }
+                    return Err(napi::Error::from_reason(format!(
+                        "the connection's end could not be started: {error}"
+                    )));
+                }
+            }
+        }
+        env.spawn_future(async move {
+            rx.await
+                .map_err(|_| napi::Error::from_reason("the connection's end did not report back"))
         })
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
     }
 }
 
