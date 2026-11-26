@@ -6,9 +6,9 @@ The `urx` command line tool for the YAMAHA URX22 / URX44 / URX44V: one-shot read
 
 ## Structure
 
-- `src/` — the command: argument grammar, help and version, terminal and JSON output, exit codes, process lifecycle
+- `src/` — the command: argument grammar, help and version, terminal and JSON output, exit codes, process lifecycle. `src/cli/commands.ts` is the command-binding table that the parser and help both read
 - `vendor/urx-device/` — the shared library at the adopted commit. Never edited here
-- `scripts/` — repository tooling (`build-inputs.mjs`)
+- `scripts/` — repository tooling: `build-inputs.mjs` (checks the build inputs) and `build-info.mjs` (writes `dist/build-info.js`, the versions and commits that `urx --version` shows)
 - `build-inputs.json` — the exact Node and pnpm versions and Node archive hashes a build uses, the one record of them
 - `.github/required-checks.json` — the status checks the `main` ruleset requires, the only copy outside GitHub's settings
 
@@ -19,7 +19,7 @@ git submodule update --init
 pnpm install --frozen-lockfile
 pnpm build-inputs:check   # build-inputs.json agrees with .node-version and package.json
 pnpm typecheck            # source config and test config
-pnpm build                # tsc emit of src/ into dist/
+pnpm build                # tsc emit of src/ into dist/, then dist/build-info.js from the checkout
 pnpm test                 # vitest: src/**/*.test.ts, test/**/*.test.ts and scripts/**/*.test.mjs
 ```
 

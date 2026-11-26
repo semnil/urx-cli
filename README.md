@@ -4,7 +4,7 @@
 
 The `urx` command: operate a connected YAMAHA URX22, URX44 or URX44V and inspect its current state from a terminal or a script. Device definitions and the Device Center transport come from [urx-device](https://github.com/semnil/urx-device), pinned as a Git submodule at `vendor/urx-device`.
 
-**Status:** initial development toward `0.1.0`. The command has no behavior yet.
+**Status:** initial development toward `0.1.0`. The command shows its help and its version; it does not operate a device yet.
 
 ## Layout
 
@@ -12,7 +12,7 @@ The `urx` command: operate a connected YAMAHA URX22, URX44 or URX44V and inspect
 | --- | --- |
 | `src` | The `urx` command: arguments, terminal and JSON output, exit codes and process lifecycle |
 | `vendor/urx-device` | The shared library, at the commit this repository adopts |
-| `scripts` | Repository tooling (`build-inputs.mjs`) |
+| `scripts` | Repository tooling: `build-inputs.mjs` checks the build inputs, `build-info.mjs` embeds the versions and commits into the build |
 | `build-inputs.json` | The exact Node and pnpm versions and the Node archive hashes a build uses |
 
 ## Building and testing
