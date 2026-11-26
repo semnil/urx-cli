@@ -2,8 +2,8 @@
 // runtime assembled into the fixed layout, with a release manifest that lists
 // every file it owns by its SHA-256 and names the identities it was built
 // from. It reads dist-release/ and writes dist-bundle/, both at the
-// repository root, and removes a previous dist-bundle/ only when it holds
-// just the files its manifest lists. The Node archive is given by path and read once: the bytes whose
+// repository root, and stops when dist-bundle/ already exists rather than
+// remove it. The Node archive is given by path and read once: the bytes whose
 // hash matches the one build-inputs.json records for this platform are the
 // bytes extracted. Nothing is downloaded here, the bundle has no links, and
 // on macOS its directories and executables are 0755 and its other files 0644.
@@ -95,17 +95,6 @@ export function snapshotRelease(release, snapshot, copy = cpSync) {
 }
 
 export { filesUnder };
-
-/** The files a bundle build made in the bundle at `path`, its manifest included, or null when it is not a bundle. */
-export function bundleFiles(path) {
-  try {
-    const manifest = JSON.parse(readFileSync(join(path, "release-manifest.json"), "utf8"));
-    if (manifest?.product !== PRODUCT || manifest?.format !== FORMAT || !Array.isArray(manifest.files)) return null;
-    return [...manifest.files.map((file) => file.path), "release-manifest.json"];
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Gives the bundle at `root` the modes it is distributed with, whatever the
@@ -222,8 +211,8 @@ async function main(argv) {
       rmSync(staging, { recursive: true, force: true });
       throw error;
     }
-    // Replaces a bundle at the output, or removes `staging` and throws.
-    publishOutput(staging, output, { label: "bundle build", ownedFiles: bundleFiles });
+    // Moves `staging` into place, or removes it and throws when the output exists.
+    publishOutput(staging, output, { label: "bundle build" });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

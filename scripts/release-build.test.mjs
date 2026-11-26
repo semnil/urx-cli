@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, launcherArtifact, publishOutput as publishWith, recordedProblems, releaseOutputFiles, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { exportRelease, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -128,128 +128,75 @@ describe("release output", () => {
     return path;
   };
   const contents = (path) => [readFileSync(join(path, "main.js"), "utf8"), readFileSync(join(path, "native", "urx-native.node"), "utf8")];
-  const asides = () => readdirSync(scratch).filter((name) => name.startsWith("dist-release-previous-"));
-  /** The files `directory` makes, for an output that holds them; anything else is not one. */
-  const ours = (path) => (existsSync(join(path, "main.js")) ? ["main.js", "native/urx-native.node"] : null);
-  const publishOutput = (staging, output, options = {}) => publishWith(staging, output, { ownedFiles: ours, ...options });
 
-  it("replace the output with one complete staging directory and remove the previous one", () => {
+  it("create the output from one complete staging directory", () => {
     const output = join(scratch, "dist-release");
-    publishOutput(directory("staging-1", "first"), output);
-    expect(contents(output)).toEqual(["first", "first"]);
-    publishOutput(directory("staging-2", "second"), output);
-    expect(contents(output)).toEqual(["second", "second"]);
-    expect(asides()).toEqual([]);
-    expect(existsSync(join(scratch, "staging-2"))).toBe(false);
-  });
-
-  it("restore the previous output whole when the new one cannot be put in place", () => {
-    const output = directory("dist-release", "previous");
     const staging = directory("staging", "new");
-    const failing = (from, to) => {
-      if (from === staging) throw Object.assign(new Error("busy"), { code: "EBUSY" });
-      renameSync(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: failing })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["previous", "previous"]);
+    publishOutput(staging, output);
+    expect(contents(output)).toEqual(["new", "new"]);
     expect(existsSync(staging)).toBe(false);
-    expect(asides()).toEqual([]);
   });
 
-  it("report the failed set-aside, not the cleanup, when the previous output cannot be set aside", () => {
-    const output = directory("dist-release", "previous");
+  it("leave whatever is at the output as it is, remove the new one and stop", () => {
+    const previous = directory("dist-release", "previous");
+    writeFileSync(join(previous, "keep.txt"), "the user's");
     const staging = directory("staging", "new");
-    const warnings = [];
-    const failing = (from, to) => {
-      if (from === output) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      renameSync(from, to);
-    };
-    const stuck = (path) => {
-      if (path === staging) throw Object.assign(new Error("read-only"), { code: "EACCES" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    let thrown;
+    expect(() => publishOutput(staging, previous)).toThrow(/already exists; the release build leaves it as it is, so remove it to build again/);
+    expect(contents(previous)).toEqual(["previous", "previous"]);
+    expect(readFileSync(join(previous, "keep.txt"), "utf8")).toBe("the user's");
+    expect(existsSync(staging)).toBe(false);
+
+    const file = join(scratch, "dist-bundle");
+    writeFileSync(file, "the user's");
+    expect(() => publishOutput(directory("staging", "new"), file, { label: "bundle build" })).toThrow(/already exists; the bundle build leaves it/);
+    expect(readFileSync(file, "utf8")).toBe("the user's");
+  });
+
+  it("leave a link at the output as it is", () => {
+    const target = directory("elsewhere", "the user's");
+    const output = join(scratch, "dist-release");
     try {
-      publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message) });
-    } catch (error) {
-      thrown = error;
+      symlinkSync(target, output, "dir");
+    } catch {
+      return; // Creating a link needs a privilege this Windows account may lack.
     }
-    expect(thrown?.message).toMatch(/could not be set aside/);
-    expect(thrown?.cause?.code).toBe("EPERM");
-    expect(contents(output)).toEqual(["previous", "previous"]);
-    expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
+    expect(() => publishOutput(directory("staging", "new"), output)).toThrow(/already exists/);
+    expect(contents(output)).toEqual(["the user's", "the user's"]);
   });
 
-  it("restore the previous output even when the new one can be neither put in place nor removed", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "new");
-    const warnings = [];
-    const failing = (from, to) => {
-      if (from === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      renameSync(from, to);
-    };
-    const stuck = (path) => {
-      if (path === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    expect(() => publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message) })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["previous", "previous"]);
-    expect(asides()).toEqual([]);
-    expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
-  });
-
-  it("leave something at the output that is not this build's output, and remove the new one", () => {
+  it("leave the output another build created first, and remove the new one", () => {
     const output = join(scratch, "dist-release");
-    mkdirSync(output);
-    writeFileSync(join(output, "keep.txt"), "the user's");
-    const staging = directory("staging", "new");
-    expect(() => publishOutput(staging, output)).toThrow(/is not a release build's output/);
-    expect(readFileSync(join(output, "keep.txt"), "utf8")).toBe("the user's");
-    expect(existsSync(staging)).toBe(false);
-    expect(asides()).toEqual([]);
-  });
-
-  it("keep a previous output that holds a file it did not make, aside, and still publish the new one", () => {
-    const output = directory("dist-release", "previous");
-    writeFileSync(join(output, "native", "keep.txt"), "the user's");
-    const warnings = [];
-    publishOutput(directory("staging", "new"), output, { warn: (message) => warnings.push(message) });
-    expect(contents(output)).toEqual(["new", "new"]);
-    const [aside, ...others] = asides();
-    expect(others).toEqual([]);
-    expect(readFileSync(join(scratch, aside, "native", "keep.txt"), "utf8")).toBe("the user's");
-    expect(warnings).toEqual([`release build: the previous output held files it had not made, so it is kept at ${join(scratch, aside)}`]);
-  });
-
-  it("keep what took the output's place between the check and the set-aside rename", () => {
-    const output = directory("dist-release", "previous");
-    const warnings = [];
-    let swapped = false;
-    const swapping = (from, to) => {
-      if (from === output && !swapped) {
-        swapped = true;
-        rmSync(output, { recursive: true, force: true });
-        mkdirSync(output);
-        writeFileSync(join(output, "keep.txt"), "the user's");
-      }
+    const staging = directory("staging", "this");
+    const raced = (from, to) => {
+      directory("dist-release", "other");
       renameSync(from, to);
     };
-    publishOutput(directory("staging", "new"), output, { rename: swapping, warn: (message) => warnings.push(message) });
-    expect(contents(output)).toEqual(["new", "new"]);
-    expect(readFileSync(join(scratch, asides()[0], "keep.txt"), "utf8")).toBe("the user's");
-    expect(warnings).toHaveLength(1);
+    expect(() => publishOutput(staging, output, { rename: raced })).toThrow(/could not be created; another release build may have created it first/);
+    expect(contents(output)).toEqual(["other", "other"]);
+    expect(existsSync(staging)).toBe(false);
+  });
+
+  it("warn, naming the build, when the new output cannot be removed", () => {
+    const output = directory("dist-bundle", "previous");
+    const staging = directory("staging", "new");
+    const warnings = [];
+    const stuck = () => {
+      throw Object.assign(new Error("read-only"), { code: "EACCES" });
+    };
+    expect(() => publishOutput(staging, output, { remove: stuck, warn: (message) => warnings.push(message), label: "bundle build" })).toThrow(/already exists/);
+    expect(warnings).toEqual([`bundle build: the new output could not be removed from ${staging}`]);
+    expect(contents(output)).toEqual(["previous", "previous"]);
   });
 
   it("record the files a release build made, with their hashes and sizes, and read them back", () => {
     const output = directory("dist-release", "previous");
-    expect(releaseOutputFiles(output)).toBe(null);
+    expect(releaseRecord(output)).toBe(null);
     writeReleaseFiles(output);
     const hash = sha256(Buffer.from("previous"));
     expect(releaseRecord(output)).toEqual([
       { path: "main.js", sha256: hash, size: 8 },
       { path: "native/urx-native.node", sha256: hash, size: 8 },
     ]);
-    expect(releaseOutputFiles(output)).toEqual(["main.js", "native/urx-native.node", "release-files.json"]);
   });
 
   it("tell a recorded file that is missing or not as it was built", () => {
@@ -268,76 +215,6 @@ describe("release output", () => {
     expect(releaseRecord(output)).toBe(null);
   });
 
-  it("is refused without a way to tell what a previous output holds", () => {
-    expect(() => publishWith(directory("staging", "new"), join(scratch, "dist-release"))).toThrow(/needs ownedFiles/);
-  });
-
-  it("name the build that warns, as its caller labels it", () => {
-    const output = directory("dist-bundle", "previous");
-    const staging = directory("staging", "new");
-    const warnings = [];
-    const failing = (from, to) => {
-      if (from === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      renameSync(from, to);
-    };
-    const stuck = (path) => {
-      if (path === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    expect(() => publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message), label: "bundle build" })).toThrow(
-      /could not be replaced; another bundle build/,
-    );
-    expect(warnings).toEqual([`bundle build: the new output could not be removed from ${staging}`]);
-  });
-
-  it("leave the other release's output when it got there first, and keep this release's previous output aside", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "this");
-    const warnings = [];
-    const raced = (from, to) => {
-      if (from === staging) {
-        // Another release finishes between this one's set-aside and rename.
-        directory("dist-release", "other");
-      }
-      renameSync(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: raced, warn: (message) => warnings.push(message) })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["other", "other"]);
-    expect(asides()).toHaveLength(1);
-    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
-    expect(warnings).toHaveLength(1);
-  });
-
-  it("keep the new output and only warn when the previous one cannot be removed", () => {
-    const output = directory("dist-release", "previous");
-    const warnings = [];
-    const stuck = (path) => {
-      if (path.includes("-previous-")) throw Object.assign(new Error("read-only"), { code: "EACCES" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    publishOutput(directory("staging", "new"), output, { remove: stuck, warn: (message) => warnings.push(message) });
-    expect(contents(output)).toEqual(["new", "new"]);
-    expect(asides()).toHaveLength(1);
-    expect(warnings).toHaveLength(1);
-  });
-
-  it("leave the previous output complete under its set-aside name when interrupted between the renames", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "new");
-    const interrupted = (from, to) => {
-      if (from === staging) throw new Error("interrupted");
-      renameSync(from, to);
-    };
-    // Restoring is part of the same failure path; without it, the set-aside copy is complete.
-    const noRestore = (from, to) => {
-      if (from.includes("-previous-")) throw new Error("interrupted again");
-      interrupted(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: noRestore, warn: () => {} })).toThrow();
-    expect(existsSync(output)).toBe(false);
-    expect(asides()).toHaveLength(1);
-    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
-  });
 });
 
 describe("the launcher's location", () => {

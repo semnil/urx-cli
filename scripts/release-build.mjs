@@ -4,14 +4,15 @@
 // worktree of their own, so edits to the working tree, the index, Git's
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
-// `--release` and a Cargo target directory of their own, and the result
-// replaces dist-release/ as one directory, so concurrent release builds never
-// mix their halves. The launcher is built from the same export into the same
+// `--release` and a Cargo target directory of their own, and the result is
+// moved into place as dist-release/ in one rename, so concurrent release
+// builds never mix their halves. A build stops when dist-release/ already
+// exists rather than remove it. The launcher is built from the same export into the same
 // target directory and placed at dist-release/launcher/ for the bundle
 // (scripts/build-bundle.mjs).
 
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
@@ -131,12 +132,6 @@ export function releaseRecord(path) {
   }
 }
 
-/** The files a release build made in the output at `path`, its record included, or null when it is not a release output. */
-export function releaseOutputFiles(path) {
-  const files = releaseRecord(path);
-  return files === null ? null : [...files.map((file) => file.path), RELEASE_FILES];
-}
-
 /** How the files under `root` differ from `files` (path, SHA-256, size): each one missing or changed, by path. */
 export function recordedProblems(root, files) {
   const problems = [];
@@ -185,41 +180,19 @@ export function removeExport(root, destination) {
 }
 
 /**
- * Makes `staging` the directory at `output`, one directory rename at a time:
- *
- * 1. the previous output is renamed aside, whole, to `<output>-previous-<id>`;
- * 2. `staging` is renamed into its place;
- * 3. the set-aside output is removed.
- *
- * When step 2 fails (another build put its output there in between, or the
- * rename itself failed), the previous output is renamed back, so `output`
- * always holds one build's complete result, never a partly removed one. An
- * interruption between the steps leaves the previous output complete under its
- * set-aside name. A failed step 3 only warns: the new output is complete, and
- * whatever could not be removed stays under the set-aside name. Warnings start
- * with `label`, the build that publishes (the release build or the bundle build).
- *
- * `ownedFiles` names the files a previous output of this build made, or
- * returns null for something that is not one. Something at `output` that is
- * not one, a link included, is left as it is: `staging` is removed and
- * nothing is published. In step 3 the set-aside output is removed only when it
- * holds exactly the files it names; one that holds anything else, a file added
- * to it or a directory that took its place in between, is kept under its
- * set-aside name with a warning.
+ * Moves `staging` into place as `output` in one rename. A build never removes
+ * a previous output: when anything is at `output`, a link included, it is left
+ * as it is, `staging` is removed and the build stops; the user removes the
+ * previous output before building again. Another build that creates the
+ * output between the check and the rename makes the rename fail, with the
+ * same result. Warnings start with `label`, the build that publishes (the
+ * release build or the bundle build).
  */
 export function publishOutput(
   staging,
   output,
-  {
-    rename = renameSync,
-    remove = (path) => rmSync(path, { recursive: true, force: true }),
-    warn = (message) => process.stderr.write(`${message}\n`),
-    label = "release build",
-    ownedFiles,
-    list = filesUnder,
-  } = {},
+  { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`), label = "release build" } = {},
 ) {
-  if (typeof ownedFiles !== "function") throw new Error("publishOutput needs ownedFiles");
   const abandon = (error) => {
     try {
       remove(staging);
@@ -228,58 +201,18 @@ export function publishOutput(
     }
     throw error;
   };
-  let existing;
+  let exists = true;
   try {
-    existing = lstatSync(output);
+    lstatSync(output);
   } catch (error) {
     if (error?.code !== "ENOENT") abandon(new Error(`${output} could not be examined`, { cause: error }));
+    exists = false;
   }
-  if (existing !== undefined && (!existing.isDirectory() || ownedFiles(output) === null)) {
-    abandon(new Error(`${output} is not a ${label}'s output, so it is left as it is`));
-  }
-  const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
-  let setAside = false;
-  try {
-    rename(output, aside);
-    setAside = true;
-  } catch (error) {
-    if (error?.code !== "ENOENT") abandon(new Error(`the previous ${output} could not be set aside`, { cause: error }));
-  }
+  if (exists) abandon(new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`));
   try {
     rename(staging, output);
   } catch (error) {
-    // Restoring comes first, so a failing cleanup cannot leave `output` empty.
-    if (setAside) {
-      try {
-        rename(aside, output);
-      } catch {
-        warn(`${label}: the previous output is kept at ${aside}`);
-      }
-    }
-    try {
-      remove(staging);
-    } catch {
-      warn(`${label}: the new output could not be removed from ${staging}`);
-    }
-    throw new Error(`${output} could not be replaced; another ${label} may have replaced it first`, { cause: error });
-  }
-  if (setAside) {
-    const made = ownedFiles(aside);
-    let held = null;
-    try {
-      held = list(aside);
-    } catch {
-      // A link or a special file: not something this build made.
-    }
-    if (made === null || held === null || JSON.stringify([...made].sort()) !== JSON.stringify(held)) {
-      warn(`${label}: the previous output held files it had not made, so it is kept at ${aside}`);
-      return;
-    }
-    try {
-      remove(aside);
-    } catch {
-      warn(`${label}: the previous output could not be removed from ${aside}`);
-    }
+    abandon(new Error(`${output} could not be created; another ${label} may have created it first`, { cause: error }));
   }
 }
 
@@ -329,8 +262,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       rmSync(staging, { recursive: true, force: true });
       throw error;
     }
-    // Replaces the output, or removes `staging` and throws.
-    publishOutput(staging, output, { ownedFiles: releaseOutputFiles });
+    // Moves `staging` into place, or removes it and throws when the output exists.
+    publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
     removeExport(root, source);

@@ -2,7 +2,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { archiveUrl, assemble, bundleFiles, filesUnder, manifestOf, normalizeModes, platformOf, sha256, snapshotRelease, verifiedArchive } from "./build-bundle.mjs";
+import { archiveUrl, assemble, filesUnder, manifestOf, normalizeModes, platformOf, sha256, snapshotRelease, verifiedArchive } from "./build-bundle.mjs";
 
 const temporary = [];
 const scratch = () => {
@@ -56,16 +56,6 @@ describe("the installed bundle (K18, K38)", () => {
       renameSync(join(dir, "next"), release);
     };
     expect(() => snapshotRelease(release, join(dir, "mixed"), replacing)).toThrow(/was replaced while it was copied/);
-  });
-
-  it("names the files a bundle build made from the bundle's manifest", () => {
-    const dir = scratch();
-    write(dir, "bundle/release-manifest.json", JSON.stringify({ product: "urx-cli", format: 1, files: [{ path: "bin/urx" }] }));
-    write(dir, "other/release-manifest.json", JSON.stringify({ product: "something-else", format: 1, files: [] }));
-    write(dir, "plain/keep.txt");
-    expect(bundleFiles(join(dir, "bundle"))).toEqual(["bin/urx", "release-manifest.json"]);
-    expect(bundleFiles(join(dir, "other"))).toBe(null);
-    expect(bundleFiles(join(dir, "plain"))).toBe(null);
   });
 
   it.skipIf(process.platform === "win32")("gives directories and executables 0755 and other files 0644, whatever they had", () => {
