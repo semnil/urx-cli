@@ -25,6 +25,7 @@ pnpm build:native
 pnpm test
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
 ## Conventions

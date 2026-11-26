@@ -1,0 +1,3 @@
+packages:
+  # The shared control package, consumed from the pinned submodule.
+  - vendor/urx-device/packages/control

@@ -10,7 +10,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,8 @@ import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+/** The common TypeScript package inside the export. */
+const CONTROL_PATH = join(COMMON_PATH, "packages", "control");
 
 function git(directory, args, extra = {}) {
   return execFileSync("git", ["-C", directory, ...args], { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "pipe"], ...extra });
@@ -51,6 +53,27 @@ export function exportRelease(root, destination) {
     COMMON_PATH,
   ]);
   return { appCommit, commonCommit };
+}
+
+/**
+ * Copies the compiled common package from the export into the output's own
+ * node_modules, as real files: the output then loads the urx-device code of
+ * this release wherever it is placed, without the checkout or a symlink.
+ */
+export function copyCommonPackage(source, output) {
+  const from = join(source, CONTROL_PATH);
+  const to = join(output, "node_modules", "@urx", "device-control");
+  cpSync(join(from, "package.json"), join(to, "package.json"));
+  cpSync(join(from, "dist"), join(to, "dist"), { recursive: true, dereference: true });
+}
+
+/**
+ * Gives the output a package.json of its own that says its `.js` files are ES
+ * modules, so a `"type": "commonjs"` in a directory above it cannot change how
+ * Node reads them.
+ */
+export function markModuleFormat(output) {
+  writeFileSync(join(output, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
 }
 
 /**
@@ -143,6 +166,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const pnpm = process.env.npm_execpath;
     if (pnpm === undefined || !/pnpm/i.test(pnpm)) throw new Error("run the release build through `pnpm build:release`");
     run([pnpm, "install", "--frozen-lockfile", "--prefer-offline"]);
+    run([pnpm, "exec", "tsc", "-p", "vendor/urx-device/packages/control/tsconfig.json"]);
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);
@@ -151,6 +175,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const staging = mkdtempSync(join(root, "dist-release-"));
     rmSync(staging, { recursive: true, force: true });
     cpSync(join(source, "dist"), staging, { recursive: true });
+    copyCommonPackage(source, staging);
+    markModuleFormat(staging);
     publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {

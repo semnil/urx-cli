@@ -5,6 +5,14 @@ const commit = "0123456789abcdef0123456789abcdef01234567";
 const expected: ExpectedIdentity = { bridgeRevision: 1, commonVersion: "0.1.0", commonCommit: commit };
 const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 1, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
 const url = new URL("file:///nowhere/urx-native.node");
+/** An addon module with every export the loader requires. */
+const addonWith = (buildIdentity: () => unknown) => ({
+  buildIdentity,
+  discover: () => Promise.resolve(null),
+  openConnection: () => Promise.resolve(null),
+  Control: class {},
+  Connection: class {},
+});
 
 describe("addon identity check", () => {
   it("accept an addon built from the same urx-device commit for the same bridge revision", () => {
@@ -46,19 +54,24 @@ describe("addon loading", () => {
     ).toEqual({ ok: false, problem: "missing" });
   });
 
-  it("report an addon without buildIdentity as malformed", () => {
+  it("report an addon without one of its required exports as malformed", () => {
     for (const module of [null, {}, { buildIdentity: 1 }]) expect(loadAddon(url, () => module)).toEqual({ ok: false, problem: "malformed" });
+    for (const name of ["buildIdentity", "discover", "openConnection", "Control", "Connection"]) {
+      const module: Record<string, unknown> = addonWith(() => reported());
+      delete module[name];
+      expect(loadAddon(url, () => module), name).toEqual({ ok: false, problem: "malformed" });
+    }
   });
 
   it("open only an addon whose identity matches", () => {
-    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported() }))).toMatchObject({ ok: true });
-    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 9 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => addonWith(() => reported()))).toMatchObject({ ok: true });
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 9 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
     expect(
-      openAddon(expected, url, () => ({
-        buildIdentity: () => {
+      openAddon(expected, url, () =>
+        addonWith(() => {
           throw new Error("boom");
-        },
-      })),
+        }),
+      ),
     ).toEqual({ ok: false, problem: "malformed" });
   });
 });
