@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, isReleaseOutput, launcherArtifact, markModuleFormat, publishOutput, removeExport } from "./release-build.mjs";
+import { exportRelease, launcherArtifact, publishOutput as publishWith, releaseOutputFiles, removeExport, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -129,6 +129,9 @@ describe("release output", () => {
   };
   const contents = (path) => [readFileSync(join(path, "main.js"), "utf8"), readFileSync(join(path, "native", "urx-native.node"), "utf8")];
   const asides = () => readdirSync(scratch).filter((name) => name.startsWith("dist-release-previous-"));
+  /** The files `directory` makes, for an output that holds them; anything else is not one. */
+  const ours = (path) => (existsSync(join(path, "main.js")) ? ["main.js", "native/urx-native.node"] : null);
+  const publishOutput = (staging, output, options = {}) => publishWith(staging, output, { ownedFiles: ours, ...options });
 
   it("replace the output with one complete staging directory and remove the previous one", () => {
     const output = join(scratch, "dist-release");
@@ -200,18 +203,52 @@ describe("release output", () => {
     mkdirSync(output);
     writeFileSync(join(output, "keep.txt"), "the user's");
     const staging = directory("staging", "new");
-    expect(() => publishOutput(staging, output, { owned: isReleaseOutput })).toThrow(/is not a release build's output/);
+    expect(() => publishOutput(staging, output)).toThrow(/is not a release build's output/);
     expect(readFileSync(join(output, "keep.txt"), "utf8")).toBe("the user's");
     expect(existsSync(staging)).toBe(false);
     expect(asides()).toEqual([]);
   });
 
-  it("recognize a release build's output by its module format and build information", () => {
+  it("keep a previous output that holds a file it did not make, aside, and still publish the new one", () => {
     const output = directory("dist-release", "previous");
-    expect(isReleaseOutput(output)).toBe(false);
-    markModuleFormat(output);
-    writeFileSync(join(output, "build-info.js"), "");
-    expect(isReleaseOutput(output)).toBe(true);
+    writeFileSync(join(output, "native", "keep.txt"), "the user's");
+    const warnings = [];
+    publishOutput(directory("staging", "new"), output, { warn: (message) => warnings.push(message) });
+    expect(contents(output)).toEqual(["new", "new"]);
+    const [aside, ...others] = asides();
+    expect(others).toEqual([]);
+    expect(readFileSync(join(scratch, aside, "native", "keep.txt"), "utf8")).toBe("the user's");
+    expect(warnings).toEqual([`release build: the previous output held files it had not made, so it is kept at ${join(scratch, aside)}`]);
+  });
+
+  it("keep what took the output's place between the check and the set-aside rename", () => {
+    const output = directory("dist-release", "previous");
+    const warnings = [];
+    let swapped = false;
+    const swapping = (from, to) => {
+      if (from === output && !swapped) {
+        swapped = true;
+        rmSync(output, { recursive: true, force: true });
+        mkdirSync(output);
+        writeFileSync(join(output, "keep.txt"), "the user's");
+      }
+      renameSync(from, to);
+    };
+    publishOutput(directory("staging", "new"), output, { rename: swapping, warn: (message) => warnings.push(message) });
+    expect(contents(output)).toEqual(["new", "new"]);
+    expect(readFileSync(join(scratch, asides()[0], "keep.txt"), "utf8")).toBe("the user's");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("record the files a release build made, and read them back", () => {
+    const output = directory("dist-release", "previous");
+    expect(releaseOutputFiles(output)).toBe(null);
+    writeReleaseFiles(output);
+    expect(releaseOutputFiles(output)).toEqual(["main.js", "native/urx-native.node", "release-files.json"]);
+  });
+
+  it("is refused without a way to tell what a previous output holds", () => {
+    expect(() => publishWith(directory("staging", "new"), join(scratch, "dist-release"))).toThrow(/needs ownedFiles/);
   });
 
   it("name the build that warns, as its caller labels it", () => {

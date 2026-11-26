@@ -12,9 +12,9 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
@@ -80,12 +80,39 @@ export function markModuleFormat(output) {
 
 const MODULE_FORMAT = `${JSON.stringify({ type: "module" })}\n`;
 
-/** Whether the directory at `path` is a release build's output: its own module-format package.json and build information. */
-export function isReleaseOutput(path) {
+/** Every regular file under `root`, as sorted relative paths with `/` separators; a link or another kind of file is refused. */
+export function filesUnder(root) {
+  const found = [];
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`the output may hold no link: ${relative(root, path)}`);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) found.push(relative(root, path).split(sep).join("/"));
+      else throw new Error(`the output may hold regular files only: ${relative(root, path)}`);
+    }
+  };
+  walk(root);
+  return found.sort();
+}
+
+/** The record of the files a release build made in its output, kept in that output. */
+export const RELEASE_FILES = "release-files.json";
+
+/** Records in `output` the files it holds, as the files this release build made there. */
+export function writeReleaseFiles(output) {
+  const files = filesUnder(output).filter((path) => path !== RELEASE_FILES);
+  writeFileSync(join(output, RELEASE_FILES), `${JSON.stringify({ product: "urx-cli", output: "release", files }, null, 2)}\n`);
+}
+
+/** The files a release build made in the output at `path`, its record included, or null when it is not a release output. */
+export function releaseOutputFiles(path) {
   try {
-    return readFileSync(join(path, "package.json"), "utf8") === MODULE_FORMAT && existsSync(join(path, "build-info.js"));
+    const record = JSON.parse(readFileSync(join(path, RELEASE_FILES), "utf8"));
+    if (record?.product !== "urx-cli" || record?.output !== "release" || !Array.isArray(record.files)) return null;
+    return [...record.files, RELEASE_FILES];
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -135,9 +162,13 @@ export function removeExport(root, destination) {
  * whatever could not be removed stays under the set-aside name. Warnings start
  * with `label`, the build that publishes (the release build or the bundle build).
  *
- * Something at `output` that `owned` does not recognize as this build's
- * output, a link included, is left as it is: `staging` is removed and nothing
- * is published.
+ * `ownedFiles` names the files a previous output of this build made, or
+ * returns null for something that is not one. Something at `output` that is
+ * not one, a link included, is left as it is: `staging` is removed and
+ * nothing is published. In step 3 the set-aside output is removed only when it
+ * holds exactly the files it names; one that holds anything else, a file added
+ * to it or a directory that took its place in between, is kept under its
+ * set-aside name with a warning.
  */
 export function publishOutput(
   staging,
@@ -147,9 +178,11 @@ export function publishOutput(
     remove = (path) => rmSync(path, { recursive: true, force: true }),
     warn = (message) => process.stderr.write(`${message}\n`),
     label = "release build",
-    owned = () => true,
+    ownedFiles,
+    list = filesUnder,
   } = {},
 ) {
+  if (typeof ownedFiles !== "function") throw new Error("publishOutput needs ownedFiles");
   const abandon = (error) => {
     try {
       remove(staging);
@@ -164,7 +197,7 @@ export function publishOutput(
   } catch (error) {
     if (error?.code !== "ENOENT") abandon(new Error(`${output} could not be examined`, { cause: error }));
   }
-  if (existing !== undefined && (!existing.isDirectory() || !owned(output))) {
+  if (existing !== undefined && (!existing.isDirectory() || ownedFiles(output) === null)) {
     abandon(new Error(`${output} is not a ${label}'s output, so it is left as it is`));
   }
   const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
@@ -194,6 +227,17 @@ export function publishOutput(
     throw new Error(`${output} could not be replaced; another ${label} may have replaced it first`, { cause: error });
   }
   if (setAside) {
+    const made = ownedFiles(aside);
+    let held = null;
+    try {
+      held = list(aside);
+    } catch {
+      // A link or a special file: not something this build made.
+    }
+    if (made === null || held === null || JSON.stringify([...made].sort()) !== JSON.stringify(held)) {
+      warn(`${label}: the previous output held files it had not made, so it is kept at ${aside}`);
+      return;
+    }
     try {
       remove(aside);
     } catch {
@@ -243,12 +287,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
       copyCommonPackage(source, staging);
       markModuleFormat(staging);
+      writeReleaseFiles(staging);
     } catch (error) {
       rmSync(staging, { recursive: true, force: true });
       throw error;
     }
     // Replaces the output, or removes `staging` and throws.
-    publishOutput(staging, output, { owned: isReleaseOutput });
+    publishOutput(staging, output, { ownedFiles: releaseOutputFiles });
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
     removeExport(root, source);

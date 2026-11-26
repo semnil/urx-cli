@@ -2,7 +2,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { archiveUrl, assemble, filesUnder, isBundle, manifestOf, normalizeModes, platformOf, sha256, snapshotRelease, verifiedArchive } from "./build-bundle.mjs";
+import { archiveUrl, assemble, bundleFiles, filesUnder, manifestOf, normalizeModes, platformOf, sha256, snapshotRelease, verifiedArchive } from "./build-bundle.mjs";
 
 const temporary = [];
 const scratch = () => {
@@ -58,14 +58,14 @@ describe("the installed bundle (K18, K38)", () => {
     expect(() => snapshotRelease(release, join(dir, "mixed"), replacing)).toThrow(/was replaced while it was copied/);
   });
 
-  it("replaces only a bundle at the output", () => {
+  it("names the files a bundle build made from the bundle's manifest", () => {
     const dir = scratch();
-    write(dir, "bundle/release-manifest.json", JSON.stringify({ product: "urx-cli", format: 1, files: [] }));
-    write(dir, "other/release-manifest.json", JSON.stringify({ product: "something-else", format: 1 }));
+    write(dir, "bundle/release-manifest.json", JSON.stringify({ product: "urx-cli", format: 1, files: [{ path: "bin/urx" }] }));
+    write(dir, "other/release-manifest.json", JSON.stringify({ product: "something-else", format: 1, files: [] }));
     write(dir, "plain/keep.txt");
-    expect(isBundle(join(dir, "bundle"))).toBe(true);
-    expect(isBundle(join(dir, "other"))).toBe(false);
-    expect(isBundle(join(dir, "plain"))).toBe(false);
+    expect(bundleFiles(join(dir, "bundle"))).toEqual(["bin/urx", "release-manifest.json"]);
+    expect(bundleFiles(join(dir, "other"))).toBe(null);
+    expect(bundleFiles(join(dir, "plain"))).toBe(null);
   });
 
   it.skipIf(process.platform === "win32")("gives directories and executables 0755 and other files 0644, whatever they had", () => {
@@ -84,7 +84,7 @@ describe("the installed bundle (K18, K38)", () => {
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    for (const path of ["main.js", "build-info.js", "package.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"]) write(release, path);
+    for (const path of ["main.js", "build-info.js", "package.json", "release-files.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"]) write(release, path);
     const node = join(dir, "node-v26");
     write(node, "bin/node", "node");
     write(node, "LICENSE", "node license");

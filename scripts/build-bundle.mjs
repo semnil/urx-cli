@@ -2,8 +2,8 @@
 // runtime assembled into the fixed layout, with a release manifest that lists
 // every file it owns by its SHA-256 and names the identities it was built
 // from. It reads dist-release/ and writes dist-bundle/, both at the
-// repository root, and replaces dist-bundle/ only when what is there is a
-// bundle. The Node archive is given by path and read once: the bytes whose
+// repository root, and removes a previous dist-bundle/ only when it holds
+// just the files its manifest lists. The Node archive is given by path and read once: the bytes whose
 // hash matches the one build-inputs.json records for this platform are the
 // bytes extracted. Nothing is downloaded here, the bundle has no links, and
 // on macOS its directories and executables are 0755 and its other files 0644.
@@ -24,7 +24,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { publishOutput } from "./release-build.mjs";
+import { filesUnder, publishOutput, RELEASE_FILES } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
@@ -95,13 +95,16 @@ export function snapshotRelease(release, snapshot, copy = cpSync) {
   if (directoryIdentity(release) !== before) throw new Error(`${release} was replaced while it was copied; build the bundle again`);
 }
 
-/** Whether the directory at `path` is a bundle: its release manifest is a urx-cli format 1 manifest. */
-export function isBundle(path) {
+export { filesUnder };
+
+/** The files a bundle build made in the bundle at `path`, its manifest included, or null when it is not a bundle. */
+export function bundleFiles(path) {
   try {
     const manifest = JSON.parse(readFileSync(join(path, "release-manifest.json"), "utf8"));
-    return manifest?.product === PRODUCT && manifest?.format === FORMAT;
+    if (manifest?.product !== PRODUCT || manifest?.format !== FORMAT || !Array.isArray(manifest.files)) return null;
+    return [...manifest.files.map((file) => file.path), "release-manifest.json"];
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -122,22 +125,6 @@ export function normalizeModes(root, executables, platform = process.platform) {
     }
   };
   walk(root);
-}
-
-/** Every regular file under `root`, as sorted relative paths with `/` separators. */
-export function filesUnder(root) {
-  const found = [];
-  const walk = (directory) => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isSymbolicLink()) throw new Error(`the bundle may hold no link: ${relative(root, path)}`);
-      if (entry.isDirectory()) walk(path);
-      else if (entry.isFile()) found.push(relative(root, path).split(sep).join("/"));
-      else throw new Error(`the bundle may hold regular files only: ${relative(root, path)}`);
-    }
-  };
-  walk(root);
-  return found.sort();
 }
 
 /** The release manifest of the bundle at `root`: identities, then each owned file with its hash and size. */
@@ -162,13 +149,14 @@ export function assemble({ release, node, notices, staging, platform }) {
   };
   copy(join(release, "launcher", `urx${platform.exe}`), "bin", `urx${platform.exe}`);
   copy(join(node, ...platform.runtimeInArchive), "runtime", `node${platform.exe}`);
-  // The compiled CLI and the common package; the addon and the launcher have places of their own.
+  // The compiled CLI and the common package; the addon and the launcher have places of their own,
+  // and the release output's record of its files describes that output, not the bundle.
   mkdirSync(join(staging, "app"), { recursive: true });
   cpSync(release, join(staging, "app"), {
     recursive: true,
     filter: (path) => {
       const inside = relative(release, path).split(sep).join("/");
-      return inside !== "launcher" && !inside.startsWith("launcher/") && inside !== "native/urx-native.node";
+      return inside !== "launcher" && !inside.startsWith("launcher/") && inside !== "native/urx-native.node" && inside !== RELEASE_FILES;
     },
   });
   copy(join(release, "native", "urx-native.node"), "native", "urx-native.node");
@@ -233,7 +221,7 @@ async function main(argv) {
       throw error;
     }
     // Replaces a bundle at the output, or removes `staging` and throws.
-    publishOutput(staging, output, { label: "bundle build", owned: isBundle });
+    publishOutput(staging, output, { label: "bundle build", ownedFiles: bundleFiles });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
