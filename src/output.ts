@@ -28,3 +28,22 @@ export function writeWithDeadline(stream: OutputStream, text: string, deadlineMs
     }
   });
 }
+
+/** The parts of process.stdout and process.stderr that `prepareProcessOutput` changes. */
+export interface ProcessOutput {
+  on(event: "error", listener: (error: Error) => void): unknown;
+  readonly _handle?: { setBlocking?: (blocking: boolean) => unknown } | null;
+}
+
+/**
+ * Prepares a process output stream for `writeWithDeadline`. Node makes writes to
+ * a terminal (POSIX) and to a pipe (Windows) block until the reader takes them,
+ * which would stop the deadline timer from running; this makes them return at
+ * once and complete through the write callback. A stream also emits "error"
+ * alongside the failed write's callback, which already reports the failure, so
+ * the event is consumed here instead of crashing the process.
+ */
+export function prepareProcessOutput(stream: ProcessOutput): void {
+  stream._handle?.setBlocking?.(false);
+  stream.on("error", () => {});
+}

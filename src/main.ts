@@ -8,7 +8,7 @@ import { BUILD_INFO, type BuildInfo } from "./build-info.js";
 import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
-import { writeWithDeadline, type OutputStream } from "./output.js";
+import { prepareProcessOutput, writeWithDeadline, type OutputStream } from "./output.js";
 
 /** E1 exit codes used here. */
 export const EXIT = Object.freeze({ success: 0, failure: 1, invalidInput: 2 });
@@ -31,15 +31,18 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
     case "version":
       return emit(io, renderVersion(io.build, BRIDGE_API_EXPECTED, io.runtime));
     case "error":
-      await writeWithDeadline(io.stderr, `urx: ${parsed.message}\n`);
-      return EXIT.invalidInput;
+      // An input error the user never sees is an output failure (exit 1), not exit 2.
+      return (await writeWithDeadline(io.stderr, `urx: ${parsed.message}\n`)) === null ? EXIT.invalidInput : EXIT.failure;
     case "command":
       await writeWithDeadline(io.stderr, `urx: \`urx ${parsed.command.path.join(" ")}\` is not available in this build.\n`);
       return EXIT.failure;
   }
 }
 
-/** Writes a successful result to stdout; an output failure is reported on stderr and exits 1. */
+/**
+ * Writes a successful result to stdout. An output failure exits 1 after one
+ * attempt to say so on stderr; a failure of that attempt is not retried.
+ */
 async function emit(io: Io, text: string): Promise<number> {
   const failure = await writeWithDeadline(io.stdout, text);
   if (failure === null) return EXIT.success;
@@ -60,6 +63,8 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   const runtime: Runtime = { version: process.versions.node, platform: process.platform, arch: process.arch };
+  prepareProcessOutput(process.stdout);
+  prepareProcessOutput(process.stderr);
   const code = await main(process.argv.slice(2), { stdout: process.stdout, stderr: process.stderr, build: BUILD_INFO, runtime });
   // A write that missed its deadline may still be pending; exiting abandons it.
   process.exit(code);

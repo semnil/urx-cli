@@ -8,9 +8,9 @@ const capture = (fail?: Error) => {
   return { stream, text: () => chunks.join("") };
 };
 
-function io(stdoutFailure?: Error) {
+function io(stdoutFailure?: Error, stderrFailure?: Error) {
   const stdout = capture(stdoutFailure);
-  const stderr = capture();
+  const stderr = capture(stderrFailure);
   const value: Io = {
     stdout: stdout.stream,
     stderr: stderr.stream,
@@ -43,6 +43,18 @@ describe("one-shot invocation", () => {
       expect(run.stdout()).toBe("");
       expect(run.stderr()).toMatch(/^urx: .+\n$/);
     }
+  });
+
+  it("exit 1 when the input error cannot be written to stderr", async () => {
+    const run = io(undefined, new Error("EPIPE"));
+    expect(await main(["device"], run.value)).toBe(1);
+    expect(run.stdout()).toBe("");
+  });
+
+  it("try stderr once when both stdout and stderr fail, and exit 1", async () => {
+    const run = io(new Error("EPIPE"), new Error("EPIPE"));
+    expect(await main(["--version"], run.value)).toBe(1);
+    expect(run.stderr()).toBe("urx: standard output could not be written.\n");
   });
 
   it("exit 1 with a stderr line when stdout fails", async () => {
