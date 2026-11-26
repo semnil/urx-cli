@@ -1,7 +1,6 @@
 // The command-binding table: every command path, the modes it runs in, and the
-// named arguments it accepts. The parser, help and (later) completion read this
-// table and nothing else, so a command or argument exists in all of them or in
-// none.
+// named arguments it accepts. The parser and help read this table and nothing
+// else, so a command or argument exists in both or in neither.
 
 /** Where a command line comes from: the OS shell, the console prompt or a command file. */
 export type Mode = "one-shot" | "console" | "command-file";
