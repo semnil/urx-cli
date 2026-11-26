@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { publishOutput } from "./release-build.mjs";
+import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
 const FORMAT = 1;
@@ -39,6 +40,19 @@ export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex"
 export function archiveUrl(inputs, platform) {
   const { version, archives } = inputs.node;
   return `https://nodejs.org/dist/v${version}/${archives[platform.key].file}`;
+}
+
+/**
+ * A file's bytes as `commit` records them in the repository at `directory`,
+ * whatever the working tree holds, so the notices are those of the commits the
+ * release output was built from.
+ */
+function recordedFile(directory, commit, path) {
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`the release output names no commit to read ${path} from`);
+  return execFileSync("git", ["-C", directory, "cat-file", "blob", `${commit}:${path}`], {
+    env: withoutGitLocation(process.env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 /**
@@ -135,23 +149,34 @@ async function main(argv) {
     const [top, ...others] = readdirSync(scratch);
     if (top === undefined || others.length > 0 || !statSync(join(scratch, top)).isDirectory()) throw new Error("the Node archive does not hold one top directory");
     const node = join(scratch, top);
+    const notices = join(scratch, "notices");
+    mkdirSync(notices);
+    writeFileSync(join(notices, "urx-cli.txt"), recordedFile(root, BUILD_INFO.appCommit, "LICENSE"));
+    writeFileSync(join(notices, "urx-device.txt"), recordedFile(join(root, "vendor", "urx-device"), BUILD_INFO.commonCommit, "LICENSE"));
     // Built next to the output, so the final rename stays on one file system.
     const staging = mkdtempSync(`${output}-`);
-    assemble({
-      release,
-      node,
-      staging,
-      platform,
-      notices: { "urx-cli.txt": join(root, "LICENSE"), "urx-device.txt": join(root, "vendor", "urx-device", "LICENSE"), "node.txt": join(node, "LICENSE") },
-    });
-    const manifest = manifestOf(staging, {
-      release: BUILD_INFO.appVersion,
-      app: { version: BUILD_INFO.appVersion, commit: BUILD_INFO.appCommit },
-      common: { version: BUILD_INFO.commonVersion, commit: BUILD_INFO.commonCommit },
-      runtime: { version: inputs.node.version, archive: recorded.file, sha256: recorded.sha256 },
-    });
-    writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    publishOutput(staging, output);
+    let manifest;
+    try {
+      assemble({
+        release,
+        node,
+        staging,
+        platform,
+        notices: { "urx-cli.txt": join(notices, "urx-cli.txt"), "urx-device.txt": join(notices, "urx-device.txt"), "node.txt": join(node, "LICENSE") },
+      });
+      manifest = manifestOf(staging, {
+        release: BUILD_INFO.appVersion,
+        app: { version: BUILD_INFO.appVersion, commit: BUILD_INFO.appCommit },
+        common: { version: BUILD_INFO.commonVersion, commit: BUILD_INFO.commonCommit },
+        runtime: { version: inputs.node.version, archive: recorded.file, sha256: recorded.sha256 },
+      });
+      writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    } catch (error) {
+      rmSync(staging, { recursive: true, force: true });
+      throw error;
+    }
+    // Replaces the output, or removes `staging` and throws.
+    publishOutput(staging, output, { label: "bundle build" });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
