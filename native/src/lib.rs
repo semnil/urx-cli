@@ -12,8 +12,9 @@ pub mod requests;
 
 /// The revision of the interface between this addon and the CLI's
 /// JavaScript. The JavaScript side refuses device access when it expects a
-/// different one (src/bridge.ts holds its expectation).
-pub const BRIDGE_REVISION: u32 = 1;
+/// different one (src/bridge.ts holds its expectation). Both change together
+/// whenever an export, a method or a record shape changes.
+pub const BRIDGE_REVISION: u32 = 2;
 
 /// What the addon was built from, compared with the JavaScript's embedded
 /// expectations before any device access.

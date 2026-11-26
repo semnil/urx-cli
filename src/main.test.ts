@@ -33,7 +33,7 @@ describe("one-shot invocation", () => {
   it("print the version on stdout and exit 0", async () => {
     const run = io();
     expect(await main(["--version"], run.value)).toBe(0);
-    expect(run.stdout()).toBe("urx 0.1.0 (unknown)\ncommon 0.1.0 (unknown)\nbridge-api-expected 1\nruntime 26.13.0 macos arm64\n");
+    expect(run.stdout()).toBe("urx 0.1.0 (unknown)\ncommon 0.1.0 (unknown)\nbridge-api-expected 2\nruntime 26.13.0 macos arm64\n");
   });
 
   it("report an input error on stderr only and exit 2", async () => {

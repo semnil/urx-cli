@@ -15,6 +15,20 @@ export interface NativeAddon extends LifecycleAddon {
 
 /** The exports an addon must have to be used at all. */
 const FUNCTIONS = ["buildIdentity", "discover", "openConnection", "Control", "Connection"] as const;
+/** The methods its connections must have. */
+const CONNECTION_METHODS = [
+  "close",
+  "createOperation",
+  "newRequestTicket",
+  "getNumeric",
+  "getText",
+  "getName",
+  "setNumeric",
+  "setText",
+  "adoptResult",
+  "failDelivery",
+  "terminate",
+] as const;
 
 /** What the JavaScript expects the addon to have been built from. */
 export interface ExpectedIdentity {
@@ -54,6 +68,8 @@ export function loadAddon(url: URL = ADDON_URL, load: (url: URL) => unknown = de
   if (typeof exports !== "object" || exports === null || FUNCTIONS.some((name) => typeof exports[name] !== "function")) {
     return { ok: false, problem: "malformed" };
   }
+  const connection = (exports["Connection"] as { prototype?: Record<string, unknown> }).prototype;
+  if (CONNECTION_METHODS.some((name) => typeof connection?.[name] !== "function")) return { ok: false, problem: "malformed" };
   return { ok: true, addon: module as NativeAddon };
 }
 
