@@ -240,9 +240,13 @@ describe("the addon's notification records (K37)", () => {
       ["meter", { kind: "meter", meterId: 7, x: "-1", value: "-120" }],
       ["parameter", { kind: "bulk-change" }],
     ]);
+    // The addon and Date.now read the PC clock through different calls, which
+    // differ by a millisecond or more on Windows: the receipt time is checked
+    // to the second, which still tells milliseconds since the epoch from any
+    // other unit.
     for (const [, , at] of received) {
-      expect(Number(at)).toBeGreaterThanOrEqual(before);
-      expect(Number(at)).toBeLessThanOrEqual(after);
+      expect(Number(at)).toBeGreaterThanOrEqual(before - 1000);
+      expect(Number(at)).toBeLessThanOrEqual(after + 1000);
     }
     for (const subscription of [meter.value, parameter.value]) expect(await subscription.release()).toEqual({ kind: "success", value: null });
     native.finish();
