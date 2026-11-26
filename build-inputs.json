@@ -1,5 +1,5 @@
 {
-  "note": "The exact tool versions and archive hashes a build uses. .node-version and package.json repeat some of them for the tools that read those files; `pnpm build-inputs:check` fails when they differ from this file. The urx-device commit is pinned by the vendor/urx-device gitlink alone and is not repeated here.",
+  "note": "The exact tool versions and archive hashes a build uses. .node-version, package.json and rust-toolchain.toml repeat some of them for the tools that read those files; `pnpm build-inputs:check` fails when they differ from this file. The urx-device commit is pinned by the vendor/urx-device gitlink alone, and the napi-rs crates and CLI by Cargo.lock and pnpm-lock.yaml, which carry their checksums.",
   "node": {
     "version": "26.13.0",
     "checksums": "https://nodejs.org/dist/v26.13.0/SHASUMS256.txt",
@@ -17,5 +17,8 @@
   "pnpm": {
     "version": "10.7.1",
     "sha512": "2d92c86b7928dc8284f53494fb4201f983da65f0fb4f0d40baafa5cf628fa31dae3e5968f12466f17df7e97310e30f343a648baea1b9b350685dafafffdf5808"
+  },
+  "rust": {
+    "channel": "1.96.0"
   }
 }

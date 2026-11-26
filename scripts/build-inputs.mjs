@@ -1,6 +1,6 @@
 // Checks that build-inputs.json is well formed and that the files repeating its
-// values for other tools (.node-version, package.json) agree with it. Reads only;
-// a mismatch prints every problem and exits 1.
+// values for other tools (.node-version, package.json, rust-toolchain.toml)
+// agree with it. Reads only; a mismatch prints every problem and exits 1.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,14 +13,16 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 
 /**
  * Returns the problems found, an empty array when the inputs agree.
- * @param {{ manifest: any, nodeVersionFile: string, packageJson: any }} files
+ * @param {{ manifest: any, nodeVersionFile: string, packageJson: any, rustToolchainFile: string }} files
  */
-export function checkBuildInputs({ manifest, nodeVersionFile, packageJson }) {
+export function checkBuildInputs({ manifest, nodeVersionFile, packageJson, rustToolchainFile }) {
   const problems = [];
   const node = manifest?.node;
   const pnpm = manifest?.pnpm;
+  const rust = manifest?.rust;
   if (!SEMVER.test(node?.version ?? "")) problems.push("node.version is not an exact x.y.z version");
   if (!SEMVER.test(pnpm?.version ?? "")) problems.push("pnpm.version is not an exact x.y.z version");
+  if (!SEMVER.test(rust?.channel ?? "")) problems.push("rust.channel is not an exact x.y.z version");
   if (!HEX(128).test(pnpm?.sha512 ?? "")) problems.push("pnpm.sha512 is not 128 lowercase hex digits");
   if (problems.length > 0) return problems;
 
@@ -57,7 +59,25 @@ export function checkBuildInputs({ manifest, nodeVersionFile, packageJson }) {
   if (packageJson?.packageManager !== `pnpm@${pnpm.version}+sha512.${pnpm.sha512}`) {
     problems.push("package.json packageManager is not the pnpm version and sha512 in build-inputs.json");
   }
+  if (toolchainChannel(rustToolchainFile) !== rust.channel) {
+    problems.push(`rust-toolchain.toml channel is not "${rust.channel}"`);
+  }
   return problems;
+}
+
+/** The `channel` of rust-toolchain.toml's [toolchain] table, or null. */
+export function toolchainChannel(text) {
+  let inToolchain = false;
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      inToolchain = trimmed === "[toolchain]";
+      continue;
+    }
+    const match = inToolchain ? /^channel\s*=\s*"([^"]*)"$/.exec(trimmed) : null;
+    if (match) return match[1];
+  }
+  return null;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -67,6 +87,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     manifest: JSON.parse(read("build-inputs.json")),
     nodeVersionFile: read(".node-version"),
     packageJson: JSON.parse(read("package.json")),
+    rustToolchainFile: read("rust-toolchain.toml"),
   });
   for (const problem of problems) console.error(`build-inputs: ${problem}`);
   process.exitCode = problems.length > 0 ? 1 : 0;
