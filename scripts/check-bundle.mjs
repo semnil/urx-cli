@@ -41,8 +41,10 @@ try {
   const copy = join(scratch, "tools", "urx cli");
   cpSync(bundle, copy, { recursive: true });
   const runtime = join(copy, "runtime", `node${platform.exe}`);
-  // No NODE_ variable from this process reaches the bundled Node, as the launcher would have it (K24).
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("NODE_")));
+  // No NODE_ variable from this process reaches the bundled Node, removed as the launcher removes
+  // them (K24): in any case on Windows, whose variable names ignore case, and exactly elsewhere.
+  const inherited = (name) => (process.platform === "win32" ? name.toUpperCase() : name).startsWith("NODE_");
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !inherited(name)));
   const node = (args) => execFileSync(runtime, args, { cwd: scratch, encoding: "utf8", env });
   const version = node(["--version"]).trim();
   if (version !== `v${manifest.runtime.version}`) fail(`the bundled Node is ${version}, not v${manifest.runtime.version}`);
