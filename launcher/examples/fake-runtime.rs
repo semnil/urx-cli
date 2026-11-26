@@ -1,7 +1,8 @@
 //! A stand-in for the bundled Node in the launcher's tests: it prints each
 //! argument on its own line, then the names of any `NODE_` variables it was
 //! given and whether `KEPT` arrived. With `ready=<path>` it creates that file
-//! once it runs; it sleeps for `sleep=<ms>`, creates `done=<path>` and exits
+//! once it runs; with `release=<path>` it waits until that file exists; it
+//! sleeps for `sleep=<ms>`, creates `done=<path>` and exits
 //! with `exit=<code>`, all read from its arguments.
 
 fn main() {
@@ -29,6 +30,14 @@ fn main() {
     };
     if let Some(ready) = path("ready") {
         std::fs::write(ready, b"").unwrap();
+    }
+    if let Some(release) = path("release") {
+        let started = std::time::Instant::now();
+        while !std::path::Path::new(&release).exists()
+            && started.elapsed() < std::time::Duration::from_secs(30)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     if let Some(ms) = value("sleep") {
         std::thread::sleep(std::time::Duration::from_millis(ms));

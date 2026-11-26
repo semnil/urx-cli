@@ -188,10 +188,12 @@ fn wait_for(path: &Path, limit: Duration) -> bool {
 fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_has_exited() {
     let (root, maintenance) = installation("gate");
     let ready = root.join("ready");
+    let release = root.join("release");
     let done = root.join("done");
+    // The runtime runs until the test releases it, so the last check is made while it still runs.
     let arguments = [
         format!("ready={}", ready.display()),
-        "sleep=1500".to_owned(),
+        format!("release={}", release.display()),
         format!("done={}", done.display()),
     ];
     let mut launcher = launched(
@@ -220,6 +222,14 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
             "maintenance could start once only the launcher had ended"
         );
     }
+    // Still held after the runtime has run for a while, just before it may exit.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!done.exists(), "the runtime ended before it was released");
+    assert!(
+        exclusive_refused(&gate),
+        "maintenance could start before the runtime exited"
+    );
+    fs::write(&release, b"").unwrap();
     assert!(
         wait_for(&done, Duration::from_secs(10)),
         "the runtime did not finish"
@@ -254,9 +264,10 @@ fn a_failure_exits_1_even_when_standard_error_is_at_its_size_limit() {
     // SAFETY: setrlimit is async-signal-safe and only lowers this child's limit.
     unsafe {
         command.pre_exec(|| {
+            // Both at zero, which lowers whatever limit the test inherited.
             let limit = libc::rlimit {
                 rlim_cur: 0,
-                rlim_max: libc::RLIM_INFINITY,
+                rlim_max: 0,
             };
             if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -288,15 +299,22 @@ fn a_fifo_in_place_of_an_installation_file_is_refused_without_waiting() {
         let name = CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: `name` is a NUL-terminated path in a scratch directory.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // The deadline is watched while the launch runs: a launch that waits is ended and reported.
         let started = Instant::now();
-        let output = launched(&root, &maintenance, &["exit=7"])
-            .wait_with_output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(1), "{file}");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{file} was waited on"
-        );
+        let mut child = launched(&root, &maintenance, &["exit=7"]);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("the launch waited on the FIFO in place of {file}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(status.code(), Some(1), "{file}");
         assert!(
             !String::from_utf8_lossy(&output.stdout).contains("arg:"),
             "{file}"
