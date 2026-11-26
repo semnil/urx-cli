@@ -509,23 +509,23 @@ impl Connection {
 
 impl Connection {
     fn fatal(&self, ticket: String, unknown_is_done: bool) -> AsyncTask<FatalTask> {
-        let taken = lock(&self.slots).held.remove(&ticket);
-        let (close, answer) = match taken {
-            None => (false, unknown_is_done),
-            Some(None) => (false, true),
-            Some(Some(_held)) => (true, true),
-        };
+        // The ticket stays in the table until the task runs: when the task
+        // cannot be queued, the slot is still there for `terminate` to take.
         AsyncTask::new(FatalTask {
-            connection: close.then(|| self.handle()),
-            answer,
+            connection: self.handle(),
+            slots: Arc::clone(&self.slots),
+            ticket,
+            unknown_is_done,
         })
     }
 }
 
 /// Ends a connection for a result that could not be adopted (K6, K37).
 pub struct FatalTask {
-    connection: Option<Arc<connection::Connection>>,
-    answer: bool,
+    connection: Arc<connection::Connection>,
+    slots: SharedSlots,
+    ticket: String,
+    unknown_is_done: bool,
 }
 
 impl Task for FatalTask {
@@ -533,10 +533,18 @@ impl Task for FatalTask {
     type JsValue = bool;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        if let Some(connection) = &self.connection {
-            connection.close(crate::lifecycle::TEARDOWN_DEADLINE);
-        }
-        Ok(self.answer)
+        let taken = lock(&self.slots).held.remove(&self.ticket);
+        Ok(match taken {
+            None => self.unknown_is_done,
+            Some(None) => true,
+            Some(Some(held)) => {
+                // The end takes the slot: the connection closes with the
+                // result still held, and only then is it released.
+                self.connection.close(crate::lifecycle::TEARDOWN_DEADLINE);
+                drop(held);
+                true
+            }
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
