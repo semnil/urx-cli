@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 # Node-API 8 with the managed Tokio runtime for Promise-returning methods,
 # and nothing else (K38).
 napi = { version = "=3.16.2", default-features = false, features = ["napi8", "dyn-symbols", "tokio_rt", "tokio_sync"] }
-napi-derive = "=3.7.1"
+napi-derive = "=3.7.2"
 urx-device-transport = { path = "../vendor/urx-device/crates/transport" }
 
 [build-dependencies]
