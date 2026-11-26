@@ -1,7 +1,9 @@
 // Help and version must not load the addon (H5). The built CLI runs in a child
-// Node with a module hook that records every module it loads; no recorded
-// module may be under dist/native/. A type-only reference loads nothing and
-// passes; any runtime import, direct or indirect, fails.
+// Node that records every module it loads (a module load hook) and every native
+// library it opens (`process.dlopen`, which a `.node` file goes through and the
+// load hook does not see); nothing recorded may be under dist/native/. A
+// type-only reference loads nothing and passes; any runtime import or open,
+// direct or indirect, fails.
 
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -22,12 +24,19 @@ beforeAll(() => {
     [
       'import { appendFileSync } from "node:fs";',
       'import { registerHooks } from "node:module";',
+      'import { pathToFileURL } from "node:url";',
+      'const record = (url) => appendFileSync(process.env.URX_LOADS_FILE, url + "\\n");',
       "registerHooks({",
       "  load(url, context, nextLoad) {",
-      '    appendFileSync(process.env.URX_LOADS_FILE, url + "\\n");',
+      "    record(url);",
       "    return nextLoad(url, context);",
       "  },",
       "});",
+      "const dlopen = process.dlopen;",
+      "process.dlopen = function (module, filename, ...rest) {",
+      "  record(pathToFileURL(filename).href);",
+      "  return dlopen.call(this, module, filename, ...rest);",
+      "};",
       "",
     ].join("\n"),
   );
@@ -63,5 +72,14 @@ describe("modules the built CLI loads", () => {
     const importer = join(scratch, "importer.mjs");
     writeFileSync(importer, `import ${JSON.stringify(pathToFileURL(join(dist, "native", "addon.js")).href)};\n`);
     expect(loadsOf("importer", importer, []).filter((url) => url.startsWith(native))).toContain(`${native}addon.js`);
+  });
+
+  it("would include the native library if something opened it directly", () => {
+    const opener = join(scratch, "opener.mjs");
+    writeFileSync(
+      opener,
+      `import { createRequire } from "node:module";\ncreateRequire(import.meta.url)(${JSON.stringify(join(dist, "native", "urx-native.node"))});\n`,
+    );
+    expect(loadsOf("opener", opener, []).filter((url) => url.startsWith(native))).toContain(`${native}urx-native.node`);
   });
 });
