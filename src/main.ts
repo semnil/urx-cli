@@ -8,7 +8,7 @@ import { BUILD_INFO, type BuildInfo } from "./build-info.js";
 import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
-import { prepareProcessOutput, writeWithDeadline, type OutputStream } from "./output.js";
+import { processOutput, writeWithDeadline, type OutputStream } from "./output.js";
 
 /** E1 exit codes used here. */
 export const EXIT = Object.freeze({ success: 0, failure: 1, invalidInput: 2 });
@@ -63,9 +63,11 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   const runtime: Runtime = { version: process.versions.node, platform: process.platform, arch: process.arch };
-  prepareProcessOutput(process.stdout);
-  prepareProcessOutput(process.stderr);
-  const code = await main(process.argv.slice(2), { stdout: process.stdout, stderr: process.stderr, build: BUILD_INFO, runtime });
+  // A write past a file size limit then fails with EFBIG instead of the signal ending the process.
+  if (process.platform !== "win32") process.on("SIGXFSZ", () => {});
+  const stdout = processOutput(process.stdout, 1);
+  const stderr = processOutput(process.stderr, 2);
+  const code = await main(process.argv.slice(2), { stdout, stderr, build: BUILD_INFO, runtime });
   // A write that missed its deadline may still be pending; exiting abandons it.
   process.exit(code);
 }
