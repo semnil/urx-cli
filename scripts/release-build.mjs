@@ -78,7 +78,8 @@ export function removeExport(root, destination) {
  * rename itself failed), the previous output is renamed back, so `output`
  * always holds one release's complete result, never a partly removed one. An
  * interruption between the steps leaves the previous output complete under its
- * set-aside name. A failed step 3 leaves it there too, and only warns.
+ * set-aside name. A failed step 3 only warns: the new output is complete, and
+ * whatever could not be removed stays under the set-aside name.
  */
 export function publishOutput(staging, output, { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`) } = {}) {
   const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
@@ -95,13 +96,18 @@ export function publishOutput(staging, output, { rename = renameSync, remove = (
   try {
     rename(staging, output);
   } catch (error) {
-    remove(staging);
+    // Restoring comes first, so a failing cleanup cannot leave `output` empty.
     if (setAside) {
       try {
         rename(aside, output);
       } catch {
         warn(`release build: the previous output is kept at ${aside}`);
       }
+    }
+    try {
+      remove(staging);
+    } catch {
+      warn(`release build: the new output could not be removed from ${staging}`);
     }
     throw new Error(`${output} could not be replaced; another release build may have replaced it first`, { cause: error });
   }
