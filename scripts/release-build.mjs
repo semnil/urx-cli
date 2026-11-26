@@ -106,7 +106,11 @@ export function removeExport(root, destination) {
  * set-aside name. A failed step 3 only warns: the new output is complete, and
  * whatever could not be removed stays under the set-aside name.
  */
-export function publishOutput(staging, output, { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`) } = {}) {
+export function publishOutput(
+  staging,
+  output,
+  { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`), label = "release build" } = {},
+) {
   const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
   let setAside = false;
   try {
@@ -117,7 +121,7 @@ export function publishOutput(staging, output, { rename = renameSync, remove = (
       try {
         remove(staging);
       } catch {
-        warn(`release build: the new output could not be removed from ${staging}`);
+        warn(`${label}: the new output could not be removed from ${staging}`);
       }
       throw new Error(`the previous ${output} could not be set aside`, { cause: error });
     }
@@ -130,21 +134,21 @@ export function publishOutput(staging, output, { rename = renameSync, remove = (
       try {
         rename(aside, output);
       } catch {
-        warn(`release build: the previous output is kept at ${aside}`);
+        warn(`${label}: the previous output is kept at ${aside}`);
       }
     }
     try {
       remove(staging);
     } catch {
-      warn(`release build: the new output could not be removed from ${staging}`);
+      warn(`${label}: the new output could not be removed from ${staging}`);
     }
-    throw new Error(`${output} could not be replaced; another release build may have replaced it first`, { cause: error });
+    throw new Error(`${output} could not be replaced; another ${label} may have replaced it first`, { cause: error });
   }
   if (setAside) {
     try {
       remove(aside);
     } catch {
-      warn(`release build: the previous output could not be removed from ${aside}`);
+      warn(`${label}: the previous output could not be removed from ${aside}`);
     }
   }
 }
@@ -181,12 +185,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const output = join(root, "dist-release");
     // Copied next to the output first, so the final rename stays on one file system.
     const staging = mkdtempSync(join(root, "dist-release-"));
-    rmSync(staging, { recursive: true, force: true });
-    cpSync(join(source, "dist"), staging, { recursive: true });
-    const launcher = process.platform === "win32" ? "urx.exe" : "urx";
-    cpSync(join(scratch, "target", "release", launcher), join(staging, "launcher", launcher));
-    copyCommonPackage(source, staging);
-    markModuleFormat(staging);
+    try {
+      rmSync(staging, { recursive: true, force: true });
+      cpSync(join(source, "dist"), staging, { recursive: true });
+      const launcher = process.platform === "win32" ? "urx.exe" : "urx";
+      cpSync(join(scratch, "target", "release", launcher), join(staging, "launcher", launcher));
+      copyCommonPackage(source, staging);
+      markModuleFormat(staging);
+    } catch (error) {
+      rmSync(staging, { recursive: true, force: true });
+      throw error;
+    }
+    // Replaces the output, or removes `staging` and throws.
     publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {

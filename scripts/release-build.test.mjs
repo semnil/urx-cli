@@ -195,6 +195,24 @@ describe("release output", () => {
     expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
   });
 
+  it("name the build that warns, as its caller labels it", () => {
+    const output = directory("dist-bundle", "previous");
+    const staging = directory("staging", "new");
+    const warnings = [];
+    const failing = (from, to) => {
+      if (from === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
+      renameSync(from, to);
+    };
+    const stuck = (path) => {
+      if (path === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
+      rmSync(path, { recursive: true, force: true });
+    };
+    expect(() => publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message), label: "bundle build" })).toThrow(
+      /could not be replaced; another bundle build/,
+    );
+    expect(warnings).toEqual([`bundle build: the new output could not be removed from ${staging}`]);
+  });
+
   it("leave the other release's output when it got there first, and keep this release's previous output aside", () => {
     const output = directory("dist-release", "previous");
     const staging = directory("staging", "this");
