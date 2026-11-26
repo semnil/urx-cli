@@ -25,7 +25,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { claimOutput, describeFiles, filesUnder, isRecordedPath, leftBehind, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
+import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -183,12 +183,23 @@ async function main(argv) {
     const problems = recordedProblems(snapshot, recordedFiles);
     if (problems.length > 0) throw new Error(`${release} is not as the release build made it: ${problems.join("; ")}`);
     const recordedPaths = recordedFiles.map((file) => file.path);
+    // The build information, and the two package files by which Node reads the CLI as ES modules and finds the
+    // common package's entry points, are required; the first package file is the one the release build writes.
+    for (const path of ["build-info.js", ...Object.values(PACKAGE_FILES)]) {
+      if (!recordedPaths.includes(path)) throw new Error(`${release}'s record names no ${path}; run pnpm build:release`);
+    }
+    if (!isModuleFormat(readFileSync(join(snapshot, PACKAGE_FILES.module)))) throw new Error(`${release}'s ${PACKAGE_FILES.module} does not say its modules are ES modules`);
     // The build information is read only as recorded and checked above.
-    if (!recordedPaths.includes("build-info.js")) throw new Error(`${release}'s record names no build-info.js; run pnpm build:release`);
     const { BUILD_INFO } = await import(pathToFileURL(join(snapshot, "build-info.js")).href);
     // The record names exactly the modules the release's commits compile to, so the bundle holds every one.
     const moduleIssues = moduleProblems(recordedPaths, compiledModules(root, BUILD_INFO));
     if (moduleIssues.length > 0) throw new Error(`${release}'s record is not of the release its commits compile to: ${moduleIssues.join("; ")}`);
+    // The common package's package.json is the one its commit holds, line endings aside.
+    const commonPackage = (bytes) => JSON.stringify(JSON.parse(bytes.toString("utf8")));
+    const committedPackage = recordedFile(join(root, "vendor", "urx-device"), BUILD_INFO.commonCommit, "packages/control/package.json");
+    if (commonPackage(readFileSync(join(snapshot, ...PACKAGE_FILES.common.split("/")))) !== commonPackage(committedPackage)) {
+      throw new Error(`${release}'s ${PACKAGE_FILES.common} is not the common package's at its commit`);
+    }
     // The checked bytes, written where nothing else replaces them, are what is extracted.
     const archiveCopy = join(scratch, recorded.file);
     writeFileSync(archiveCopy, archive);

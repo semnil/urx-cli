@@ -83,6 +83,24 @@ export function markModuleFormat(output) {
 
 const MODULE_FORMAT = `${JSON.stringify({ type: "module" })}\n`;
 
+/**
+ * The package files the release build writes beside the compiled modules:
+ * Node reads the CLI's `.js` files as ES modules by the first, whatever lies
+ * above the output, and finds the common package's entry points by the
+ * second.
+ */
+export const PACKAGE_FILES = Object.freeze({ module: "package.json", common: "node_modules/@urx/device-control/package.json" });
+
+/** Whether `bytes` are the package.json `markModuleFormat` writes. */
+export const isModuleFormat = (bytes) => {
+  try {
+    const value = JSON.parse(bytes.toString("utf8"));
+    return JSON.stringify(value) === JSON.stringify({ type: "module" });
+  } catch {
+    return false;
+  }
+};
+
 /** Every regular file under `root`, as sorted relative paths with `/` separators; a link or another kind of file is refused. */
 export function filesUnder(root) {
   const found = [];

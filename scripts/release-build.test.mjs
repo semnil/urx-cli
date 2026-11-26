@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { claimOutput, exportRelease, isRecordedPath, launcherArtifact, leftBehind, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { claimOutput, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, leftBehind, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -214,6 +214,14 @@ describe("release output", () => {
     };
     expect(() => publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", chmod: failing })).toThrow(/could not write/);
     expect(existsSync(join(output, "release-manifest.json"))).toBe(false);
+  });
+
+  it("tell the package.json that says the output's modules are ES modules", () => {
+    expect(isModuleFormat(Buffer.from('{"type":"module"}\n'))).toBe(true);
+    expect(isModuleFormat(Buffer.from('{\r\n  "type": "module"\r\n}\r\n'))).toBe(true);
+    expect(isModuleFormat(Buffer.from('{"type":"commonjs"}'))).toBe(false);
+    expect(isModuleFormat(Buffer.from('{"type":"module","main":"x.js"}'))).toBe(false);
+    expect(isModuleFormat(Buffer.from("not json"))).toBe(false);
   });
 
   it.skipIf(process.platform === "win32")("keep the staged folders' and files' modes in the output", () => {
