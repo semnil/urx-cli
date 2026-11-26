@@ -46,7 +46,8 @@ mod unix {
             let fd = unsafe {
                 libc::open(
                     path.as_ptr(),
-                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    // Nonblocking, so a FIFO in its place does not wait for a writer.
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
                 )
             };
             if fd < 0 {

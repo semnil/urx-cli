@@ -152,6 +152,14 @@ fn run(gate: &Gate, start: handoff::Start<'_>) -> Result<Started, Failure> {
 /// Writes one line to standard error within the output deadline (O7); a
 /// broken or blocked standard error is given up rather than waited for.
 pub fn report(failure: Failure) {
+    // A standard error file at its size limit fails the write instead of ending
+    // the launcher with SIGXFSZ, so the exit code stays 1. Nothing is started
+    // after this, so no runtime inherits the ignored signal.
+    #[cfg(unix)]
+    // SAFETY: setting a signal's disposition to ignored has no other effect.
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
     let line = format!("{}\n", failure.message());
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

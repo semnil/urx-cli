@@ -82,13 +82,34 @@ pub fn check(state: &[u8], manifest: &[u8]) -> Result<(), InstallFailure> {
 /// Reads the state and the bundle's manifest and checks them, and that the
 /// runtime and the entry script exist.
 pub fn verify(maintenance: &Path, bundle: &Bundle) -> Result<(), InstallFailure> {
-    let state = std::fs::read(state_path(maintenance)).map_err(|_| InstallFailure::Incomplete)?;
-    let manifest = std::fs::read(bundle.manifest()).map_err(|_| InstallFailure::Incomplete)?;
+    let state = read_regular(&state_path(maintenance)).map_err(|_| InstallFailure::Incomplete)?;
+    let manifest = read_regular(&bundle.manifest()).map_err(|_| InstallFailure::Incomplete)?;
     check(&state, &manifest)?;
     if !bundle.runtime().is_file() || !bundle.entry().is_file() {
         return Err(InstallFailure::Incomplete);
     }
     Ok(())
+}
+
+/// The contents of `path` when it is a regular file. It is opened without
+/// waiting (a FIFO in its place has no writer to wait for) and the open
+/// file's own type is checked before anything is read.
+fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]

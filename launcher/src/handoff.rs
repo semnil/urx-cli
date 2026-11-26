@@ -131,6 +131,13 @@ mod windows {
         STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
+    /// Consumes Ctrl+C and Ctrl+Break in the launcher; the child, on the same
+    /// console, receives them on its own.
+    unsafe extern "system" fn consume_interrupt(event: u32) -> windows_sys::core::BOOL {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+        i32::from(event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+    }
+
     fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
         value.encode_wide().collect()
     }
@@ -222,8 +229,10 @@ mod windows {
         // SAFETY: an all-zero PROCESS_INFORMATION is valid for the call to fill.
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // The launcher leaves Ctrl+C to the child, which shares its console.
-        // SAFETY: a null handler with TRUE makes this process ignore Ctrl+C.
-        unsafe { SetConsoleCtrlHandler(None, 1) };
+        // A handler that consumes the event does that without being inherited,
+        // unlike ignoring Ctrl+C with a null handler, which the child would inherit.
+        // SAFETY: `consume_interrupt` is a valid handler for the process lifetime.
+        unsafe { SetConsoleCtrlHandler(Some(consume_interrupt), 1) };
         // SAFETY: every string is NUL-terminated and alive for the call; the
         // attribute list and the handles it names are alive too.
         let created = unsafe {

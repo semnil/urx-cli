@@ -172,28 +172,135 @@ fn the_runtime_gets_the_entry_and_the_arguments_unchanged_without_node_variables
     fs::remove_dir_all(root.parent().unwrap()).unwrap();
 }
 
-#[test]
-fn the_runtime_holds_the_gate_until_it_exits() {
-    let (root, maintenance) = installation("gate");
-    let mut child = launched(&root, &maintenance, &["sleep=1500"]);
-    let gate = maintenance.join("gate.lock");
+/// Waits up to `limit` for `path` to exist.
+fn wait_for(path: &Path, limit: Duration) -> bool {
     let started = Instant::now();
-    // While the runtime runs, an exclusive open of the gate is refused.
-    let mut held = false;
-    while started.elapsed() < Duration::from_millis(1200) {
-        if exclusive_refused(&gate) {
-            held = true;
-            break;
+    while started.elapsed() < limit {
+        if path.exists() {
+            return true;
         }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[test]
+fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_has_exited() {
+    let (root, maintenance) = installation("gate");
+    let ready = root.join("ready");
+    let done = root.join("done");
+    let arguments = [
+        format!("ready={}", ready.display()),
+        "sleep=1500".to_owned(),
+        format!("done={}", done.display()),
+    ];
+    let mut launcher = launched(
+        &root,
+        &maintenance,
+        &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let gate = maintenance.join("gate.lock");
+    // Checked once the runtime itself runs: the hold has survived the handoff.
+    assert!(
+        wait_for(&ready, Duration::from_secs(10)),
+        "the runtime did not start"
+    );
+    assert!(
+        exclusive_refused(&gate),
+        "maintenance could start while the runtime ran"
+    );
+    if cfg!(windows) {
+        // On Windows the launcher waits as a parent; the runtime keeps the
+        // protection when that parent ends first.
+        launcher.kill().unwrap();
+        launcher.wait().unwrap();
+        assert!(!done.exists(), "the runtime ended before the check");
+        assert!(
+            exclusive_refused(&gate),
+            "maintenance could start once only the launcher had ended"
+        );
+    }
+    assert!(
+        wait_for(&done, Duration::from_secs(10)),
+        "the runtime did not finish"
+    );
+    if cfg!(unix) {
+        assert_eq!(launcher.wait().unwrap().code(), Some(0));
+    }
+    // Once the last user has exited, maintenance can start.
+    let started = Instant::now();
+    while exclusive_refused(&gate) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the gate stayed held after the runtime exited"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(held, "the gate was not held while the runtime ran");
-    assert_eq!(child.wait().unwrap().code(), Some(0));
-    assert!(
-        !exclusive_refused(&gate),
-        "the gate stayed held after the runtime exited"
-    );
     fs::remove_dir_all(root.parent().unwrap()).unwrap();
+}
+
+/// A failure line on a standard error file at its size limit still exits 1 (macOS).
+#[cfg(unix)]
+#[test]
+fn a_failure_exits_1_even_when_standard_error_is_at_its_size_limit() {
+    use std::os::unix::process::CommandExt;
+    let scratch = std::env::temp_dir().join(format!("urx-launcher-fsize-{}", std::process::id()));
+    fs::create_dir_all(&scratch).unwrap();
+    let file = fs::File::create(scratch.join("stderr")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_urx"));
+    command.stderr(file).stdout(std::process::Stdio::piped());
+    // SAFETY: setrlimit is async-signal-safe and only lowers this child's limit.
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: libc::RLIM_INFINITY,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Run outside an installed bundle, the launcher fails before Node starts.
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{:?}", output.status);
+    assert_eq!(output.stdout, b"");
+    fs::remove_dir_all(scratch).unwrap();
+}
+
+/// A FIFO in place of an installation file is refused at once, not waited on (macOS).
+#[cfg(unix)]
+#[test]
+fn a_fifo_in_place_of_an_installation_file_is_refused_without_waiting() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    for file in ["gate.lock", "state.json", "release-manifest.json"] {
+        let (root, maintenance) = installation(&format!("fifo-{file}"));
+        let path = if file == "release-manifest.json" {
+            root.join(file)
+        } else {
+            maintenance.join(file)
+        };
+        fs::remove_file(&path).unwrap();
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path in a scratch directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let started = Instant::now();
+        let output = launched(&root, &maintenance, &["exit=7"])
+            .wait_with_output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{file}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{file} was waited on"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("arg:"),
+            "{file}"
+        );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
 }
 
 #[test]
