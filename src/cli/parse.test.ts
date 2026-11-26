@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { COMMANDS, MODES, type Mode } from "./commands.js";
+import { SETTING_BINDINGS } from "./settings.js";
 import { parse, type ParseResult } from "./parse.js";
 
 const shell = (line: string) => parse(line === "" ? [] : line.split(" "), "one-shot");
@@ -157,6 +158,11 @@ describe("modes", () => {
       exit: ["exit"],
       run: ["run", "f"],
     };
+    // Each setting command, with its required target and value.
+    for (const { path } of SETTING_BINDINGS) {
+      sample[[...path, "get"].join(" ")] = [...path, "get", "--channel", "1"];
+      sample[[...path, "set"].join(" ")] = [...path, "set", "--channel", "1", "--value", "1"];
+    }
     expect(Object.keys(sample).sort()).toEqual(COMMANDS.map((command) => command.path.join(" ")).sort());
     for (const command of COMMANDS) {
       for (const mode of MODES) {

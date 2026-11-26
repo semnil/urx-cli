@@ -1,7 +1,7 @@
 // English explanations of failures, built only from the cause and the stage
 // (P5): no device ID, path, value or text from outside the CLI.
 
-import type { LifecycleFailure, LifecyclePhase } from "@urx/device-control/operations";
+import type { LifecycleFailure, LifecyclePhase, OperationFailure, OperationPhase } from "@urx/device-control/operations";
 import type { AddonProblem } from "./native/addon.js";
 import type { CauseCode, ResultError } from "./result.js";
 
@@ -56,6 +56,23 @@ export function lifecycleFailure(record: LifecycleFailure): ResultError {
   if (record.kind === "cancelled") return failure("interrupted");
   if (STAGED.has(record.code)) return failure(record.code);
   return { code: record.code, message: `${BASE[record.code]} ${DURING[record.phase]}.` };
+}
+
+const IN_REQUEST: Record<OperationPhase, string> = {
+  validation: "before the request was sent",
+  admission: "before the request was sent",
+  send: "while the request was sent",
+  response: "while its response was awaited",
+  delivery: "after its response arrived",
+  preparation: "before any request",
+};
+
+/** A shared operation's failure (K3), naming where its request stopped. */
+export function operationFailure(record: OperationFailure): ResultError {
+  if (STAGED.has(record.code) || record.code === "interrupted") return failure(record.code);
+  if (record.code === "invalid_input") return { code: "invalid_input", message: "The target or value is not valid for this device." };
+  if (record.code === "unsupported_operation") return { code: "unsupported_operation", message: "The setting or target is not supported on this device." };
+  return { code: record.code, message: `${BASE[record.code]} ${IN_REQUEST[record.phase]}.` };
 }
 
 /** A failed write of standard output, the stream that carries the result. */

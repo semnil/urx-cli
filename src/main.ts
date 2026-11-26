@@ -8,6 +8,7 @@ import { BRIDGE_API_EXPECTED } from "./bridge.js";
 import { BUILD_INFO, type BuildInfo } from "./build-info.js";
 import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
+import { settingCommandOf } from "./cli/settings.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
 import { Diagnostics } from "./diagnostics.js";
 import { ABANDONED, CommandInterruption, processInterrupts, type Interrupts } from "./interrupts.js";
@@ -48,7 +49,8 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
       return (await writeWithDeadline(io.stderr, `urx: ${parsed.message}\n`)) === null ? EXIT.invalidInput : EXIT.failure;
     case "command": {
       const path = parsed.command.path.join(" ");
-      if (path === "device list") {
+      const setting = settingCommandOf(parsed.command.path);
+      if (path === "device list" || setting !== undefined) {
         const device = io.device ?? { interrupts: processInterrupts(), now: () => performance.now() };
         // From here until the result is written, Ctrl+C belongs to the command.
         const interruption = new CommandInterruption(device.interrupts);
@@ -57,11 +59,14 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
             { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now, interruption },
             path,
           );
-          const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./native/addon.js")]));
+          const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./setting.js"), import("./native/addon.js")]));
           if (modules === ABANDONED) return EXIT.interrupted;
-          const [{ runDeviceList }, { expectedIdentity, openAddon }] = modules;
+          const [{ runDeviceList }, { runSetting }, { expectedIdentity, openAddon }] = modules;
           const addon = device.addon ?? (() => openAddon(expectedIdentity(io.build)));
-          return await runDeviceList({ stdout: io.stdout, diagnostics, addon, interruption, listPort: device.listPort }, parsed.arguments.has("json"));
+          const json = parsed.arguments.has("json");
+          const shared = { stdout: io.stdout, diagnostics, addon, interruption, listPort: device.listPort };
+          if (setting === undefined) return await runDeviceList(shared, json);
+          return await runSetting(shared, { binding: setting.binding, verb: setting.verb, arguments: parsed.arguments }, json);
         } finally {
           interruption.dispose();
         }

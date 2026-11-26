@@ -2,6 +2,8 @@
 // named arguments it accepts. The parser and help read this table and nothing
 // else, so a command or argument exists in both or in neither.
 
+import { channelHelp, SETTING_BINDINGS, type SettingBinding } from "./settings.js";
+
 /** Where a command line comes from: the OS shell, the console prompt or a command file. */
 export type Mode = "one-shot" | "console" | "command-file";
 
@@ -59,8 +61,34 @@ const DRY_RUN_FLAG: ArgumentSpec = Object.freeze({
   description: "Show the operations that would run, without changing the device",
 });
 
+const ONE_SHOT_DRY_RUN: ArgumentSpec = Object.freeze({
+  ...DRY_RUN_FLAG,
+  description: "Show the write that would be sent, without sending it",
+  modes: Object.freeze(["one-shot"] as const),
+});
+
 const command = (spec: CommandSpec): CommandSpec =>
   Object.freeze({ ...spec, path: Object.freeze([...spec.path]), modes: Object.freeze([...spec.modes]), arguments: Object.freeze([...spec.arguments]) });
+
+/** The `get` and `set` commands of one bound setting (K35). */
+function settingCommands(setting: SettingBinding): CommandSpec[] {
+  const target: ArgumentSpec[] = [{ name: "channel", kind: "value", placeholder: "<n>", description: channelHelp(), required: true }];
+  if (setting.target === "channel-side") {
+    target.push({ name: "side", kind: "value", placeholder: "left|right", description: "The side of a stereo channel: required for a stereo channel, refused for a mono one" });
+  }
+  const modes: Mode[] = ["one-shot", "console", "command-file"];
+  return [
+    command({ path: [...setting.path, "get"], summary: `Read ${lowerFirst(setting.summary)}`, modes, arguments: [...target, DEVICE_ARGUMENT, JSON_FLAG, VERBOSE_FLAG] }),
+    command({
+      path: [...setting.path, "set"],
+      summary: `Write ${lowerFirst(setting.summary)}`,
+      modes,
+      arguments: [...target, { name: "value", kind: "value", placeholder: setting.placeholder, description: setting.value, required: true }, DEVICE_ARGUMENT, JSON_FLAG, VERBOSE_FLAG, ONE_SHOT_DRY_RUN],
+    }),
+  ];
+}
+
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
 /** Every command, in the order help lists them. */
 export const COMMANDS: readonly CommandSpec[] = Object.freeze([
@@ -113,6 +141,7 @@ export const COMMANDS: readonly CommandSpec[] = Object.freeze([
       description: "The command file. A relative path is resolved against the working directory",
     },
   }),
+  ...SETTING_BINDINGS.flatMap(settingCommands),
 ]);
 
 /** Whether an argument is accepted in a mode: the command's modes, narrowed by the argument's own. */
