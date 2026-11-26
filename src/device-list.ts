@@ -64,7 +64,11 @@ class Stops {
 export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<number> {
   const { diagnostics, interruption } = io;
   const stops = new Stops();
-  interruption.onInterrupt(() => stops.stop(failure("interrupted")));
+  // A Ctrl+C is a stop only until the result is decided; after that it sets the exit code alone.
+  let decided = false;
+  interruption.onInterrupt(() => {
+    if (!decided) stops.stop(failure("interrupted"));
+  });
   // Standard error that stops accepting lines is an output failure: no device work starts after it (U5).
   let errorOutputNoted = false;
   const note = async (stage: Stage, event: "started" | "finished" | "failed", cause?: CauseCode) => {
@@ -103,7 +107,8 @@ export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<nu
   await note("result output", "started");
   // A second Ctrl+C stops every wait, and nothing more is written (I3).
   if (interruption.abandoned) return EXIT.interrupted;
-  // The result is decided here. Stops found later are still collected and reported after it.
+  // The result is decided here. The only stop found after it is a failed write of the result.
+  decided = true;
   const error = stops.first();
   const listed = error === null ? devices : null;
   const record = { type: "result" as const, command: COMMAND, data: { mode: "execute", device: null, target: null, devices: listed }, error };
@@ -116,7 +121,8 @@ export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<nu
   if (stdoutFailure !== null) stops.stop(stdoutFailure.error);
   if (!json && error !== null) await diagnostics.line(`urx: ${error.message}\n`);
   // Every stop besides the recorded one, once each, in the order found (E3). After a result
-  // without an error, the first of them is the command's own failure.
+  // without an error, the first of them is the command's own failure. No stop is added while
+  // these lines are written.
   for (const [index, stop] of stops.all().filter((stop) => stop !== error).entries()) {
     if (error === null && index === 0) await diagnostics.line(stop === stdoutFailure?.error ? stdoutFailureLine(stdoutFailure.failure) : `urx: ${stop.message}\n`);
     else await diagnostics.additional(stop);

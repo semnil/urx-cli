@@ -334,24 +334,35 @@ describe("urx device list after its result is decided (I3, E3)", () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
-  it("report a Ctrl+C that arrives while a failure result is written beside its cause", async () => {
+  it("let a Ctrl+C after the result is decided set the exit code only, with no line", async () => {
     for (const json of [true, false]) {
       const interrupt = interrupts();
       const sending = (chunk: string) => (chunk.startsWith("urx: ") ? null : (interrupt.send(), null));
       const options = json ? { stdoutFailure: sending, interrupt } : { stderrFailure: (chunk: string) => (chunk.startsWith("urx: A connection") ? (interrupt.send(), null) : null), interrupt };
       const result = await run(addon(() => Promise.resolve(record("connection_failed"))), json, options);
       expect(result.exit).toBe(130);
-      expect(result.stderr).toContain("urx: also: interrupted: Interrupted.\n");
+      expect(result.stderr).not.toContain("interrupted");
     }
+    // Nor while the last lines are written.
+    const interrupt = interrupts();
+    const late = (chunk: string) => (chunk.includes("result output finished") || chunk.includes("result output failed") ? (interrupt.send(), null) : null);
+    const result = await run(addon(() => Promise.resolve(record("connection_failed"))), true, { verbose: true, stderrFailure: late, interrupt });
+    expect(result.exit).toBe(130);
+    expect(result.stderr).not.toContain("also: interrupted");
   });
 
-  it("report a result write that fails after Ctrl+C with its cause code", async () => {
+  it("report a result write that fails after a Ctrl+C with its cause code, the Ctrl+C setting the exit code", async () => {
     for (const json of [true, false]) {
       const interrupt = interrupts();
       const failing = () => (interrupt.send(), new Error("EPIPE"));
       const result = await run(addon(listed([])), json, { stdoutFailure: failing, interrupt });
       expect(result.exit).toBe(130);
-      expect(result.stderr).toBe("urx: Interrupted.\nurx: also: output_error: The output could not be written.\n");
+      expect(result.stderr).toBe("urx: standard output could not be written.\n");
     }
+    const interrupt = interrupts();
+    const failing = () => (interrupt.send(), new Error("EPIPE"));
+    const failed = await run(addon(() => Promise.resolve(record("connection_failed"))), true, { stdoutFailure: failing, interrupt });
+    expect(failed.exit).toBe(130);
+    expect(failed.stderr).toBe("urx: also: output_error: The output could not be written.\n");
   });
 });
