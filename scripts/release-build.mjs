@@ -12,7 +12,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,7 +75,35 @@ export function copyCommonPackage(source, output) {
  * Node reads them.
  */
 export function markModuleFormat(output) {
-  writeFileSync(join(output, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+  writeFileSync(join(output, "package.json"), MODULE_FORMAT);
+}
+
+const MODULE_FORMAT = `${JSON.stringify({ type: "module" })}\n`;
+
+/** Whether the directory at `path` is a release build's output: its own module-format package.json and build information. */
+export function isReleaseOutput(path) {
+  try {
+    return readFileSync(join(path, "package.json"), "utf8") === MODULE_FORMAT && existsSync(join(path, "build-info.js"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `urx` executable that `cargo build --message-format=json` reports
+ * building, wherever the target in use puts it.
+ */
+export function launcherArtifact(messages) {
+  let found;
+  for (const line of messages.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    const message = JSON.parse(line);
+    if (message.reason === "compiler-artifact" && message.target?.name === "urx" && message.target.kind?.includes("bin") && typeof message.executable === "string") {
+      found = message.executable;
+    }
+  }
+  if (found === undefined) throw new Error("cargo reported building no urx executable");
+  return found;
 }
 
 /**
@@ -106,26 +134,46 @@ export function removeExport(root, destination) {
  * set-aside name. A failed step 3 only warns: the new output is complete, and
  * whatever could not be removed stays under the set-aside name. Warnings start
  * with `label`, the build that publishes (the release build or the bundle build).
+ *
+ * Something at `output` that `owned` does not recognize as this build's
+ * output, a link included, is left as it is: `staging` is removed and nothing
+ * is published.
  */
 export function publishOutput(
   staging,
   output,
-  { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`), label = "release build" } = {},
+  {
+    rename = renameSync,
+    remove = (path) => rmSync(path, { recursive: true, force: true }),
+    warn = (message) => process.stderr.write(`${message}\n`),
+    label = "release build",
+    owned = () => true,
+  } = {},
 ) {
+  const abandon = (error) => {
+    try {
+      remove(staging);
+    } catch {
+      warn(`${label}: the new output could not be removed from ${staging}`);
+    }
+    throw error;
+  };
+  let existing;
+  try {
+    existing = lstatSync(output);
+  } catch (error) {
+    if (error?.code !== "ENOENT") abandon(new Error(`${output} could not be examined`, { cause: error }));
+  }
+  if (existing !== undefined && (!existing.isDirectory() || !owned(output))) {
+    abandon(new Error(`${output} is not a ${label}'s output, so it is left as it is`));
+  }
   const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
   let setAside = false;
   try {
     rename(output, aside);
     setAside = true;
   } catch (error) {
-    if (error?.code !== "ENOENT") {
-      try {
-        remove(staging);
-      } catch {
-        warn(`${label}: the new output could not be removed from ${staging}`);
-      }
-      throw new Error(`the previous ${output} could not be set aside`, { cause: error });
-    }
+    if (error?.code !== "ENOENT") abandon(new Error(`the previous ${output} could not be set aside`, { cause: error }));
   }
   try {
     rename(staging, output);
@@ -178,9 +226,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);
     // The installed command, from the same export and target directory (K22).
-    execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher"], {
+    const messages = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
       cwd: source,
-      stdio: "inherit",
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "inherit"],
       env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
     });
     const output = join(root, "dist-release");
@@ -190,7 +240,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       rmSync(staging, { recursive: true, force: true });
       cpSync(join(source, "dist"), staging, { recursive: true });
       const launcher = process.platform === "win32" ? "urx.exe" : "urx";
-      cpSync(join(scratch, "target", "release", launcher), join(staging, "launcher", launcher));
+      cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
       copyCommonPackage(source, staging);
       markModuleFormat(staging);
     } catch (error) {
@@ -198,7 +248,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       throw error;
     }
     // Replaces the output, or removes `staging` and throws.
-    publishOutput(staging, output);
+    publishOutput(staging, output, { owned: isReleaseOutput });
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
     removeExport(root, source);

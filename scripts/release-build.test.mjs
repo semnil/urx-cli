@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, publishOutput, removeExport } from "./release-build.mjs";
+import { exportRelease, isReleaseOutput, launcherArtifact, markModuleFormat, publishOutput, removeExport } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -195,6 +195,25 @@ describe("release output", () => {
     expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
   });
 
+  it("leave something at the output that is not this build's output, and remove the new one", () => {
+    const output = join(scratch, "dist-release");
+    mkdirSync(output);
+    writeFileSync(join(output, "keep.txt"), "the user's");
+    const staging = directory("staging", "new");
+    expect(() => publishOutput(staging, output, { owned: isReleaseOutput })).toThrow(/is not a release build's output/);
+    expect(readFileSync(join(output, "keep.txt"), "utf8")).toBe("the user's");
+    expect(existsSync(staging)).toBe(false);
+    expect(asides()).toEqual([]);
+  });
+
+  it("recognize a release build's output by its module format and build information", () => {
+    const output = directory("dist-release", "previous");
+    expect(isReleaseOutput(output)).toBe(false);
+    markModuleFormat(output);
+    writeFileSync(join(output, "build-info.js"), "");
+    expect(isReleaseOutput(output)).toBe(true);
+  });
+
   it("name the build that warns, as its caller labels it", () => {
     const output = directory("dist-bundle", "previous");
     const staging = directory("staging", "new");
@@ -260,5 +279,19 @@ describe("release output", () => {
     expect(existsSync(output)).toBe(false);
     expect(asides()).toHaveLength(1);
     expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
+  });
+});
+
+describe("the launcher's location", () => {
+  const artifact = (name, kind, executable) => JSON.stringify({ reason: "compiler-artifact", target: { name, kind }, executable });
+
+  it("is the urx executable cargo reports building, wherever the target in use puts it", () => {
+    const executable = "/scratch/target/aarch64-apple-darwin/release/urx";
+    const messages = [artifact("sha2", ["lib"], null), "not json", artifact("urx", ["bin"], executable), JSON.stringify({ reason: "build-finished", success: true })].join("\n");
+    expect(launcherArtifact(messages)).toBe(executable);
+  });
+
+  it("is refused when cargo reports building no urx executable", () => {
+    expect(() => launcherArtifact(artifact("urx_launcher", ["lib"], null))).toThrow(/no urx executable/);
   });
 });
