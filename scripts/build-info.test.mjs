@@ -55,12 +55,25 @@ describe("embedded build information", () => {
       const elsewhere = { ...process.env, GIT_DIR: join(directory, ".git"), GIT_WORK_TREE: directory };
       expect(revParse(join(directory, "vendor"), elsewhere)).toBeNull();
       expect(commitOf(revParse(directory, elsewhere))).toBe(head);
+      // A repository that only safe.directory lets git read keeps its commit.
+      const foreign = { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+      expect(revParse(directory, foreign)).toBeNull();
+      const allowed = { ...foreign, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" };
+      expect(commitOf(revParse(directory, allowed))).toBe(head);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it("remove every GIT_ variable and keep the rest", () => {
-    expect(withoutGitLocation({ GIT_DIR: "a", GIT_WORK_TREE: "b", git_dir: "c", PATH: "p", HOME: "h" })).toEqual({ PATH: "p", HOME: "h" });
+  it("remove git's repository-local variables but keep configuration and the rest", () => {
+    const environment = { GIT_DIR: "a", GIT_WORK_TREE: "b", GIT_INDEX_FILE: "i", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*", GIT_CONFIG_GLOBAL: "g", PATH: "p" };
+    expect(withoutGitLocation(environment, ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"])).toEqual({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "*",
+      GIT_CONFIG_GLOBAL: "g",
+      PATH: "p",
+    });
+    expect(Object.keys(withoutGitLocation({ ...process.env, GIT_DIR: "a", GIT_WORK_TREE: "b", GIT_COMMON_DIR: "c" }))).not.toEqual(expect.arrayContaining(["GIT_DIR"]));
   });
 });

@@ -43,12 +43,21 @@ const readOrNull = (url) => {
 };
 
 /**
- * The environment without the variables that point git at a repository (GIT_DIR,
- * GIT_WORK_TREE and the rest of git's GIT_* settings), so that git finds the
- * repository from the directory alone, as it does when a build runs from a hook.
+ * The environment without the variables that point git at a particular
+ * repository (GIT_DIR, GIT_WORK_TREE and the rest of `git rev-parse
+ * --local-env-vars`), so that git finds the repository from the directory alone,
+ * as it does when a build runs from a hook. Configuration variables (GIT_CONFIG*)
+ * stay, since they carry settings such as safe.directory.
  */
-export function withoutGitLocation(environment) {
-  return Object.fromEntries(Object.entries(environment).filter(([name]) => !/^GIT_/i.test(name)));
+export function withoutGitLocation(environment, localVariables = gitLocalVariables(environment)) {
+  const drop = new Set(localVariables.filter((name) => !name.startsWith("GIT_CONFIG")));
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => !drop.has(name)));
+}
+
+/** The variables git treats as local to one repository. */
+function gitLocalVariables(environment) {
+  const output = execFileSync("git", ["rev-parse", "--local-env-vars"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: environment });
+  return output.split(/\r?\n/).filter((name) => name.length > 0);
 }
 
 /**
