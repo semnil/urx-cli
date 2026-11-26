@@ -253,6 +253,13 @@ impl Operation {
     }
 }
 
+impl Operation {
+    /// The transport owner, or None once finished or refused.
+    pub(crate) fn owner(&self) -> Option<Arc<connection::Operation>> {
+        lock(&self.inner).clone()
+    }
+}
+
 /// Each submitted request's completion slot, by its request ticket: pending
 /// until its outcome arrives, then held until adopted. A held `None` is an
 /// outcome that keeps no slot: refused here or reported unsent.
@@ -536,11 +543,13 @@ impl Connection {
                 let _ = tx.send(true);
             }
             Some(Some(held)) => {
+                let request = FatalRequest {
+                    held: Some(held),
+                    done: tx,
+                };
                 let sent = match lock(&self.fatal).as_ref() {
-                    Some(fatal) => fatal
-                        .send(FatalRequest { held, done: tx })
-                        .map_err(|failed| failed.0),
-                    None => Err(FatalRequest { held, done: tx }),
+                    Some(fatal) => fatal.send(request).map_err(|failed| failed.0),
+                    None => Err(request),
                 };
                 if let Err(request) = sent {
                     if self.inner.create_operation().is_err() {
@@ -550,7 +559,7 @@ impl Connection {
                         let _ = request.done.send(true);
                     } else {
                         // Put the slot back for a later call.
-                        lock(&self.slots).held.insert(ticket, Some(request.held));
+                        lock(&self.slots).held.insert(ticket, request.held);
                         return Err(napi::Error::from_reason(
                             "the connection's fatal thread is not running",
                         ));

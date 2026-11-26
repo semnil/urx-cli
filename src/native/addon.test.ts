@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { checkIdentity, expectedIdentity, loadAddon, openAddon, type ExpectedIdentity } from "./addon.js";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
-const expected: ExpectedIdentity = { bridgeRevision: 2, commonVersion: "0.1.0", commonCommit: commit };
-const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 2, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
+const expected: ExpectedIdentity = { bridgeRevision: 3, commonVersion: "0.1.0", commonCommit: commit };
+const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 3, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
 const url = new URL("file:///nowhere/urx-native.node");
 /** An addon module with every export the loader requires. */
 /** A connection class with every method the loader requires. */
@@ -11,7 +11,7 @@ const method = () => undefined;
 class CompleteConnection {
   close = method;
 }
-for (const name of ["close", "createOperation", "newRequestTicket", "getNumeric", "getText", "getName", "setNumeric", "setText", "adoptResult", "failDelivery", "terminate"]) {
+for (const name of ["close", "createOperation", "newRequestTicket", "getNumeric", "getText", "getName", "setNumeric", "setText", "adoptResult", "failDelivery", "terminate", "prepareSubscription", "adoptNotifications"]) {
   (CompleteConnection.prototype as unknown as Record<string, unknown>)[name] = method;
 }
 const addonWith = (buildIdentity: () => unknown, Connection: unknown = CompleteConnection) => ({
@@ -78,7 +78,9 @@ describe("addon loading", () => {
     // As the revision-1 addon: its connections have no request methods.
     expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 }), Lifecycle))).toEqual({ ok: false, problem: "bridge_mismatch" });
     expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
-    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 3 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    // As the revision-2 addon: its connections have no subscription methods.
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 2 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 4 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
   });
 
   it("refuse an addon of this revision that lacks an export or a connection method as malformed", () => {

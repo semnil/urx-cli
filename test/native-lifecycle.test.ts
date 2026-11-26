@@ -104,13 +104,13 @@ describe("the connection lifecycle through the addon", () => {
     const discovered = peer.requests.length;
     const opened = await device.openDevice(addon, control, "<id-a>");
     if (opened.kind !== "success") throw new Error(JSON.stringify(opened));
-    expect(opened.value.firmware).toBe("1.5.0.1");
+    expect(opened.value.connection.firmware).toBe("1.5.0.1");
     expect(peer.requests.slice(discovered)).toEqual(["<id-a> get /vd/synchronize", "<id-a> get /vd/device"]);
     const beforeClose = peer.requests.length;
-    const [first, second] = await Promise.all([device.closeConnection(opened.value), device.closeConnection(opened.value)]);
+    const [first, second] = await Promise.all([device.closeConnection(opened.value.connection), device.closeConnection(opened.value.connection)]);
     expect(first).toEqual({ kind: "success", value: null });
     expect(second).toEqual({ kind: "success", value: null });
-    expect(await device.closeConnection(opened.value)).toEqual({ kind: "success", value: null });
+    expect(await device.closeConnection(opened.value.connection)).toEqual({ kind: "success", value: null });
     // With nothing subscribed, closing sends nothing.
     expect(peer.requests.slice(beforeClose)).toEqual([]);
   });

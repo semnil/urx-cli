@@ -19,6 +19,7 @@ use urx_device_transport::lifecycle::{self, Cause, Cleanup, CleanupState, Failur
 
 use crate::records::{CleanupRecord, DeviceRecord, DiscoveryRecord, FailureRecord, UnitRecord};
 use crate::requests::SharedSlots;
+use crate::subscriptions::{Delivery, Handlers};
 
 /// Whole discovery (N2).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
@@ -137,12 +138,15 @@ pub struct Connection {
     /// Hands an undeliverable result's slot to this connection's fatal
     /// thread, which ends the connection; dropping it lets the thread exit.
     pub(crate) fatal: Arc<Mutex<Option<FatalSender>>>,
+    /// The notification delivery this connection was opened with.
+    pub(crate) delivery: Arc<Delivery>,
 }
 
-/// One undeliverable result for the fatal thread: the slot it holds, and
-/// where to report once the connection has ended.
+/// One reason for the fatal thread to end the connection: an undeliverable
+/// result's slot, or a notification batch that could not be handed to
+/// JavaScript (no slot), and where to report once the connection has ended.
 pub struct FatalRequest {
-    pub held: urx_device_transport::connection::ResultAdoption,
+    pub held: Option<urx_device_transport::connection::ResultAdoption>,
     pub done: napi::tokio::sync::oneshot::Sender<bool>,
 }
 
@@ -176,16 +180,20 @@ fn start_fatal_thread(connection: Arc<connection::Connection>) -> std::io::Resul
 /// An opened connection with its fatal thread already running.
 pub struct Opened {
     connection: Arc<connection::Connection>,
-    fatal: FatalSender,
 }
 
 impl Connection {
-    fn new(opened: Opened) -> Self {
+    fn new(
+        opened: Opened,
+        fatal: Arc<Mutex<Option<FatalSender>>>,
+        delivery: Arc<Delivery>,
+    ) -> Self {
         Connection {
             inner: opened.connection,
             slots: SharedSlots::default(),
             tickets: std::sync::atomic::AtomicU64::new(0),
-            fatal: Arc::new(Mutex::new(Some(opened.fatal))),
+            fatal,
+            delivery,
         }
     }
 }
@@ -208,6 +216,7 @@ impl Connection {
         AsyncTask::new(CloseTask {
             inner: Arc::clone(&self.inner),
             fatal: Arc::clone(&self.fatal),
+            delivery: Arc::clone(&self.delivery),
         })
     }
 }
@@ -232,6 +241,9 @@ pub struct OpenTask {
     device_id: String,
     control: lifecycle::Control,
     ports: Arc<Mutex<HashMap<String, u16>>>,
+    delivery: Arc<Delivery>,
+    /// Filled with the fatal thread's sender once the connection is open.
+    fatal: Arc<Mutex<Option<FatalSender>>>,
 }
 
 impl Task for OpenTask {
@@ -255,16 +267,20 @@ impl Task for OpenTask {
             send_deadline: REQUEST_DEADLINE,
             response_deadline: REQUEST_DEADLINE,
         };
-        let opened = match connection::open(port, &self.device_id, &options, &self.control) {
-            Ok(opened) => Arc::new(opened),
-            // A failed open owns nothing afterwards (K37).
-            Err(failure) => return Ok(Err((failure, Cleanup::COMPLETE))),
-        };
+        // The handler is installed before any request can be submitted, so no
+        // device command races it (K37).
+        let handler = Some(self.delivery.handler());
+        let opened =
+            match connection::open_with(port, &self.device_id, &options, &self.control, handler) {
+                Ok(opened) => Arc::new(opened),
+                // A failed open owns nothing afterwards (K37).
+                Err(failure) => return Ok(Err((failure, Cleanup::COMPLETE))),
+            };
         match start_fatal_thread(Arc::clone(&opened)) {
-            Ok(fatal) => Ok(Ok(Opened {
-                connection: opened,
-                fatal,
-            })),
+            Ok(fatal) => {
+                *lock(&self.fatal) = Some(fatal);
+                Ok(Ok(Opened { connection: opened }))
+            }
             // Without its fatal thread the connection is not usable: it is
             // closed here, so the failed open owns nothing.
             // Its cleanup is what that close established.
@@ -281,30 +297,45 @@ impl Task for OpenTask {
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(match output {
             Ok(opened) => OpenRecord::Success {
-                value: Connection::new(opened),
+                value: Connection::new(opened, Arc::clone(&self.fatal), Arc::clone(&self.delivery)),
             },
-            Err((failure, cleanup)) => OpenRecord::Failure {
-                failure: failure.into(),
-                cleanup: cleanup.into(),
-            },
+            Err((failure, cleanup)) => {
+                // No connection exists to deliver anything.
+                self.delivery.release_function();
+                OpenRecord::Failure {
+                    failure: failure.into(),
+                    cleanup: cleanup.into(),
+                }
+            }
         })
     }
 }
 
 /// Opens the unit `deviceId` that `control`'s discovery found online, and
-/// verifies its identity on the operational connection (N2, K4).
-#[napi]
-pub fn open_connection(device_id: String, control: &Control) -> AsyncTask<OpenTask> {
+/// verifies its identity on the operational connection (N2, K4). Its
+/// notification batches go to `handlers.notifications`.
+#[napi(
+    ts_args_type = "deviceId: string, control: Control, handlers: { notifications: (batch: unknown) => void }"
+)]
+pub fn open_connection(
+    device_id: String,
+    control: &Control,
+    handlers: Handlers,
+) -> AsyncTask<OpenTask> {
+    let fatal = Arc::new(Mutex::new(None));
     AsyncTask::new(OpenTask {
         device_id,
         control: control.inner.clone(),
         ports: Arc::clone(&control.ports),
+        delivery: Delivery::new(handlers, Arc::downgrade(&fatal)),
+        fatal,
     })
 }
 
 pub struct CloseTask {
     inner: Arc<connection::Connection>,
     fatal: Arc<Mutex<Option<FatalSender>>>,
+    delivery: Arc<Delivery>,
 }
 
 impl Task for CloseTask {
@@ -315,8 +346,10 @@ impl Task for CloseTask {
         let outcome = self.inner.close(TEARDOWN_DEADLINE);
         // Only once the connection has ended is its fatal thread let go, so
         // it exits instead of waiting until the object is collected; until
-        // then an undeliverable slot can still be handed to it.
+        // then an undeliverable slot can still be handed to it. Nothing more
+        // is delivered either.
         lock(&self.fatal).take();
+        self.delivery.release_function();
         Ok(outcome)
     }
 

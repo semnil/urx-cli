@@ -28,6 +28,8 @@ const CONNECTION_METHODS = [
   "adoptResult",
   "failDelivery",
   "terminate",
+  "prepareSubscription",
+  "adoptNotifications",
 ] as const;
 
 /** What the JavaScript expects the addon to have been built from. */
