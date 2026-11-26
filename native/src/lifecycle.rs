@@ -156,10 +156,16 @@ fn start_fatal_thread(connection: Arc<connection::Connection>) -> std::io::Resul
     std::thread::Builder::new()
         .name("urx-fatal-close".to_owned())
         .spawn(move || {
-            for request in receiver {
-                // The connection closes with the result still held; only
-                // then is it released.
-                connection.close(TEARDOWN_DEADLINE);
+            // Waits until a slot arrives or the connection's own close drops
+            // the sender.
+            let Ok(first) = receiver.recv() else {
+                return;
+            };
+            // The connection closes with the result still held; only then is
+            // it released. One end serves every slot handed over by then, and
+            // the thread exits: a later slot finds the connection ended.
+            connection.close(TEARDOWN_DEADLINE);
+            for request in std::iter::once(first).chain(receiver.try_iter()) {
                 drop(request.held);
                 let _ = request.done.send(true);
             }
@@ -199,6 +205,9 @@ impl Connection {
     /// Closes the connection (K4, N2). Repeated calls join the same close.
     #[napi]
     pub fn close(&self) -> AsyncTask<CloseTask> {
+        // The fatal thread is not needed once the connection is closing; this
+        // lets it exit instead of waiting until the object is collected.
+        lock(&self.fatal).take();
         AsyncTask::new(CloseTask {
             inner: Arc::clone(&self.inner),
         })
@@ -228,16 +237,19 @@ pub struct OpenTask {
 }
 
 impl Task for OpenTask {
-    type Output = Result<Opened, Failure>;
+    type Output = Result<Opened, (Failure, Cleanup)>;
     type JsValue = OpenRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         // Only a unit this control's discovery found online can be opened.
         let Some(port) = lock(&self.ports).get(&self.device_id).copied() else {
-            return Ok(Err(Failure::Cause {
-                code: Cause::DeviceNotFound,
-                phase: Phase::Connect,
-            }));
+            return Ok(Err((
+                Failure::Cause {
+                    code: Cause::DeviceNotFound,
+                    phase: Phase::Connect,
+                },
+                Cleanup::COMPLETE,
+            )));
         };
         let options = ConnectionOptions {
             connect_deadline: CONNECT_DEADLINE,
@@ -247,7 +259,8 @@ impl Task for OpenTask {
         };
         let opened = match connection::open(port, &self.device_id, &options, &self.control) {
             Ok(opened) => Arc::new(opened),
-            Err(failure) => return Ok(Err(failure)),
+            // A failed open owns nothing afterwards (K37).
+            Err(failure) => return Ok(Err((failure, Cleanup::COMPLETE))),
         };
         match start_fatal_thread(Arc::clone(&opened)) {
             Ok(fatal) => Ok(Ok(Opened {
@@ -256,13 +269,14 @@ impl Task for OpenTask {
             })),
             // Without its fatal thread the connection is not usable: it is
             // closed here, so the failed open owns nothing.
-            Err(_) => {
-                opened.close(TEARDOWN_DEADLINE);
-                Ok(Err(Failure::Cause {
+            // Its cleanup is what that close established.
+            Err(_) => Ok(Err((
+                Failure::Cause {
                     code: Cause::InternalError,
                     phase: Phase::Connect,
-                }))
-            }
+                },
+                closed_cleanup(opened.close(TEARDOWN_DEADLINE)),
+            ))),
         }
     }
 
@@ -271,10 +285,9 @@ impl Task for OpenTask {
             Ok(opened) => OpenRecord::Success {
                 value: Connection::new(opened),
             },
-            // A failed open owns nothing afterwards (K37).
-            Err(failure) => OpenRecord::Failure {
+            Err((failure, cleanup)) => OpenRecord::Failure {
                 failure: failure.into(),
-                cleanup: CleanupRecord::complete(),
+                cleanup: cleanup.into(),
             },
         })
     }
@@ -305,6 +318,24 @@ impl Task for CloseTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(close_record(output))
+    }
+}
+
+/// The cleanup of a connection a failed call closed: the connection's end,
+/// with the teardown failure, if any, or unconfirmed termination.
+pub fn closed_cleanup(outcome: CloseOutcome) -> Cleanup {
+    let ended = |state, failure| Cleanup { state, failure };
+    match outcome {
+        CloseOutcome::Closed => ended(CleanupState::ConnectionClosed, None),
+        CloseOutcome::Failed(failure) => ended(CleanupState::ConnectionClosed, Some(failure)),
+        CloseOutcome::Incomplete(failure) => ended(CleanupState::Incomplete, Some(failure)),
+        CloseOutcome::Started => ended(
+            CleanupState::Incomplete,
+            Some(Failure::Cause {
+                code: Cause::InternalError,
+                phase: Phase::Teardown,
+            }),
+        ),
     }
 }
 
@@ -346,6 +377,35 @@ mod tests {
             code,
             phase: Phase::Teardown,
         }
+    }
+
+    #[test]
+    fn a_failed_open_reports_what_closing_its_connection_established() {
+        let closed = closed_cleanup(CloseOutcome::Closed);
+        assert_eq!(
+            (closed.state, closed.failure),
+            (CleanupState::ConnectionClosed, None)
+        );
+        let failed = closed_cleanup(CloseOutcome::Failed(teardown(Cause::DeviceRejected)));
+        assert_eq!(
+            (failed.state, failed.failure),
+            (
+                CleanupState::ConnectionClosed,
+                Some(teardown(Cause::DeviceRejected))
+            )
+        );
+        let expired = closed_cleanup(CloseOutcome::Incomplete(teardown(Cause::TeardownTimeout)));
+        assert_eq!(
+            (expired.state, expired.failure),
+            (
+                CleanupState::Incomplete,
+                Some(teardown(Cause::TeardownTimeout))
+            )
+        );
+        assert_eq!(
+            closed_cleanup(CloseOutcome::Started).state,
+            CleanupState::Incomplete
+        );
     }
 
     #[test]

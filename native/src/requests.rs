@@ -543,11 +543,18 @@ impl Connection {
                     None => Err(FatalRequest { held, done: tx }),
                 };
                 if let Err(request) = sent {
-                    // The thread is gone: put the slot back for a later call.
-                    lock(&self.slots).held.insert(ticket, Some(request.held));
-                    return Err(napi::Error::from_reason(
-                        "the connection's fatal thread is not running",
-                    ));
+                    if self.inner.create_operation().is_err() {
+                        // The thread is gone because the connection has ended
+                        // or is closing: that end already took the slot.
+                        drop(request.held);
+                        let _ = request.done.send(true);
+                    } else {
+                        // Put the slot back for a later call.
+                        lock(&self.slots).held.insert(ticket, Some(request.held));
+                        return Err(napi::Error::from_reason(
+                            "the connection's fatal thread is not running",
+                        ));
+                    }
                 }
             }
         }
