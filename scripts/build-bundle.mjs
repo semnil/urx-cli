@@ -1,9 +1,12 @@
 // The installed bundle (K18, K38): the release output and the pinned Node
 // runtime assembled into the fixed layout, with a release manifest that lists
 // every file it owns by its SHA-256 and names the identities it was built
-// from. The Node archive is given by path and checked against the hash
-// build-inputs.json records for this platform before anything is extracted.
-// Nothing is downloaded here, and the bundle has no links.
+// from. It reads dist-release/ and writes dist-bundle/, both at the
+// repository root, and replaces dist-bundle/ only when what is there is a
+// bundle. The Node archive is given by path and read once: the bytes whose
+// hash matches the one build-inputs.json records for this platform are the
+// bytes extracted. Nothing is downloaded here, the bundle has no links, and
+// on macOS its directories and executables are 0755 and its other files 0644.
 //
 //   bin/urx[.exe]                the launcher (K22)
 //   runtime/node[.exe]           the bundled Node
@@ -12,14 +15,14 @@
 //   notices/                     the licenses of the CLI, urx-device and Node
 //   release-manifest.json        relative paths, hashes and identities
 //
-// Usage: node scripts/build-bundle.mjs --node-archive <path> [--release dist-release] [--output dist-bundle]
+// Usage: node scripts/build-bundle.mjs --node-archive <path>
 //        node scripts/build-bundle.mjs --archive-url   (prints where this platform's archive is published)
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { publishOutput } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
@@ -66,10 +69,59 @@ function systemTar() {
   return join(systemRoot, "System32", "tar.exe");
 }
 
-/** The archive's bytes when they have the hash recorded for this platform; refuses anything else. */
-export function verifyArchive(path, expected) {
-  const actual = sha256(readFileSync(path));
+/** The archive's bytes, read once, when they have the hash recorded for this platform; refuses anything else. */
+export function verifiedArchive(path, expected) {
+  const bytes = readFileSync(path);
+  const actual = sha256(bytes);
   if (actual !== expected) throw new Error(`the Node archive's SHA-256 is ${actual}, not the recorded ${expected}`);
+  return bytes;
+}
+
+/** The identity of the directory at `path`; a release build that replaces it leaves a different one there. */
+export function directoryIdentity(path) {
+  const stats = lstatSync(path, { bigint: true });
+  if (!stats.isDirectory()) throw new Error(`${path} is not a directory`);
+  return `${stats.dev}:${stats.ino}:${stats.birthtimeNs}`;
+}
+
+/**
+ * Copies the release output to `snapshot`, which this build alone then reads.
+ * A copy during which a release build replaced the output may mix two
+ * releases, so it is refused.
+ */
+export function snapshotRelease(release, snapshot, copy = cpSync) {
+  const before = directoryIdentity(release);
+  copy(release, snapshot, { recursive: true });
+  if (directoryIdentity(release) !== before) throw new Error(`${release} was replaced while it was copied; build the bundle again`);
+}
+
+/** Whether the directory at `path` is a bundle: its release manifest is a urx-cli format 1 manifest. */
+export function isBundle(path) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(path, "release-manifest.json"), "utf8"));
+    return manifest?.product === PRODUCT && manifest?.format === FORMAT;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gives the bundle at `root` the modes it is distributed with, whatever the
+ * umask or its sources gave it: 0755 for directories and for the
+ * `executables` (relative paths), 0644 for every other file. Windows has no
+ * such modes.
+ */
+export function normalizeModes(root, executables, platform = process.platform) {
+  if (platform === "win32") return;
+  const walk = (directory) => {
+    chmodSync(directory, 0o755);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else chmodSync(path, executables.includes(relative(root, path).split(sep).join("/")) ? 0o755 : 0o644);
+    }
+  };
+  walk(root);
 }
 
 /** Every regular file under `root`, as sorted relative paths with `/` separators. */
@@ -123,32 +175,36 @@ export function assemble({ release, node, notices, staging, platform }) {
   for (const [name, path] of Object.entries(notices)) copy(path, "notices", name);
 }
 
+const USAGE = "usage: node scripts/build-bundle.mjs --node-archive <path> | --archive-url";
+
 async function main(argv) {
-  const option = (name, fallback) => {
-    const at = argv.indexOf(name);
-    return at >= 0 && argv[at + 1] !== undefined ? argv[at + 1] : fallback;
-  };
   const root = fileURLToPath(new URL("../", import.meta.url));
   const platform = platformOf();
   const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
-  if (argv.includes("--archive-url")) {
+  if (argv.length === 1 && argv[0] === "--archive-url") {
     process.stdout.write(`${archiveUrl(inputs, platform)}\n`);
     return;
   }
-  const archive = option("--node-archive", undefined);
-  if (archive === undefined) throw new Error("usage: node scripts/build-bundle.mjs --node-archive <path> [--release dist-release] [--output dist-bundle]");
-  const release = resolve(option("--release", join(root, "dist-release")));
-  const output = resolve(option("--output", join(root, "dist-bundle")));
+  if (argv.length !== 2 || argv[0] !== "--node-archive") throw new Error(USAGE);
+  const release = join(root, "dist-release");
+  const output = join(root, "dist-bundle");
   const recorded = inputs.node.archives[platform.key];
-  verifyArchive(archive, recorded.sha256);
+  const archive = verifiedArchive(argv[1], recorded.sha256);
 
-  const { BUILD_INFO } = await import(pathToFileURL(join(release, "build-info.js")).href);
   const scratch = mkdtempSync(join(tmpdir(), "urx-bundle-"));
   try {
-    execFileSync(systemTar(), ["-xf", archive, "-C", scratch], { stdio: "inherit" });
-    const [top, ...others] = readdirSync(scratch);
-    if (top === undefined || others.length > 0 || !statSync(join(scratch, top)).isDirectory()) throw new Error("the Node archive does not hold one top directory");
-    const node = join(scratch, top);
+    const snapshot = join(scratch, "release");
+    snapshotRelease(release, snapshot);
+    const { BUILD_INFO } = await import(pathToFileURL(join(snapshot, "build-info.js")).href);
+    // The checked bytes, written where nothing else replaces them, are what is extracted.
+    const archiveCopy = join(scratch, recorded.file);
+    writeFileSync(archiveCopy, archive);
+    const extracted = join(scratch, "node");
+    mkdirSync(extracted);
+    execFileSync(systemTar(), ["-xf", archiveCopy, "-C", extracted], { stdio: "inherit" });
+    const [top, ...others] = readdirSync(extracted);
+    if (top === undefined || others.length > 0 || !statSync(join(extracted, top)).isDirectory()) throw new Error("the Node archive does not hold one top directory");
+    const node = join(extracted, top);
     const notices = join(scratch, "notices");
     mkdirSync(notices);
     writeFileSync(join(notices, "urx-cli.txt"), recordedFile(root, BUILD_INFO.appCommit, "LICENSE"));
@@ -158,7 +214,7 @@ async function main(argv) {
     let manifest;
     try {
       assemble({
-        release,
+        release: snapshot,
         node,
         staging,
         platform,
@@ -171,12 +227,13 @@ async function main(argv) {
         runtime: { version: inputs.node.version, archive: recorded.file, sha256: recorded.sha256 },
       });
       writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+      normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`]);
     } catch (error) {
       rmSync(staging, { recursive: true, force: true });
       throw error;
     }
-    // Replaces the output, or removes `staging` and throws.
-    publishOutput(staging, output, { label: "bundle build" });
+    // Replaces a bundle at the output, or removes `staging` and throws.
+    publishOutput(staging, output, { label: "bundle build", owned: isBundle });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

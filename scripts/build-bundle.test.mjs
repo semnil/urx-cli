@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { archiveUrl, assemble, filesUnder, manifestOf, platformOf, sha256, verifyArchive } from "./build-bundle.mjs";
+import { archiveUrl, assemble, filesUnder, isBundle, manifestOf, normalizeModes, platformOf, sha256, snapshotRelease, verifiedArchive } from "./build-bundle.mjs";
 
 const temporary = [];
 const scratch = () => {
@@ -35,11 +35,50 @@ describe("the installed bundle (K18, K38)", () => {
     expect(archiveUrl(inputs, platformOf("win32", "x64"))).toBe(`https://nodejs.org/dist/v${version}/node-v${version}-win-x64.zip`);
   });
 
-  it("refuses a Node archive whose SHA-256 is not the recorded one", () => {
+  it("refuses a Node archive whose SHA-256 is not the recorded one, and returns the bytes it checked", () => {
     const dir = scratch();
     write(dir, "node.tar.gz", "archive");
-    expect(() => verifyArchive(join(dir, "node.tar.gz"), sha256(Buffer.from("archive")))).not.toThrow();
-    expect(() => verifyArchive(join(dir, "node.tar.gz"), sha256(Buffer.from("other")))).toThrow(/not the recorded/);
+    expect(verifiedArchive(join(dir, "node.tar.gz"), sha256(Buffer.from("archive"))).toString()).toBe("archive");
+    expect(() => verifiedArchive(join(dir, "node.tar.gz"), sha256(Buffer.from("other")))).toThrow(/not the recorded/);
+  });
+
+  it("copies the release output once, and refuses a copy taken while a release build replaced it", () => {
+    const dir = scratch();
+    const release = join(dir, "dist-release");
+    write(release, "main.js", "first");
+    snapshotRelease(release, join(dir, "kept"));
+    expect(readFileSync(join(dir, "kept", "main.js"), "utf8")).toBe("first");
+    // A release build publishes by renaming its new output into place.
+    const replacing = (from, to, options) => {
+      cpSync(from, to, options);
+      renameSync(release, join(dir, "aside"));
+      write(join(dir, "next"), "main.js", "second");
+      renameSync(join(dir, "next"), release);
+    };
+    expect(() => snapshotRelease(release, join(dir, "mixed"), replacing)).toThrow(/was replaced while it was copied/);
+  });
+
+  it("replaces only a bundle at the output", () => {
+    const dir = scratch();
+    write(dir, "bundle/release-manifest.json", JSON.stringify({ product: "urx-cli", format: 1, files: [] }));
+    write(dir, "other/release-manifest.json", JSON.stringify({ product: "something-else", format: 1 }));
+    write(dir, "plain/keep.txt");
+    expect(isBundle(join(dir, "bundle"))).toBe(true);
+    expect(isBundle(join(dir, "other"))).toBe(false);
+    expect(isBundle(join(dir, "plain"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("gives directories and executables 0755 and other files 0644, whatever they had", () => {
+    const dir = scratch();
+    write(dir, "bin/urx");
+    write(dir, "app/main.js");
+    chmodSync(join(dir, "bin", "urx"), 0o700);
+    chmodSync(join(dir, "app", "main.js"), 0o666);
+    chmodSync(join(dir, "app"), 0o700);
+    chmodSync(dir, 0o700);
+    normalizeModes(dir, ["bin/urx"]);
+    const mode = (...path) => statSync(join(dir, ...path)).mode & 0o7777;
+    expect([mode(), mode("app"), mode("bin"), mode("bin", "urx"), mode("app", "main.js")]).toEqual([0o755, 0o755, 0o755, 0o755, 0o644]);
   });
 
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
