@@ -16,7 +16,8 @@
     "build-inputs:check": "node scripts/build-inputs.mjs",
     "build:native": "node scripts/build-native.mjs",
     "version:check": "node scripts/version.mjs --check",
-    "version:write": "node scripts/version.mjs --write"
+    "version:write": "node scripts/version.mjs --write",
+    "build:release": "node scripts/release-build.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.10.12",
