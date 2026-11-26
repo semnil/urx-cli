@@ -13,14 +13,18 @@ urx-cli は単独メンテナーのプロジェクトである。機器の定義
 
 ## セットアップ
 
-Node.js 26 (`.node-version`)、pnpm (`package.json` の `packageManager`)。`--recurse-submodules` を付けて取得するか、取得済みのものでは `git submodule update --init` を打つ。
+Node.js 26 (`.node-version`)、pnpm (`package.json` の `packageManager`)、rustup (`rust-toolchain.toml` に固定した Rust のツールチェーンを入れる)。`--recurse-submodules` を付けて取得するか、取得済みのものでは `git submodule update --init` を打つ。
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm build-inputs:check
+pnpm version:check
 pnpm typecheck
 pnpm build
+pnpm build:native
 pnpm test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ## 規約
@@ -28,5 +32,6 @@ pnpm test
 - 識別子とコメントは英語。コメントには経緯ではなく振る舞いを書く。
 - 差分は最小にし、周りの書き方に合わせる。整形だけの変更は単独では受け付けない。
 - `vendor/urx-device` の下のファイルを直さない。共通ライブラリの変更は urx-device で行い、ここでは別のプルリクエストで取り込む。
+- Rust の変更には `cargo fmt --all` を掛ける。CI は差分があると失敗し、ブランチへは何も書き戻さない。
 - 文書には制御プロトコルのパラメータ番号も生の値も書かない。
 - 英語と日本語の文書をそろえる。

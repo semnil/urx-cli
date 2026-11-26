@@ -11,27 +11,32 @@
 | パス | 中身 |
 | --- | --- |
 | `src` | `urx` コマンド: 引数・端末と JSON の出力・終了コード・プロセスの始まりと終わり |
+| `native` | urx-device の通信の上に作る Node-API のアドオン (Rust、napi-rs) |
 | `vendor/urx-device` | 共通ライブラリ。このリポジトリが取り込んだコミットのもの |
-| `scripts` | リポジトリの道具: `build-inputs.mjs` はビルドの入力を確かめ、`build-info.mjs` は版とコミットをビルドに埋め込む |
-| `build-inputs.json` | ビルドに使う Node と pnpm の正確な版と、Node のアーカイブのハッシュ |
+| `scripts` | リポジトリの道具: `build-inputs.mjs` はビルドの入力を確かめ、`build-info.mjs` は版とコミットをビルドに埋め込み、`build-native.mjs` はアドオンを組み立て、`version.mjs` は CLI の版の写しをそろえる |
+| `build-inputs.json` | ビルドに使う Node・pnpm・Rust の正確な版と、Node のアーカイブのハッシュ |
 
 ## ビルドとテスト
 
-必要なもの: Node.js 26 (`.node-version`)、pnpm (`package.json` の `packageManager`)。サブモジュールごと取得する:
+必要なもの: Node.js 26 (`.node-version`)、pnpm (`package.json` の `packageManager`)、rustup (`rust-toolchain.toml` に固定した Rust のツールチェーンを入れる)。サブモジュールごと取得する:
 
 ```sh
 git clone --recurse-submodules https://github.com/semnil/urx-cli.git
 cd urx-cli
 pnpm install --frozen-lockfile
 pnpm build-inputs:check
+pnpm version:check
 pnpm typecheck
 pnpm build
+pnpm build:native
 pnpm test
 ```
 
+`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。
+
 ## 版
 
-ルートの `package.json` の `version` が CLI の版。urx-device の版とは別に決め、CLI の版のほかの写しはすべてここから作る。
+ルートの `package.json` の `version` が CLI の版。urx-device の版とは別に決める。`pnpm version:write` がアドオンのクレートの版と `Cargo.lock` のその項目をここから作り直し、`pnpm version:check` はどれかが違うと失敗する。
 
 ## 協力
 
