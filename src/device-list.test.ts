@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { renderDevices, runDeviceList } from "./device-list.js";
 import { Diagnostics } from "./diagnostics.js";
-import type { InterruptHandler, Interrupts } from "./interrupts.js";
+import { CommandInterruption, type InterruptHandler, type Interrupts } from "./interrupts.js";
 import type { AddonCheck, NativeAddon } from "./native/addon.js";
 import type { OutputStream } from "./output.js";
 
-const capture = (fail?: Error) => {
+/** A stream that records what it accepts; `fail` decides, per chunk, whether a write fails. */
+const capture = (fail?: Error | ((chunk: string) => Error | null)) => {
   const chunks: string[] = [];
-  const stream: OutputStream = { write: (chunk, done) => (chunks.push(chunk), done(fail ?? null), fail === undefined) };
+  const stream: OutputStream = {
+    write: (chunk, done) => {
+      const error = typeof fail === "function" ? fail(chunk) : (fail ?? null);
+      if (error === null) chunks.push(chunk);
+      done(error);
+      return error === null;
+    },
+  };
   return { stream, text: () => chunks.join("") };
 };
 
@@ -43,14 +51,24 @@ const build = { appVersion: "0.1.0", appCommit: "a".repeat(40), commonVersion: "
 const runtime = { version: "26.13.0", platform: "darwin" as const, arch: "arm64" };
 const complete = { state: "complete", failure: null };
 
-async function run(check: AddonCheck, json: boolean, options: { verbose?: boolean; stdoutFailure?: Error; interrupt?: ReturnType<typeof interrupts> } = {}) {
+interface RunOptions {
+  verbose?: boolean;
+  stdoutFailure?: Error | ((chunk: string) => Error | null);
+  stderrFailure?: Error | ((chunk: string) => Error | null);
+  interrupt?: ReturnType<typeof interrupts>;
+}
+
+async function run(check: AddonCheck, json: boolean, options: RunOptions = {}) {
   const stdout = capture(options.stdoutFailure);
-  const stderr = capture();
+  const stderr = capture(options.stderrFailure);
   let clock = 0;
   const diagnostics = new Diagnostics({ stderr: stderr.stream, verbose: options.verbose ?? false, build, runtime, now: () => (clock += 5) }, "device list");
   const interrupt = options.interrupt ?? interrupts();
-  const exit = await runDeviceList({ stdout: stdout.stream, diagnostics, addon: () => check, interrupts: interrupt.value }, json);
-  return { exit, stdout: stdout.text(), stderr: stderr.text(), listening: interrupt.listening() };
+  const interruption = new CommandInterruption(interrupt.value);
+  let loads = 0;
+  const exit = await runDeviceList({ stdout: stdout.stream, diagnostics, addon: () => (loads++, check), interruption }, json);
+  interruption.dispose();
+  return { exit, stdout: stdout.text(), stderr: stderr.text(), listening: interrupt.listening(), loads };
 }
 
 const listed = (devices: unknown[]) => () => Promise.resolve({ kind: "success", value: devices });
@@ -68,6 +86,7 @@ describe("urx device list (D14)", () => {
       stdout: "ID  MODEL   FIRMWARE\nB   URX44V  1.5.0.1\nb   URX22   1.5.0.1\né   URX44   -\n",
       stderr: "",
       listening: 0,
+      loads: 1,
     });
   });
 
@@ -184,5 +203,93 @@ describe("urx device list (D14)", () => {
       "urx: verbose: device list: result output finished at 20 ms",
     ]);
     expect(result.stderr).not.toContain("<id-a>");
+  });
+});
+
+describe("urx device list when output fails or Ctrl+C overlaps (U5, I1, E3)", () => {
+  const record = (code: string) => ({ kind: "failure", failure: { kind: "cause", code, phase: "discovery" }, cleanup: complete });
+  const counting = () => {
+    let calls = 0;
+    return { check: addon(() => (calls++, Promise.resolve({ kind: "success", value: [] }))), calls: () => calls };
+  };
+
+  it("start no discovery once standard error has failed, and report the output failure", async () => {
+    for (const json of [true, false]) {
+      const discovery = counting();
+      const result = await run(discovery.check, json, { verbose: true, stderrFailure: new Error("EPIPE") });
+      expect(discovery.calls()).toBe(0);
+      expect(result.exit).toBe(1);
+      if (json) expect(JSON.parse(result.stdout).error).toEqual({ code: "output_error", message: "The output could not be written." });
+      else expect(result.stdout).toBe("");
+    }
+  });
+
+  it("report a standard-error failure after the discovery as the first cause, listing nothing", async () => {
+    const failing = (chunk: string) => (chunk.includes("discovery finished") || chunk.includes("discovery failed") ? new Error("EPIPE") : null);
+    const result = await run(addon(() => Promise.resolve({ kind: "success", value: [] })), true, { verbose: true, stderrFailure: failing });
+    expect(JSON.parse(result.stdout).error.code).toBe("output_error");
+    expect(JSON.parse(result.stdout).data.devices).toBeNull();
+    expect(result.exit).toBe(1);
+  });
+
+  it("report Ctrl+C that arrives while a diagnostic is being written, never the success", async () => {
+    const interrupt = interrupts();
+    const sending = (chunk: string) => (chunk.includes("discovery finished") ? (interrupt.send(), null) : null);
+    const result = await run(addon(() => Promise.resolve({ kind: "success", value: [] })), true, { verbose: true, stderrFailure: sending, interrupt });
+    expect(result.exit).toBe(130);
+    expect(JSON.parse(result.stdout).error.code).toBe("interrupted");
+  });
+
+  it("load nothing after a Ctrl+C that came before the command started", async () => {
+    const interrupt = interrupts();
+    interrupt.send();
+    const early: Interrupts = { subscribe: (handler) => (handler(1), interrupt.value.subscribe(handler)) };
+    const stdout = capture();
+    const stderr = capture();
+    const diagnostics = new Diagnostics({ stderr: stderr.stream, verbose: false, build, runtime, now: () => 0 }, "device list");
+    const interruption = new CommandInterruption(early);
+    let loads = 0;
+    const exit = await runDeviceList({ stdout: stdout.stream, diagnostics, addon: () => (loads++, addon(listed([]))), interruption }, true);
+    interruption.dispose();
+    expect([exit, loads, JSON.parse(stdout.text()).error.code]).toEqual([130, 0, "interrupted"]);
+  });
+
+  it("exit 130 when Ctrl+C arrives while the result is written, keeping the result", async () => {
+    const interrupt = interrupts();
+    const sending = () => (interrupt.send(), null);
+    const result = await run(addon(listed([])), true, { stdoutFailure: sending, interrupt });
+    expect(result.exit).toBe(130);
+    expect(JSON.parse(result.stdout).error).toBeNull();
+  });
+
+  it("report a failure found after Ctrl+C beside it, with its cause code", async () => {
+    for (const code of ["connection_lost", "response_timeout"]) {
+      const interrupt = interrupts();
+      const pending = run(addon(() => new Promise((resolve) => setTimeout(() => resolve(record(code)), 20))), true, { interrupt });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      interrupt.send();
+      const result = await pending;
+      expect(result.exit).toBe(130);
+      expect(JSON.parse(result.stdout).error.code).toBe("interrupted");
+      expect(result.stderr).toMatch(new RegExp(`^urx: also: ${code}: .+\\.\\n$`));
+    }
+  });
+
+  it("not report the cancellation a Ctrl+C asked for as another failure", async () => {
+    const interrupt = interrupts();
+    const pending = run(
+      addon(() => new Promise((resolve) => setTimeout(() => resolve({ kind: "failure", failure: { kind: "cancelled", phase: "discovery" }, cleanup: complete }), 20))),
+      true,
+      { interrupt },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    interrupt.send();
+    expect((await pending).stderr).toBe("");
+  });
+
+  it("report a failed write of a failure result with its cause code, keeping the exit code", async () => {
+    const result = await run(addon(() => Promise.resolve(record("connection_failed"))), true, { stdoutFailure: new Error("EPIPE") });
+    expect(result.exit).toBe(3);
+    expect(result.stderr).toBe("urx: also: output_error: The output could not be written.\n");
   });
 });

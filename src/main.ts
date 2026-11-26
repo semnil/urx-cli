@@ -10,7 +10,7 @@ import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
 import { Diagnostics } from "./diagnostics.js";
-import { processInterrupts, type Interrupts } from "./interrupts.js";
+import { ABANDONED, CommandInterruption, processInterrupts, type Interrupts } from "./interrupts.js";
 import type { AddonCheck } from "./native/addon.js";
 import { processOutput, stdoutFailureLine, writeWithDeadline, type OutputStream } from "./output.js";
 import { EXIT } from "./result.js";
@@ -50,13 +50,21 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
       const path = parsed.command.path.join(" ");
       if (path === "device list") {
         const device = io.device ?? { interrupts: processInterrupts(), now: () => performance.now() };
-        const diagnostics = new Diagnostics(
-          { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now },
-          path,
-        );
-        const [{ runDeviceList }, { expectedIdentity, openAddon }] = await Promise.all([import("./device-list.js"), import("./native/addon.js")]);
-        const addon = device.addon ?? (() => openAddon(expectedIdentity(io.build)));
-        return runDeviceList({ stdout: io.stdout, diagnostics, addon, interrupts: device.interrupts, listPort: device.listPort }, parsed.arguments.has("json"));
+        // From here until the result is written, Ctrl+C belongs to the command.
+        const interruption = new CommandInterruption(device.interrupts);
+        try {
+          const diagnostics = new Diagnostics(
+            { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now },
+            path,
+          );
+          const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./native/addon.js")]));
+          if (modules === ABANDONED) return EXIT.interrupted;
+          const [{ runDeviceList }, { expectedIdentity, openAddon }] = modules;
+          const addon = device.addon ?? (() => openAddon(expectedIdentity(io.build)));
+          return await runDeviceList({ stdout: io.stdout, diagnostics, addon, interruption, listPort: device.listPort }, parsed.arguments.has("json"));
+        } finally {
+          interruption.dispose();
+        }
       }
       await writeWithDeadline(io.stderr, `urx: \`urx ${path}\` is not available in this build.\n`);
       return EXIT.failure;

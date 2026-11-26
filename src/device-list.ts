@@ -2,14 +2,14 @@
 // firmware, as one result. A discovery that does not complete lists nothing.
 
 import type { DiscoveredDevice } from "@urx/device-control/operations";
-import type { Diagnostics } from "./diagnostics.js";
+import type { Diagnostics, Stage } from "./diagnostics.js";
 import { escapeForDisplay } from "./escape.js";
-import type { Interrupts } from "./interrupts.js";
+import { ABANDONED, type CommandInterruption } from "./interrupts.js";
 import { addonFailure, failure, lifecycleFailure } from "./messages.js";
 import type { AddonCheck } from "./native/addon.js";
 import { discoverDevices } from "./native/device.js";
-import { stdoutFailureLine, writeWithDeadline, type OutputFailure, type OutputStream } from "./output.js";
-import { baseExitCode, EXIT, jsonLine, type ResultError, type ResultRecord } from "./result.js";
+import { stdoutFailureLine, writeWithDeadline, type OutputStream } from "./output.js";
+import { baseExitCode, EXIT, jsonLine, type CauseCode, type ResultError } from "./result.js";
 
 const COMMAND = "device list";
 
@@ -18,7 +18,8 @@ export interface DeviceListIo {
   readonly diagnostics: Diagnostics;
   /** Loads the addon and checks its identity; called only here, never for help or version. */
   readonly addon: () => AddonCheck;
-  readonly interrupts: Interrupts;
+  /** The command's Ctrl+C, listened to since the command was chosen. */
+  readonly interruption: CommandInterruption;
   /** A local peer's list port, for tests; Device Center's own when absent. */
   readonly listPort?: number;
 }
@@ -35,67 +36,88 @@ export function renderDevices(devices: readonly DiscoveredDevice[]): string {
   return rows.map(([id, model, firmware]) => `${(id as string).padEnd(widths[0] as number)}  ${(model as string).padEnd(widths[1] as number)}  ${firmware}`.trimEnd()).join("\n") + "\n";
 }
 
-type Listing = { readonly kind: "listed"; readonly devices: readonly DiscoveredDevice[] } | { readonly kind: "failed"; readonly error: ResultError; readonly additional: ResultError | null };
+/**
+ * The command's first stopping cause, in the order the CLI detects causes,
+ * and the failures found after it (E3).
+ */
+class Stops {
+  #first: ResultError | null = null;
+  readonly later: ResultError[] = [];
 
-/** Discovers through the addon. A second Ctrl+C stops waiting for the discovery (I3). */
-async function list(io: DeviceListIo): Promise<Listing> {
-  const check = io.addon();
-  if (!check.ok) return { kind: "failed", error: addonFailure(check.problem), additional: null };
-  const { addon } = check;
-  const control = new addon.Control();
-  let interrupted = false;
-  let abandon: () => void = () => {};
-  const abandoned = new Promise<"abandoned">((resolve) => (abandon = () => resolve("abandoned")));
-  const unsubscribe = io.interrupts.subscribe((count) => {
-    interrupted = true;
-    control.cancel();
-    if (count > 1) abandon();
-  });
-  try {
-    await io.diagnostics.stage("discovery", "started");
-    const outcome = await Promise.race([discoverDevices(addon, control, true, io.listPort), abandoned]);
-    // Ctrl+C during the discovery is its outcome, whatever the discovery then returned.
-    if (interrupted || outcome === "abandoned") {
-      await io.diagnostics.stage("discovery", "failed", "interrupted");
-      return { kind: "failed", error: failure("interrupted"), additional: null };
-    }
-    if (outcome.kind === "failure") {
-      const error = lifecycleFailure(outcome.failure);
-      await io.diagnostics.stage("discovery", "failed", error.code);
-      const cleanup = outcome.cleanup.failure;
-      return { kind: "failed", error, additional: cleanup === null ? null : lifecycleFailure(cleanup) };
-    }
-    await io.diagnostics.stage("discovery", "finished");
-    return { kind: "listed", devices: byId(outcome.value) };
-  } finally {
-    unsubscribe();
+  /** Read through a method: an interruption can set it while the command awaits. */
+  first(): ResultError | null {
+    return this.#first;
+  }
+
+  stop(error: ResultError): void {
+    if (this.#first === null) this.#first = error;
+    else this.later.push(error);
   }
 }
 
 /** Runs `urx device list` and returns its exit code. */
 export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<number> {
-  const listing = await list(io);
-  if (listing.kind === "failed" && listing.additional !== null) await io.diagnostics.additional(listing.additional);
-  const record: ResultRecord = {
-    type: "result",
-    command: COMMAND,
-    data: { mode: "execute", device: null, target: null, devices: listing.kind === "listed" ? listing.devices : null },
-    error: listing.kind === "listed" ? null : listing.error,
+  const { diagnostics, interruption } = io;
+  const stops = new Stops();
+  interruption.onInterrupt(() => stops.stop(failure("interrupted")));
+  // Standard error that stops accepting lines is an output failure: no device work starts after it (U5).
+  let errorOutputNoted = false;
+  const note = async (stage: Stage, event: "started" | "finished" | "failed", cause?: CauseCode) => {
+    await diagnostics.stage(stage, event, cause);
+    if (diagnostics.failure !== null && !errorOutputNoted) {
+      errorOutputNoted = true;
+      stops.stop(failure(diagnostics.failure));
+    }
   };
-  const exit = listing.kind === "listed" ? EXIT.success : baseExitCode(listing.error.code);
-  await io.diagnostics.stage("result output", "started");
-  // JSON carries a failure in its record; human-readable output reports it on standard error.
-  let written: OutputFailure | null = null;
-  if (json) written = await writeWithDeadline(io.stdout, jsonLine(record));
-  else if (listing.kind === "listed") written = await writeWithDeadline(io.stdout, renderDevices(listing.devices));
-  else await io.diagnostics.line(`urx: ${listing.error.message}\n`);
-  if (written !== null) {
-    await io.diagnostics.stage("result output", "failed", written);
-    await io.diagnostics.line(stdoutFailureLine(written));
-    return exit === EXIT.success ? EXIT.failure : exit;
+
+  let devices: readonly DiscoveredDevice[] | null = null;
+  // Nothing is loaded once the command has stopped, as after a Ctrl+C while it was being loaded.
+  const check = stops.first() === null ? io.addon() : null;
+  if (check !== null && !check.ok) stops.stop(addonFailure(check.problem));
+  else if (check !== null && stops.first() === null) {
+    const { addon } = check;
+    const control = new addon.Control();
+    interruption.onInterrupt(() => control.cancel());
+    await note("discovery", "started");
+    if (stops.first() === null) {
+      const outcome = await interruption.race(discoverDevices(addon, control, true, io.listPort));
+      if (outcome === ABANDONED) {
+        // A second Ctrl+C: the discovery is no longer waited for (I3).
+      } else if (outcome.kind === "failure") {
+        // A cancellation the interruption asked for is not another failure.
+        if (!(outcome.failure.kind === "cancelled" && interruption.interrupted)) stops.stop(lifecycleFailure(outcome.failure));
+        if (outcome.cleanup.failure !== null) stops.stop(lifecycleFailure(outcome.cleanup.failure));
+      } else {
+        devices = byId(outcome.value);
+      }
+      const cause = stops.first()?.code;
+      await note("discovery", cause === undefined ? "finished" : "failed", cause);
+    }
   }
-  await io.diagnostics.stage("result output", "finished");
-  // A diagnostic that could not be written is an output failure too (U5).
-  if (io.diagnostics.failure !== null && exit === EXIT.success) return EXIT.failure;
-  return exit;
+
+  await note("result output", "started");
+  // The result is decided here; anything after it is reported beside it.
+  const error = stops.first();
+  const listed = error === null ? devices : null;
+  const record = { type: "result" as const, command: COMMAND, data: { mode: "execute", device: null, target: null, devices: listed }, error };
+  let exit = error === null ? EXIT.success : baseExitCode(error.code);
+  // What was found after the first stop; a Ctrl+C after this point only sets the exit code.
+  const later = [...stops.later];
+  // JSON carries a failure in its record; human-readable output reports it on standard error.
+  const written = json ? await writeWithDeadline(io.stdout, jsonLine(record)) : listed !== null ? await writeWithDeadline(io.stdout, renderDevices(listed)) : null;
+  if (!json && error !== null) await diagnostics.line(`urx: ${error.message}\n`);
+  if (written !== null) {
+    if (error === null) {
+      await diagnostics.line(stdoutFailureLine(written));
+      exit = EXIT.failure;
+    } else {
+      later.push(failure(written));
+    }
+  }
+  for (const additional of later) await diagnostics.additional(additional);
+  await diagnostics.stage("result output", written === null ? "finished" : "failed", written ?? undefined);
+  // A diagnostic that could not be written fails a command that otherwise succeeded (U5).
+  if (exit === EXIT.success && diagnostics.failure !== null) exit = EXIT.failure;
+  // Ctrl+C during the command takes precedence (E1), even once its result is out.
+  return interruption.interrupted ? EXIT.interrupted : exit;
 }
