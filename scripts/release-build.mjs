@@ -11,7 +11,7 @@
 // (scripts/build-bundle.mjs).
 
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
@@ -96,24 +96,61 @@ export function filesUnder(root) {
   return found.sort();
 }
 
-/** The record of the files a release build made in its output, kept in that output. */
+export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+/** The record of the files a release build made in its output, each with its SHA-256 and size, kept in that output. */
 export const RELEASE_FILES = "release-files.json";
+
+/** Each file under `root` but `excluded`, with its SHA-256 and size. */
+export function describeFiles(root, excluded) {
+  return filesUnder(root)
+    .filter((path) => path !== excluded)
+    .map((path) => {
+      const bytes = readFileSync(join(root, ...path.split("/")));
+      return { path, sha256: sha256(bytes), size: bytes.length };
+    });
+}
 
 /** Records in `output` the files it holds, as the files this release build made there. */
 export function writeReleaseFiles(output) {
-  const files = filesUnder(output).filter((path) => path !== RELEASE_FILES);
+  const files = describeFiles(output, RELEASE_FILES);
   writeFileSync(join(output, RELEASE_FILES), `${JSON.stringify({ product: "urx-cli", output: "release", files }, null, 2)}\n`);
+}
+
+const isFileRecord = (file) =>
+  typeof file?.path === "string" && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "") && Number.isSafeInteger(file?.size) && file.size >= 0;
+
+/** The files the record at `path` says a release build made there, with their hashes, or null when it is not a release output. */
+export function releaseRecord(path) {
+  try {
+    const record = JSON.parse(readFileSync(join(path, RELEASE_FILES), "utf8"));
+    if (record?.product !== "urx-cli" || record?.output !== "release" || !Array.isArray(record.files) || !record.files.every(isFileRecord)) return null;
+    return record.files;
+  } catch {
+    return null;
+  }
 }
 
 /** The files a release build made in the output at `path`, its record included, or null when it is not a release output. */
 export function releaseOutputFiles(path) {
-  try {
-    const record = JSON.parse(readFileSync(join(path, RELEASE_FILES), "utf8"));
-    if (record?.product !== "urx-cli" || record?.output !== "release" || !Array.isArray(record.files)) return null;
-    return [...record.files, RELEASE_FILES];
-  } catch {
-    return null;
+  const files = releaseRecord(path);
+  return files === null ? null : [...files.map((file) => file.path), RELEASE_FILES];
+}
+
+/** How the files under `root` differ from `files` (path, SHA-256, size): each one missing or changed, by path. */
+export function recordedProblems(root, files) {
+  const problems = [];
+  for (const file of files) {
+    let bytes;
+    try {
+      bytes = readFileSync(join(root, ...file.path.split("/")));
+    } catch {
+      problems.push(`${file.path} is missing`);
+      continue;
+    }
+    if (bytes.length !== file.size || sha256(bytes) !== file.sha256) problems.push(`${file.path} is not as it was built`);
   }
+  return problems;
 }
 
 /**

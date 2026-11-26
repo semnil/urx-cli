@@ -84,14 +84,17 @@ describe("the installed bundle (K18, K38)", () => {
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    for (const path of ["main.js", "build-info.js", "package.json", "release-files.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"]) write(release, path);
+    const releaseFiles = ["main.js", "build-info.js", "package.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"];
+    for (const path of releaseFiles) write(release, path);
+    // Beside the release, not made by it: never copied.
+    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt"]) write(release, path);
     const node = join(dir, "node-v26");
     write(node, "bin/node", "node");
     write(node, "LICENSE", "node license");
     write(dir, "LICENSE", "cli license");
     const staging = join(dir, "bundle");
     mkdirSync(staging);
-    assemble({ release, node, staging, platform: platformOf("darwin", "arm64"), notices: { "urx-cli.txt": join(dir, "LICENSE"), "node.txt": join(node, "LICENSE") } });
+    assemble({ release, releaseFiles, node, staging, platform: platformOf("darwin", "arm64"), notices: { "urx-cli.txt": join(dir, "LICENSE"), "node.txt": join(node, "LICENSE") } });
     expect(filesUnder(staging)).toEqual([
       "app/build-info.js",
       "app/main.js",

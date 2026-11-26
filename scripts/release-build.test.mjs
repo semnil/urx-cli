@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, launcherArtifact, publishOutput as publishWith, releaseOutputFiles, removeExport, writeReleaseFiles } from "./release-build.mjs";
+import { exportRelease, launcherArtifact, publishOutput as publishWith, recordedProblems, releaseOutputFiles, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -240,11 +240,32 @@ describe("release output", () => {
     expect(warnings).toHaveLength(1);
   });
 
-  it("record the files a release build made, and read them back", () => {
+  it("record the files a release build made, with their hashes and sizes, and read them back", () => {
     const output = directory("dist-release", "previous");
     expect(releaseOutputFiles(output)).toBe(null);
     writeReleaseFiles(output);
+    const hash = sha256(Buffer.from("previous"));
+    expect(releaseRecord(output)).toEqual([
+      { path: "main.js", sha256: hash, size: 8 },
+      { path: "native/urx-native.node", sha256: hash, size: 8 },
+    ]);
     expect(releaseOutputFiles(output)).toEqual(["main.js", "native/urx-native.node", "release-files.json"]);
+  });
+
+  it("tell a recorded file that is missing or not as it was built", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    expect(recordedProblems(output, files)).toEqual([]);
+    writeFileSync(join(output, "main.js"), "");
+    rmSync(join(output, "native", "urx-native.node"));
+    expect(recordedProblems(output, files)).toEqual(["main.js is not as it was built", "native/urx-native.node is missing"]);
+  });
+
+  it("read no record whose entries lack a hash", () => {
+    const output = directory("dist-release", "previous");
+    writeFileSync(join(output, "release-files.json"), JSON.stringify({ product: "urx-cli", output: "release", files: ["main.js"] }));
+    expect(releaseRecord(output)).toBe(null);
   });
 
   it("is refused without a way to tell what a previous output holds", () => {

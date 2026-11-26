@@ -19,12 +19,11 @@
 //        node scripts/build-bundle.mjs --archive-url   (prints where this platform's archive is published)
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { filesUnder, publishOutput, RELEASE_FILES } from "./release-build.mjs";
+import { describeFiles, filesUnder, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const PRODUCT = "urx-cli";
@@ -37,7 +36,7 @@ export function platformOf(platform = process.platform, arch = process.arch) {
   throw new Error(`no bundle is built for ${platform}-${arch} (K16)`);
 }
 
-export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+export { sha256 };
 
 /** Where nodejs.org publishes the archive build-inputs.json records for `platform`. */
 export function archiveUrl(inputs, platform) {
@@ -129,37 +128,34 @@ export function normalizeModes(root, executables, platform = process.platform) {
 
 /** The release manifest of the bundle at `root`: identities, then each owned file with its hash and size. */
 export function manifestOf(root, identities) {
-  const files = filesUnder(root)
-    .filter((path) => path !== "release-manifest.json")
-    .map((path) => {
-      const bytes = readFileSync(join(root, ...path.split("/")));
-      return { path, sha256: sha256(bytes), size: bytes.length };
-    });
-  return { product: PRODUCT, format: FORMAT, ...identities, files };
+  return { product: PRODUCT, format: FORMAT, ...identities, files: describeFiles(root, "release-manifest.json") };
 }
 
 /**
- * Lays out the bundle in `staging` from the release output, the extracted
- * Node archive (its single top directory) and the notices.
+ * Lays out the bundle in `staging` from the files the release output's
+ * record names (`releaseFiles`, relative paths), the extracted Node archive
+ * (its single top directory) and the notices. A file the record does not name
+ * is not copied, whatever else lies in the release output.
  */
-export function assemble({ release, node, notices, staging, platform }) {
+export function assemble({ release, releaseFiles, node, notices, staging, platform }) {
   const copy = (from, ...to) => {
     mkdirSync(join(staging, ...to.slice(0, -1)), { recursive: true });
-    cpSync(from, join(staging, ...to), { recursive: true });
+    cpSync(from, join(staging, ...to));
   };
-  copy(join(release, "launcher", `urx${platform.exe}`), "bin", `urx${platform.exe}`);
+  const launcher = `launcher/urx${platform.exe}`;
+  const addon = "native/urx-native.node";
+  for (const required of [launcher, addon, "main.js"]) {
+    if (!releaseFiles.includes(required)) throw new Error(`the release output's record names no ${required}`);
+  }
+  copy(join(release, ...launcher.split("/")), "bin", `urx${platform.exe}`);
   copy(join(node, ...platform.runtimeInArchive), "runtime", `node${platform.exe}`);
-  // The compiled CLI and the common package; the addon and the launcher have places of their own,
-  // and the release output's record of its files describes that output, not the bundle.
-  mkdirSync(join(staging, "app"), { recursive: true });
-  cpSync(release, join(staging, "app"), {
-    recursive: true,
-    filter: (path) => {
-      const inside = relative(release, path).split(sep).join("/");
-      return inside !== "launcher" && !inside.startsWith("launcher/") && inside !== "native/urx-native.node" && inside !== RELEASE_FILES;
-    },
-  });
-  copy(join(release, "native", "urx-native.node"), "native", "urx-native.node");
+  copy(join(release, ...addon.split("/")), "native", "urx-native.node");
+  // The compiled CLI and the common package; the addon and the launcher have places of their own.
+  for (const path of releaseFiles) {
+    if (path === launcher || path === addon) continue;
+    if (path.startsWith("launcher/")) throw new Error(`the release output's record names an unknown launcher file ${path}`);
+    copy(join(release, ...path.split("/")), "app", ...path.split("/"));
+  }
   for (const [name, path] of Object.entries(notices)) copy(path, "notices", name);
 }
 
@@ -183,6 +179,11 @@ async function main(argv) {
   try {
     const snapshot = join(scratch, "release");
     snapshotRelease(release, snapshot);
+    // Only what the release build made goes into the bundle, each file as it was built.
+    const recordedFiles = releaseRecord(snapshot);
+    if (recordedFiles === null) throw new Error(`${release} has no record of the files a release build made; run pnpm build:release`);
+    const problems = recordedProblems(snapshot, recordedFiles);
+    if (problems.length > 0) throw new Error(`${release} is not as the release build made it: ${problems.join("; ")}`);
     const { BUILD_INFO } = await import(pathToFileURL(join(snapshot, "build-info.js")).href);
     // The checked bytes, written where nothing else replaces them, are what is extracted.
     const archiveCopy = join(scratch, recorded.file);
@@ -203,6 +204,7 @@ async function main(argv) {
     try {
       assemble({
         release: snapshot,
+        releaseFiles: recordedFiles.map((file) => file.path),
         node,
         staging,
         platform,
