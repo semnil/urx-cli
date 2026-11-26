@@ -18,4 +18,4 @@ napi-derive = "=3.7.1"
 urx-device-transport = { path = "../vendor/urx-device/crates/transport" }
 
 [build-dependencies]
-napi-build = "=2.6.0"
+napi-build = "=2.7.0"
