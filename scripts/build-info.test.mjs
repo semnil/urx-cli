@@ -4,13 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildInfoModule, commitOf, revParse, versionOf } from "./build-info.mjs";
+import { buildInfoModule, commitOf, revParse, versionOf, withoutGitLocation } from "./build-info.mjs";
 
 describe("embedded build information", () => {
   it("read a version, or unknown", () => {
     expect(versionOf('{"version":"0.1.0"}')).toBe("0.1.0");
-    expect(versionOf('{"version":"1.2.3-rc.1"}')).toBe("1.2.3-rc.1");
-    for (const text of [null, "", "{", "{}", '{"version":1}', '{"version":"latest"}', '{"version":"1.2"}']) {
+    for (const version of ["1.2.3-rc.1", "1.2.3+build.5", "1.2.3-rc.1+build.6", "0.0.0", "10.20.30-alpha.beta-1"]) {
+      expect(versionOf(JSON.stringify({ version })), version).toBe(version);
+    }
+    const invalid = ["01.2.3", "1.02.3", "1.2.03", "1.2.3-..", "1.2.3-01", "1.2.3+", "1.2.3-", "v1.2.3", " 1.2.3"];
+    for (const text of [null, "", "{", "{}", '{"version":1}', '{"version":"latest"}', '{"version":"1.2"}', ...invalid.map((version) => JSON.stringify({ version }))]) {
       expect(versionOf(text), String(text)).toBe("unknown");
     }
   });
@@ -48,8 +51,16 @@ describe("embedded build information", () => {
       expect(commitOf(revParse(directory))).toBe(head);
       expect(revParse(join(directory, "vendor"))).toBeNull();
       expect(revParse(join(directory, "missing"))).toBeNull();
+      // A GIT_DIR inherited from a hook does not redirect the lookup.
+      const elsewhere = { ...process.env, GIT_DIR: join(directory, ".git"), GIT_WORK_TREE: directory };
+      expect(revParse(join(directory, "vendor"), elsewhere)).toBeNull();
+      expect(commitOf(revParse(directory, elsewhere))).toBe(head);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("remove every GIT_ variable and keep the rest", () => {
+    expect(withoutGitLocation({ GIT_DIR: "a", GIT_WORK_TREE: "b", git_dir: "c", PATH: "p", HOME: "h" })).toEqual({ PATH: "p", HOME: "h" });
   });
 });

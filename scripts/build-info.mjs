@@ -7,7 +7,9 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const COMMIT = /^[0-9a-f]{40}$/;
-const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+// The SemVer 2.0.0 grammar (semver.org), including pre-release and build metadata.
+const VERSION =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
 /** The version field of a package.json text, or "unknown". */
 export function versionOf(packageJsonText) {
@@ -41,17 +43,28 @@ const readOrNull = (url) => {
 };
 
 /**
+ * The environment without the variables that point git at a repository (GIT_DIR,
+ * GIT_WORK_TREE and the rest of git's GIT_* settings), so that git finds the
+ * repository from the directory alone, as it does when a build runs from a hook.
+ */
+export function withoutGitLocation(environment) {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => !/^GIT_/i.test(name)));
+}
+
+/**
  * The HEAD commit of the repository whose top level is `directory`, or null. A
  * directory inside another repository (an uninitialized submodule, an unpacked
  * archive) gives null rather than the enclosing repository's commit.
  */
-export const revParse = (directory) => {
+export const revParse = (directory, environment = process.env) => {
   try {
     const [topLevel, head] = execFileSync("git", ["-C", directory, "rev-parse", "--show-toplevel", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      env: withoutGitLocation(environment),
     }).split("\n");
-    return realpathSync(topLevel) === realpathSync(directory) ? head : null;
+    // The native form resolves Windows short (8.3) names, which git does not print.
+    return realpathSync.native(topLevel) === realpathSync.native(directory) ? head : null;
   } catch {
     return null;
   }
