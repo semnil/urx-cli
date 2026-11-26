@@ -18,6 +18,7 @@ use urx_device_transport::discovery::{
 use urx_device_transport::lifecycle::{self, Cause, Cleanup, CleanupState, Failure, Phase};
 
 use crate::records::{CleanupRecord, DeviceRecord, DiscoveryRecord, FailureRecord, UnitRecord};
+use crate::requests::SharedSlots;
 
 /// Whole discovery (N2).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
@@ -26,7 +27,7 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 /// Sending one request, and one response once it is sent (N1, N2).
 const REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 /// Stop and teardown in total (N2).
-const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
+pub const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The caller-owned control of one discovery and the connection opened from
 /// it (K37). Cancelling it stops the discovery or the opening in progress.
@@ -38,7 +39,7 @@ pub struct Control {
     ports: Arc<Mutex<HashMap<String, u16>>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -128,7 +129,22 @@ pub fn discover(
 /// object is not a close.
 #[napi]
 pub struct Connection {
-    inner: Arc<connection::Connection>,
+    pub(crate) inner: Arc<connection::Connection>,
+    /// The completion slots of this connection's requests, by ticket.
+    pub(crate) slots: SharedSlots,
+}
+
+impl Connection {
+    fn new(opened: connection::Connection) -> Self {
+        Connection {
+            inner: Arc::new(opened),
+            slots: SharedSlots::default(),
+        }
+    }
+
+    pub(crate) fn handle(&self) -> Arc<connection::Connection> {
+        Arc::clone(&self.inner)
+    }
 }
 
 #[napi]
@@ -203,9 +219,7 @@ impl Task for OpenTask {
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(match output {
             Ok(opened) => OpenRecord::Success {
-                value: Connection {
-                    inner: Arc::new(opened),
-                },
+                value: Connection::new(opened),
             },
             // A failed open owns nothing afterwards (K37).
             Err(failure) => OpenRecord::Failure {

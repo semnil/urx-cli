@@ -8,6 +8,7 @@ use napi_derive::napi;
 // when `cargo test` builds the crate without registering the exports.
 pub mod lifecycle;
 pub mod records;
+pub mod requests;
 
 /// The revision of the interface between this addon and the CLI's
 /// JavaScript. The JavaScript side refuses device access when it expects a
