@@ -153,6 +153,30 @@ describe("release output", () => {
     expect(asides()).toEqual([]);
   });
 
+  it("report the failed set-aside, not the cleanup, when the previous output cannot be set aside", () => {
+    const output = directory("dist-release", "previous");
+    const staging = directory("staging", "new");
+    const warnings = [];
+    const failing = (from, to) => {
+      if (from === output) throw Object.assign(new Error("immutable"), { code: "EPERM" });
+      renameSync(from, to);
+    };
+    const stuck = (path) => {
+      if (path === staging) throw Object.assign(new Error("read-only"), { code: "EACCES" });
+      rmSync(path, { recursive: true, force: true });
+    };
+    let thrown;
+    try {
+      publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message) });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown?.message).toMatch(/could not be set aside/);
+    expect(thrown?.cause?.code).toBe("EPERM");
+    expect(contents(output)).toEqual(["previous", "previous"]);
+    expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
+  });
+
   it("restore the previous output even when the new one can be neither put in place nor removed", () => {
     const output = directory("dist-release", "previous");
     const staging = directory("staging", "new");

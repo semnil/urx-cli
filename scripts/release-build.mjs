@@ -89,7 +89,11 @@ export function publishOutput(staging, output, { rename = renameSync, remove = (
     setAside = true;
   } catch (error) {
     if (error?.code !== "ENOENT") {
-      remove(staging);
+      try {
+        remove(staging);
+      } catch {
+        warn(`release build: the new output could not be removed from ${staging}`);
+      }
       throw new Error(`the previous ${output} could not be set aside`, { cause: error });
     }
   }
