@@ -13,6 +13,7 @@
 //   release-manifest.json        relative paths, hashes and identities
 //
 // Usage: node scripts/build-bundle.mjs --node-archive <path> [--release dist-release] [--output dist-bundle]
+//        node scripts/build-bundle.mjs --archive-url   (prints where this platform's archive is published)
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -33,6 +34,23 @@ export function platformOf(platform = process.platform, arch = process.arch) {
 }
 
 export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+/** Where nodejs.org publishes the archive build-inputs.json records for `platform`. */
+export function archiveUrl(inputs, platform) {
+  const { version, archives } = inputs.node;
+  return `https://nodejs.org/dist/v${version}/${archives[platform.key].file}`;
+}
+
+/**
+ * The tar that reads this platform's archive: macOS's own, and on Windows the
+ * system's, which reads a zip where a GNU tar earlier on PATH would not.
+ */
+function systemTar() {
+  if (process.platform !== "win32") return "/usr/bin/tar";
+  const systemRoot = process.env.SystemRoot;
+  if (systemRoot === undefined || systemRoot === "") throw new Error("SystemRoot is not set, so the system's tar cannot be found");
+  return join(systemRoot, "System32", "tar.exe");
+}
 
 /** The archive's bytes when they have the hash recorded for this platform; refuses anything else. */
 export function verifyArchive(path, expected) {
@@ -96,20 +114,24 @@ async function main(argv) {
     const at = argv.indexOf(name);
     return at >= 0 && argv[at + 1] !== undefined ? argv[at + 1] : fallback;
   };
-  const archive = option("--node-archive", undefined);
-  if (archive === undefined) throw new Error("usage: node scripts/build-bundle.mjs --node-archive <path> [--release dist-release] [--output dist-bundle]");
   const root = fileURLToPath(new URL("../", import.meta.url));
-  const release = resolve(option("--release", join(root, "dist-release")));
-  const output = resolve(option("--output", join(root, "dist-bundle")));
   const platform = platformOf();
   const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
+  if (argv.includes("--archive-url")) {
+    process.stdout.write(`${archiveUrl(inputs, platform)}\n`);
+    return;
+  }
+  const archive = option("--node-archive", undefined);
+  if (archive === undefined) throw new Error("usage: node scripts/build-bundle.mjs --node-archive <path> [--release dist-release] [--output dist-bundle]");
+  const release = resolve(option("--release", join(root, "dist-release")));
+  const output = resolve(option("--output", join(root, "dist-bundle")));
   const recorded = inputs.node.archives[platform.key];
   verifyArchive(archive, recorded.sha256);
 
   const { BUILD_INFO } = await import(pathToFileURL(join(release, "build-info.js")).href);
   const scratch = mkdtempSync(join(tmpdir(), "urx-bundle-"));
   try {
-    execFileSync("tar", ["-xf", archive, "-C", scratch], { stdio: "inherit" });
+    execFileSync(systemTar(), ["-xf", archive, "-C", scratch], { stdio: "inherit" });
     const [top, ...others] = readdirSync(scratch);
     if (top === undefined || others.length > 0 || !statSync(join(scratch, top)).isDirectory()) throw new Error("the Node archive does not hold one top directory");
     const node = join(scratch, top);

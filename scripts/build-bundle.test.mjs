@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assemble, filesUnder, manifestOf, platformOf, sha256, verifyArchive } from "./build-bundle.mjs";
+import { archiveUrl, assemble, filesUnder, manifestOf, platformOf, sha256, verifyArchive } from "./build-bundle.mjs";
 
 const temporary = [];
 const scratch = () => {
@@ -26,6 +26,13 @@ describe("the installed bundle (K18, K38)", () => {
     expect(platformOf("win32", "x64")).toMatchObject({ key: "win-x64", exe: ".exe" });
     expect(() => platformOf("linux", "x64")).toThrow();
     expect(() => platformOf("darwin", "x64")).toThrow();
+  });
+
+  it("fetches the archive build-inputs.json records from nodejs.org", () => {
+    const inputs = JSON.parse(readFileSync(new URL("../build-inputs.json", import.meta.url), "utf8"));
+    const { version } = inputs.node;
+    expect(archiveUrl(inputs, platformOf("darwin", "arm64"))).toBe(`https://nodejs.org/dist/v${version}/node-v${version}-darwin-arm64.tar.gz`);
+    expect(archiveUrl(inputs, platformOf("win32", "x64"))).toBe(`https://nodejs.org/dist/v${version}/node-v${version}-win-x64.zip`);
   });
 
   it("refuses a Node archive whose SHA-256 is not the recorded one", () => {
