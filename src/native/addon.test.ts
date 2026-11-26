@@ -21,6 +21,9 @@ describe("addon identity check", () => {
     expect(checkIdentity(reported({ commonCommit: "unknown" }), expected)).toBe("unverifiable");
     expect(checkIdentity(reported(), { ...expected, commonCommit: "unknown" })).toBe("unverifiable");
     expect(checkIdentity(reported({ commonCommit: "unknown" }), { ...expected, commonCommit: "unknown" })).toBe("unverifiable");
+    expect(checkIdentity(reported({ commonVersion: "unknown" }), { ...expected, commonVersion: "unknown" })).toBe("unverifiable");
+    expect(checkIdentity(reported({ commonVersion: "unknown" }), expected)).toBe("unverifiable");
+    expect(checkIdentity(reported(), { ...expected, commonVersion: "unknown" })).toBe("unverifiable");
   });
 
   it("refuse a malformed identity", () => {

@@ -8,10 +8,13 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commitOf, revParse, versionOf } from "./build-info.mjs";
+import { commitOf, revParse, versionOf } from "./source-info.mjs";
+import { requireReleaseSourceIfAsked } from "./release-source.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const common = join(root, "vendor", "urx-device");
+// `--release` refuses a checkout that is not exactly the recorded source.
+requireReleaseSourceIfAsked(root);
 
 /** The JavaScript entry of the pinned napi CLI, run with this Node rather than through a shell shim. */
 function napiCli() {

@@ -29,7 +29,7 @@ export const expectedIdentity = (build: BuildInfo): ExpectedIdentity => ({
 export type AddonProblem =
   | "missing" // the file is absent or cannot be loaded
   | "malformed" // it loaded but does not report a well-formed identity
-  | "unverifiable" // the JavaScript or the addon does not know its urx-device commit
+  | "unverifiable" // the JavaScript or the addon does not know its urx-device commit or version
   | "bridge_mismatch"
   | "common_mismatch";
 
@@ -53,11 +53,14 @@ export function loadAddon(url: URL = ADDON_URL, load: (url: URL) => unknown = de
 const defaultLoad = (url: URL): unknown => createRequire(import.meta.url)(fileURLToPath(url));
 
 const COMMIT = /^[0-9a-f]{40}$/;
+/** The build scripts write either a SemVer version or "unknown". */
+const isKnownVersion = (version: string) => version !== "unknown" && /^\d+\.\d+\.\d+/.test(version);
 
 /**
  * Compares the identity an addon reports with the JavaScript's expectation.
- * Both commits must be known and equal: a build that cannot name the urx-device
- * commit it was made from cannot show that the two halves match.
+ * Both commits and both versions must be known and equal: a build that cannot
+ * name the urx-device source it was made from cannot show that the two halves
+ * match.
  */
 export function checkIdentity(reported: unknown, expected: ExpectedIdentity): AddonProblem | null {
   const record = reported as { bridgeRevision?: unknown; commonVersion?: unknown; commonCommit?: unknown } | null;
@@ -72,6 +75,7 @@ export function checkIdentity(reported: unknown, expected: ExpectedIdentity): Ad
   }
   if (record.bridgeRevision !== expected.bridgeRevision) return "bridge_mismatch";
   if (!COMMIT.test(record.commonCommit) || !COMMIT.test(expected.commonCommit)) return "unverifiable";
+  if (!isKnownVersion(record.commonVersion) || !isKnownVersion(expected.commonVersion)) return "unverifiable";
   if (record.commonCommit !== expected.commonCommit || record.commonVersion !== expected.commonVersion) return "common_mismatch";
   return null;
 }
