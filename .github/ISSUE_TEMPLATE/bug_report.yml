@@ -1,0 +1,42 @@
+name: Bug report
+description: The urx command behaves wrongly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Japanese are both fine — 日本語で構いません。
+
+        **Security problems** go through the [security policy](https://github.com/semnil/urx-cli/security/policy)
+        instead, not this form.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Output of `urx --version`
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Device model
+      options:
+        - URX44V
+        - URX44
+        - URX22
+        - Not model-specific
+    validations:
+      required: true

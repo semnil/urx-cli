@@ -1,0 +1,29 @@
+version: 2
+# Every entry runs every day at 00:00 JST on a cron schedule; `interval: daily`
+# runs on weekdays only.
+#
+# vendor/urx-device has no entry on purpose: a new common commit is adopted in
+# its own pull request with this repository's checks, never by a scheduled bump.
+updates:
+  # Dev dependencies (Dependabot reads pnpm-lock.yaml).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 0 * * *"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    ignore:
+      # @types/node follows the Node 26 runtime in .node-version; a major jump
+      # moves with the runtime by hand.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  # Actions are SHA-pinned with a version comment (`@<sha> # vX.Y.Z`);
+  # Dependabot bumps the pin and comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 0 * * *"
+      timezone: "Asia/Tokyo"

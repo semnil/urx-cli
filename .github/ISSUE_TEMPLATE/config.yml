@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: urx-device issues
+    url: https://github.com/semnil/urx-device/issues
+    about: A wrong device definition, value conversion or Device Center transport behavior belongs to the shared library.
+  - name: URX Router issues
+    url: https://github.com/semnil/urx-router/issues
+    about: Problems seen in the URX Router app belong there.
