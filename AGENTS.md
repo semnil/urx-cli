@@ -9,7 +9,7 @@ The `urx` command line tool for the YAMAHA URX22 / URX44 / URX44V: one-shot read
 - `src/` — the command: argument grammar, help and version, terminal and JSON output, exit codes, process lifecycle. `src/cli/commands.ts` is the command-binding table that the parser and help both read
 - `native/` — the Node-API addon (napi-rs) over the urx-device transport crate. `src/native/addon.ts` loads it and checks its build identity before any device access
 - `vendor/urx-device/` — the shared library at the adopted commit. Never edited here
-- `scripts/` — repository tooling: `build-inputs.mjs` (checks the build inputs), `build-info.mjs` (writes `dist/build-info.js`, the versions and commits that `urx --version` shows), `build-native.mjs` (builds `dist/native/urx-native.node` with the same urx-device identity) and `version.mjs` (the addon crate's copy of the CLI version)
+- `scripts/` — repository tooling: `build-inputs.mjs` (checks the build inputs), `build-info.mjs` (writes `dist/build-info.js`, the versions and commits that `urx --version` shows), `build-native.mjs` (builds `dist/native/urx-native.node` with the same urx-device identity), `source-info.mjs` (how both read a checkout's versions and commits), `release-source.mjs` (the release source check) and `version.mjs` (the addon crate's copy of the CLI version)
 - `build-inputs.json` — the exact Node, pnpm and Rust versions and Node archive hashes a build uses, the one record of them
 - `.github/required-checks.json` — the status checks the `main` ruleset requires, the only copy outside GitHub's settings
 
@@ -46,7 +46,8 @@ A local verification names every one of these commands; a command left out is na
 
 - The root `package.json` `version` is the CLI's version and its only hand-edited copy; it is independent of the urx-device version. `pnpm version:write` regenerates `native/Cargo.toml` and its `Cargo.lock` entry, and CI fails on drift
 - Build tools are pinned: Node in `.node-version`, pnpm in `packageManager` and Rust in `rust-toolchain.toml`, all recorded in `build-inputs.json`. The napi crates are pinned with `=` and the napi CLI exactly. No step resolves a floating `latest`
-- The addon and the JavaScript are two halves of one build. The addon reports its bridge revision and the urx-device version and commit it was built from; the CLI refuses device access unless they match its own (`src/bridge.ts`, `dist/build-info.js`), and a side that cannot name its commit does not match
+- The addon and the JavaScript are two halves of one build. The addon reports its bridge revision and the urx-device version and commit it was built from; the CLI refuses device access unless they match its own (`src/bridge.ts`, `dist/build-info.js`), and a side that cannot name its commit or version does not match
+- A release build passes `--release` to `scripts/build-info.mjs` and `scripts/build-native.mjs`. Each then refuses a checkout whose `vendor/urx-device` is not at the pinned gitlink, whose CLI or urx-device has staged or unstaged changes to tracked files, or whose versions are unknown. A development build embeds whatever it was built from
 
 ## Repository checks
 
