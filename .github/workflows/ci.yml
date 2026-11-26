@@ -49,6 +49,10 @@ jobs:
       - run: pnpm build:native
         timeout-minutes: 10
       - run: pnpm test
+      # The release build exports the commit under test and builds it again there.
+      - run: pnpm build:release
+        timeout-minutes: 15
+      - run: node dist-release/main.js --version
 
   # The one context the main ruleset requires (.github/required-checks.json).
   # `if: always()` keeps it from being skipped when a job it needs fails: a

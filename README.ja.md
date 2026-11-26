@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。
+`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。`pnpm build:release` は、作業ツリーではなくコミット済みのソースから両方を `dist-release` に組み立てる。
 
 ## 版
 

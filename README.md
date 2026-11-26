@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`.
+`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`.
 
 ## Versioning
 
