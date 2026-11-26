@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。`pnpm build:release` は、作業ツリーではなくコミット済みのソースから両方を `dist-release` に組み立てる。
+`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。`pnpm build:release` は、作業ツリーではなくコミット済みのソースから両方を `dist-release` に組み立てる。`pnpm build:bundle --node-archive <path>` は、その `dist-release` と Node の公式アーカイブから、インストールする一式を `dist-bundle` に組み立てる。アーカイブは `build-inputs.json` のハッシュと照らし、何もダウンロードしない。
 
 ## 版
 

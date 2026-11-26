@@ -6,7 +6,9 @@
 // and the build order cannot change what is built. Both builds run there with
 // `--release` and a Cargo target directory of their own, and the result
 // replaces dist-release/ as one directory, so concurrent release builds never
-// mix their halves.
+// mix their halves. The launcher is built from the same export into the same
+// target directory and placed at dist-release/launcher/ for the bundle
+// (scripts/build-bundle.mjs).
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
