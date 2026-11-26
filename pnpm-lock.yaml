@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@urx/device-control':
+        specifier: workspace:*
+        version: link:vendor/urx-device/packages/control
     devDependencies:
       '@napi-rs/cli':
         specifier: 3.10.12
@@ -20,6 +24,8 @@ importers:
       vitest:
         specifier: 5.1.1
         version: 5.1.1(@types/node@26.6.7)(vite@8.3.8(@types/node@26.6.7))
+
+  vendor/urx-device/packages/control: {}
 
 packages:
 

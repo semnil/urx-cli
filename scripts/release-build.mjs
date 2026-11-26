@@ -143,6 +143,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const pnpm = process.env.npm_execpath;
     if (pnpm === undefined || !/pnpm/i.test(pnpm)) throw new Error("run the release build through `pnpm build:release`");
     run([pnpm, "install", "--frozen-lockfile", "--prefer-offline"]);
+    run([pnpm, "exec", "tsc", "-p", "vendor/urx-device/packages/control/tsconfig.json"]);
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);

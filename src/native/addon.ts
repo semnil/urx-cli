@@ -6,11 +6,15 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { BRIDGE_API_EXPECTED } from "../bridge.js";
 import type { BuildInfo } from "../build-info.js";
+import type { LifecycleAddon } from "./device.js";
 
-/** The addon's exports this module relies on; everything it returns is validated. */
-export interface NativeAddon {
+/** The addon's exports this module relies on; everything they return is validated. */
+export interface NativeAddon extends LifecycleAddon {
   buildIdentity(): unknown;
 }
+
+/** The exports an addon must have to be used at all. */
+const FUNCTIONS = ["buildIdentity", "discover", "openConnection", "Control", "Connection"] as const;
 
 /** What the JavaScript expects the addon to have been built from. */
 export interface ExpectedIdentity {
@@ -46,7 +50,10 @@ export function loadAddon(url: URL = ADDON_URL, load: (url: URL) => unknown = de
   } catch {
     return { ok: false, problem: "missing" };
   }
-  if (typeof (module as { buildIdentity?: unknown } | null)?.buildIdentity !== "function") return { ok: false, problem: "malformed" };
+  const exports = module as Record<string, unknown> | null;
+  if (typeof exports !== "object" || exports === null || FUNCTIONS.some((name) => typeof exports[name] !== "function")) {
+    return { ok: false, problem: "malformed" };
+  }
   return { ok: true, addon: module as NativeAddon };
 }
 
