@@ -46,6 +46,21 @@ const ONLY_IN: Record<Mode, string> = {
   "command-file": "in a command file",
 };
 
+/**
+ * The command a refused line names, read the way `parse` reads its path:
+ * words up to the first option, while they form a known path. Undefined when
+ * the words name no complete command.
+ */
+export function identifiedCommand(tokens: readonly string[]): CommandSpec | undefined {
+  const path: string[] = [];
+  for (const token of tokens) {
+    if (isOption(token) || COMMAND_BY_PATH.has(key(path))) break;
+    if (!isKnownPath([...path, token])) return undefined;
+    path.push(token);
+  }
+  return COMMAND_BY_PATH.get(key(path));
+}
+
 export function parse(tokens: readonly string[], mode: Mode): ParseResult {
   const prefix = commandPrefix(mode);
   const error = (message: string): ParseResult => ({ kind: "error", message });

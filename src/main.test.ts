@@ -45,6 +45,25 @@ describe("one-shot invocation", () => {
     }
   });
 
+  it("report an input error as a JSON result when --json is given, naming the command where the line names one", async () => {
+    const run = io();
+    expect(await main(["channel", "fader", "get", "--json"], run.value)).toBe(2);
+    expect(JSON.parse(run.stdout())).toEqual({
+      type: "result",
+      command: "channel fader get",
+      data: null,
+      error: { code: "invalid_input", message: "`urx channel fader get` needs --channel. See `urx channel fader get --help`." },
+    });
+    expect(run.stderr()).toBe("");
+    const unknown = io();
+    expect(await main(["channel", "mute", "get", "--json"], unknown.value)).toBe(2);
+    expect(JSON.parse(unknown.stdout())).toMatchObject({ command: null, data: null, error: { code: "invalid_input" } });
+    // A command without --json keeps its error on standard error.
+    const plain = io();
+    expect(await main(["console", "--json"], plain.value)).toBe(2);
+    expect(plain.stdout()).toBe("");
+  });
+
   it("exit 1 when the input error cannot be written to stderr", async () => {
     const run = io(undefined, new Error("EPIPE"));
     expect(await main(["device"], run.value)).toBe(1);
