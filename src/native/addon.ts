@@ -64,13 +64,15 @@ export function loadAddon(url: URL = ADDON_URL, load: (url: URL) => unknown = de
   } catch {
     return { ok: false, problem: "missing" };
   }
+  return missingExports(module) ? { ok: false, problem: "malformed" } : { ok: true, addon: module as NativeAddon };
+}
+
+/** Whether `module` lacks an export, or its connections a method, this bridge revision needs. */
+function missingExports(module: unknown): boolean {
   const exports = module as Record<string, unknown> | null;
-  if (typeof exports !== "object" || exports === null || FUNCTIONS.some((name) => typeof exports[name] !== "function")) {
-    return { ok: false, problem: "malformed" };
-  }
+  if (typeof exports !== "object" || exports === null || FUNCTIONS.some((name) => typeof exports[name] !== "function")) return true;
   const connection = (exports["Connection"] as { prototype?: Record<string, unknown> }).prototype;
-  if (CONNECTION_METHODS.some((name) => typeof connection?.[name] !== "function")) return { ok: false, problem: "malformed" };
-  return { ok: true, addon: module as NativeAddon };
+  return CONNECTION_METHODS.some((name) => typeof connection?.[name] !== "function");
 }
 
 const defaultLoad = (url: URL): unknown => createRequire(import.meta.url)(fileURLToPath(url));
@@ -103,16 +105,28 @@ export function checkIdentity(reported: unknown, expected: ExpectedIdentity): Ad
   return null;
 }
 
-/** Loads the addon and checks its identity: the one gate before device access. */
-export function openAddon(expected: ExpectedIdentity, url: URL = ADDON_URL, load?: (url: URL) => unknown): AddonCheck {
-  const loaded = loadAddon(url, load);
-  if (!loaded.ok) return loaded;
+/**
+ * Loads the addon and checks it: the one gate before device access. The
+ * identity comes first, so an addon of another bridge revision is
+ * `bridge_mismatch` whatever it exports; only an addon of this revision is
+ * then required to have every export and method this revision uses.
+ */
+export function openAddon(expected: ExpectedIdentity, url: URL = ADDON_URL, load: (url: URL) => unknown = defaultLoad): AddonCheck {
+  let module: unknown;
+  try {
+    module = load(url);
+  } catch {
+    return { ok: false, problem: "missing" };
+  }
+  const identify = (module as { buildIdentity?: unknown } | null)?.buildIdentity;
+  if (typeof identify !== "function") return { ok: false, problem: "malformed" };
   let reported: unknown;
   try {
-    reported = loaded.addon.buildIdentity();
+    reported = identify.call(module);
   } catch {
     return { ok: false, problem: "malformed" };
   }
   const problem = checkIdentity(reported, expected);
-  return problem === null ? loaded : { ok: false, problem };
+  if (problem !== null) return { ok: false, problem };
+  return missingExports(module) ? { ok: false, problem: "malformed" } : { ok: true, addon: module as NativeAddon };
 }

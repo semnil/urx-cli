@@ -71,12 +71,24 @@ describe("addon loading", () => {
     }
   });
 
-  it("report an addon whose connections lack a request method as malformed, as one from an earlier bridge revision would", () => {
+  it("refuse an addon of another bridge revision as bridge_mismatch whatever it exports", () => {
     class Lifecycle {
       close() {}
     }
+    // As the revision-1 addon: its connections have no request methods.
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 }), Lifecycle))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 3 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+  });
+
+  it("refuse an addon of this revision that lacks an export or a connection method as malformed", () => {
+    class Lifecycle {
+      close() {}
+    }
+    expect(openAddon(expected, url, () => addonWith(() => reported(), Lifecycle))).toEqual({ ok: false, problem: "malformed" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported() }))).toEqual({ ok: false, problem: "malformed" });
     expect(loadAddon(url, () => addonWith(() => reported(), Lifecycle))).toEqual({ ok: false, problem: "malformed" });
-    expect(loadAddon(url, () => addonWith(() => reported()))).toMatchObject({ ok: true });
+    expect(openAddon(expected, url, () => addonWith(() => reported()))).toMatchObject({ ok: true });
   });
 
   it("open only an addon whose identity matches", () => {
