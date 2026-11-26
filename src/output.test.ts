@@ -41,6 +41,15 @@ describe("one output operation (O7)", () => {
     expect(await pending).toBe("output_timeout");
   });
 
+  it("report output_timeout for a write that failed after blocking past the deadline", async () => {
+    let clock = 0;
+    const failing: OutputStream = { write: (_, done) => ((clock += 6100), done(new Error("EIO")), false) };
+    expect(await writeWithDeadline(failing, "x", 5000, () => clock)).toBe("output_timeout");
+    clock = 0;
+    const early: OutputStream = { write: (_, done) => ((clock += 100), done(new Error("EIO")), false) };
+    expect(await writeWithDeadline(early, "x", 5000, () => clock)).toBe("output_error");
+  });
+
   it("report output_timeout for a write that blocked past the deadline and then completed", async () => {
     let clock = 0;
     const blocking: OutputStream = { write: (_, done) => ((clock += 5700), done(), true) };
@@ -59,7 +68,7 @@ describe("file output", () => {
       const next = sizes.shift();
       if (next instanceof Error) throw next;
       return Math.min(next ?? length, length);
-    }) as unknown as Parameters<typeof fileOutput>[1];
+    }) as unknown as NonNullable<NonNullable<Parameters<typeof fileOutput>[1]>["write"]>;
     return { write, calls };
   };
   const result = (stream: OutputStream, text: string) =>
@@ -67,7 +76,7 @@ describe("file output", () => {
 
   it("write the remainder after a short write until every byte is written", async () => {
     const { write, calls } = writer([3, 2]);
-    expect(await result(fileOutput(1, write), "abcdefgh")).toBeNull();
+    expect(await result(fileOutput(1, { write }), "abcdefgh")).toBeNull();
     expect(calls).toEqual([
       [0, 8],
       [3, 5],
@@ -77,13 +86,24 @@ describe("file output", () => {
 
   it("count UTF-8 bytes, not characters", async () => {
     const { write, calls } = writer([]);
-    expect(await result(fileOutput(1, write), "名前")).toBeNull();
+    expect(await result(fileOutput(1, { write }), "名前")).toBeNull();
     expect(calls).toEqual([[0, 6]]);
   });
 
+  it("start no further write once a short write returns at or past the deadline", async () => {
+    let clock = 0;
+    const calls: number[] = [];
+    const slow = ((_fd: number, _buffer: Buffer, offset: number) => (calls.push(offset), (clock += 2800), 2)) as unknown as NonNullable<
+      NonNullable<Parameters<typeof fileOutput>[1]>["write"]
+    >;
+    const output = fileOutput(1, { write: slow, now: () => clock, deadlineMs: 5000 });
+    expect(await writeWithDeadline(output, "abcdefgh", 5000, () => clock)).toBe("output_timeout");
+    expect(calls).toEqual([0, 2]);
+  });
+
   it("fail when the remainder cannot be written or no byte is accepted", async () => {
-    expect(await result(fileOutput(1, writer([3, Object.assign(new Error("full"), { code: "ENOSPC" })]).write), "abcdefgh")).toBeInstanceOf(Error);
-    expect(await result(fileOutput(1, writer([0]).write), "abc")).toBeInstanceOf(Error);
+    expect(await result(fileOutput(1, { write: writer([3, Object.assign(new Error("full"), { code: "ENOSPC" })]).write }), "abcdefgh")).toBeInstanceOf(Error);
+    expect(await result(fileOutput(1, { write: writer([0]).write }), "abc")).toBeInstanceOf(Error);
   });
 });
 

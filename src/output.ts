@@ -15,8 +15,9 @@ export type OutputFailure = "output_error" | "output_timeout";
 
 /**
  * Resolves with `null` once the write completes, or with the failure that ended
- * it. A write that completes after the deadline is still a timeout: a write that
- * blocks the thread (a file) keeps the timer from running until it returns.
+ * it. Whatever arrives at or after the deadline, success or error, is a timeout:
+ * a write that blocks the thread (a file) keeps the timer from running until it
+ * returns, and the deadline passed first.
  */
 export function writeWithDeadline(
   stream: OutputStream,
@@ -31,7 +32,7 @@ export function writeWithDeadline(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(failure === null && now() - started >= deadlineMs ? "output_timeout" : failure);
+      resolve(now() - started >= deadlineMs ? "output_timeout" : failure);
     };
     const timer = setTimeout(() => settle("output_timeout"), deadlineMs);
     try {
@@ -42,17 +43,26 @@ export function writeWithDeadline(
   });
 }
 
+export interface FileOutputOptions {
+  readonly write?: typeof writeSync;
+  readonly now?: () => number;
+  readonly deadlineMs?: number;
+}
+
 /**
  * Output to a file descriptor written with `writeSync` until every byte is
  * written. Node's own file stream ignores a short write, which would report a
- * truncated output (a full disk, a file size limit) as complete.
+ * truncated output (a full disk, a file size limit) as complete. After a short
+ * write that returns at or past the deadline, the rest is not written.
  */
-export function fileOutput(fd: number, write: typeof writeSync = writeSync): OutputStream {
+export function fileOutput(fd: number, { write = writeSync, now = () => performance.now(), deadlineMs = OUTPUT_DEADLINE_MS }: FileOutputOptions = {}): OutputStream {
   return {
     write(chunk, callback) {
+      const started = now();
       const bytes = Buffer.from(chunk, "utf8");
       try {
         for (let offset = 0; offset < bytes.length; ) {
+          if (offset > 0 && now() - started >= deadlineMs) throw new Error("the output deadline passed");
           const written = write(fd, bytes, offset, bytes.length - offset);
           if (written <= 0) throw new Error("the output accepted no bytes");
           offset += written;
