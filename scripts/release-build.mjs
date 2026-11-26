@@ -4,16 +4,18 @@
 // worktree of their own, so edits to the working tree, the index, Git's
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
-// `--release` and a Cargo target directory of their own, and the result is
-// moved into place as dist-release/ in one rename, so concurrent release
-// builds never mix their halves. A build stops when dist-release/ already
-// exists rather than remove it. The launcher is built from the same export into the same
-// target directory and placed at dist-release/launcher/ for the bundle
-// (scripts/build-bundle.mjs).
+// `--release` and a Cargo target directory of their own. The build claims
+// dist-release/ before building, by creating it where nothing is, so two
+// release builds never write into one output, and it stops when anything is
+// already there rather than remove or replace it. The result is written into
+// the claimed folder without replacing anything, its record last; a build
+// that stops after claiming it leaves it without that record. The launcher is
+// built from the same export into the same target directory and placed at
+// dist-release/launcher/ for the bundle (scripts/build-bundle.mjs).
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -203,56 +205,72 @@ export function removeExport(root, destination) {
   rmSync(destination, { recursive: true, force: true });
 }
 
-/** Throws when anything is at `output`, a link included: a build never removes a previous output. */
-export function requireNoOutput(output, label = "release build") {
+/**
+ * Claims `output` for one build by creating it, empty, where nothing is. A
+ * build never removes or replaces a previous output: when anything is at
+ * `output`, an empty folder or a link included, it is left as it is and the
+ * build stops, before building anything; the user removes it before building
+ * again. The claimed folder is not removed afterwards either: a build that
+ * stops after claiming it leaves it, without the record that marks a finished
+ * output, for the user to remove.
+ */
+export function claimOutput(output, label = "release build") {
   try {
-    lstatSync(output);
+    mkdirSync(output);
   } catch (error) {
-    if (error?.code === "ENOENT") return;
-    throw new Error(`${output} could not be examined`, { cause: error });
+    if (error?.code === "EEXIST") throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
+    throw new Error(`${output} could not be created`, { cause: error });
   }
-  throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
+}
+
+/** Says, when a build stops after claiming `output`, that the folder stays and is the user's to remove. */
+export function leftBehind(output, label = "release build") {
+  return `${label}: ${output} is left as it is, without its record; remove it before building again`;
 }
 
 /**
- * Moves `staging` into place as `output` in one rename. A build never removes
- * a previous output: when anything is at `output`, a link included, it is left
- * as it is, `staging` is removed and the build stops; the user removes the
- * previous output before building again. Another build that creates the
- * output between the check and the rename makes the rename fail, with the
- * same result. Warnings start with `label`, the build that publishes (the
- * release build or the bundle build).
+ * Writes the files of `staging` into `output`, the empty folder `claimOutput`
+ * made, without replacing anything: each folder is created where nothing is,
+ * each file is copied where nothing is, and `last`, the record at the top of
+ * the output that marks it finished, is copied after every other file. When
+ * anything is in the way, it is left as it is and this throws, leaving
+ * `output` without that record. Outside Windows, folders and files keep the
+ * modes they have in `staging`.
  */
-export function publishOutput(
-  staging,
-  output,
-  { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`), label = "release build" } = {},
-) {
-  const abandon = (error) => {
-    try {
-      remove(staging);
-    } catch {
-      warn(`${label}: the new output could not be removed from ${staging}`);
+export function publishOutput(staging, output, { last, label = "release build" } = {}) {
+  const keepMode = (from, to) => {
+    if (process.platform !== "win32") chmodSync(to, statSync(from).mode & 0o7777);
+  };
+  const copyTree = (from, to) => {
+    for (const entry of readdirSync(from, { withFileTypes: true })) {
+      const source = join(from, entry.name);
+      const target = join(to, entry.name);
+      if (from === staging && entry.name === last) continue;
+      if (entry.isDirectory()) {
+        mkdirSync(target);
+        copyTree(source, target);
+        keepMode(source, target);
+      } else if (entry.isFile()) {
+        copyFileSync(source, target, constants.COPYFILE_EXCL);
+      } else {
+        throw new Error(`${source} is neither a regular file nor a folder`);
+      }
     }
-    throw error;
   };
   try {
-    requireNoOutput(output, label);
+    copyTree(staging, output);
+    if (last !== undefined) copyFileSync(join(staging, last), join(output, last), constants.COPYFILE_EXCL);
+    keepMode(staging, output);
   } catch (error) {
-    abandon(error);
-  }
-  try {
-    rename(staging, output);
-  } catch (error) {
-    abandon(new Error(`${output} could not be created; another ${label} may have created it first`, { cause: error }));
+    throw new Error(`the ${label} could not write ${output} without replacing what is in it`, { cause: error });
   }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const output = join(root, "dist-release");
-  // Checked again when the output is moved into place; this stops before building anything.
-  requireNoOutput(output);
+  // Claimed before building anything, so nothing at the output is ever replaced.
+  claimOutput(output);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
   try {
@@ -282,23 +300,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       stdio: ["ignore", "pipe", "inherit"],
       env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
     });
-    // Copied next to the output first, so the final rename stays on one file system.
-    const staging = mkdtempSync(join(root, "dist-release-"));
-    try {
-      rmSync(staging, { recursive: true, force: true });
-      cpSync(join(source, "dist"), staging, { recursive: true });
-      const launcher = process.platform === "win32" ? "urx.exe" : "urx";
-      cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
-      copyCommonPackage(source, staging);
-      markModuleFormat(staging);
-      writeReleaseFiles(staging);
-    } catch (error) {
-      rmSync(staging, { recursive: true, force: true });
-      throw error;
-    }
-    // Moves `staging` into place, or removes it and throws when the output exists.
-    publishOutput(staging, output);
+    // Laid out in this run's scratch, then written into the claimed output, its record last.
+    const staging = join(scratch, "output");
+    cpSync(join(source, "dist"), staging, { recursive: true });
+    const launcher = process.platform === "win32" ? "urx.exe" : "urx";
+    cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
+    copyCommonPackage(source, staging);
+    markModuleFormat(staging);
+    writeReleaseFiles(staging);
+    publishOutput(staging, output, { last: RELEASE_FILES });
     process.stderr.write(`release build written to ${output}\n`);
+  } catch (error) {
+    process.stderr.write(`${leftBehind(output)}\n`);
+    throw error;
   } finally {
     removeExport(root, source);
     rmSync(scratch, { recursive: true, force: true });

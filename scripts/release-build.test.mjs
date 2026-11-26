@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, isRecordedPath, launcherArtifact, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { claimOutput, exportRelease, isRecordedPath, launcherArtifact, leftBehind, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -129,70 +129,83 @@ describe("release output", () => {
   };
   const contents = (path) => [readFileSync(join(path, "main.js"), "utf8"), readFileSync(join(path, "native", "urx-native.node"), "utf8")];
 
-  it("create the output from one complete staging directory", () => {
+  it("claim the output where nothing is, then write the staged files into it, the record last", () => {
     const output = join(scratch, "dist-release");
+    claimOutput(output);
+    expect(readdirSync(output)).toEqual([]);
     const staging = directory("staging", "new");
-    publishOutput(staging, output);
+    writeFileSync(join(staging, "release-files.json"), "record");
+    publishOutput(staging, output, { last: "release-files.json" });
     expect(contents(output)).toEqual(["new", "new"]);
-    expect(existsSync(staging)).toBe(false);
+    expect(readFileSync(join(output, "release-files.json"), "utf8")).toBe("record");
   });
 
-  it("leave whatever is at the output as it is, remove the new one and stop", () => {
+  it("leave whatever is at the output as it is and stop before building, an empty folder included", () => {
     const previous = directory("dist-release", "previous");
     writeFileSync(join(previous, "keep.txt"), "the user's");
-    const staging = directory("staging", "new");
-    expect(() => publishOutput(staging, previous)).toThrow(/already exists; the release build leaves it as it is, so remove it to build again/);
+    expect(() => claimOutput(previous)).toThrow(/already exists; the release build leaves it as it is, so remove it to build again/);
     expect(contents(previous)).toEqual(["previous", "previous"]);
     expect(readFileSync(join(previous, "keep.txt"), "utf8")).toBe("the user's");
-    expect(existsSync(staging)).toBe(false);
 
-    const file = join(scratch, "dist-bundle");
+    const empty = join(scratch, "dist-bundle");
+    mkdirSync(empty);
+    const before = statSync(empty).ino;
+    expect(() => claimOutput(empty, "bundle build")).toThrow(/already exists; the bundle build leaves it as it is/);
+    expect(statSync(empty).ino).toBe(before);
+    expect(readdirSync(empty)).toEqual([]);
+
+    const file = join(scratch, "dist-installer");
     writeFileSync(file, "the user's");
-    expect(() => publishOutput(directory("staging", "new"), file, { label: "bundle build" })).toThrow(/already exists; the bundle build leaves it/);
+    expect(() => claimOutput(file, "installer build")).toThrow(/already exists; the installer build leaves it/);
     expect(readFileSync(file, "utf8")).toBe("the user's");
   });
 
-  it("stop before building anything when the output exists", () => {
-    const output = join(scratch, "dist-bundle");
-    expect(() => requireNoOutput(output, "bundle build")).not.toThrow();
-    mkdirSync(output);
-    expect(() => requireNoOutput(output, "bundle build")).toThrow(/already exists; the bundle build leaves it as it is/);
-  });
-
-  it("leave a link at the output as it is", () => {
+  it("leave a link at the output as it is, a dangling one included", () => {
     const target = directory("elsewhere", "the user's");
     const output = join(scratch, "dist-release");
+    const dangling = join(scratch, "dist-bundle");
     try {
       symlinkSync(target, output, "dir");
+      symlinkSync(join(scratch, "nowhere"), dangling, "dir");
     } catch {
       return; // Creating a link needs a privilege this Windows account may lack.
     }
-    expect(() => publishOutput(directory("staging", "new"), output)).toThrow(/already exists/);
+    expect(() => claimOutput(output)).toThrow(/already exists/);
     expect(contents(output)).toEqual(["the user's", "the user's"]);
+    expect(() => claimOutput(dangling)).toThrow(/already exists/);
+    expect(existsSync(join(scratch, "nowhere"))).toBe(false);
   });
 
-  it("leave the output another build created first, and remove the new one", () => {
-    const output = join(scratch, "dist-release");
-    const staging = directory("staging", "this");
-    const raced = (from, to) => {
-      directory("dist-release", "other");
-      renameSync(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: raced })).toThrow(/could not be created; another release build may have created it first/);
-    expect(contents(output)).toEqual(["other", "other"]);
-    expect(existsSync(staging)).toBe(false);
+  it("replace nothing that appears in the claimed output, and then write no record", () => {
+    for (const [name, inTheWay] of [
+      ["a file", (output) => writeFileSync(join(output, "main.js"), "the user's")],
+      ["a folder", (output) => mkdirSync(join(output, "native"))],
+    ]) {
+      const output = join(scratch, `dist-release-${name.replace(" ", "-")}`);
+      claimOutput(output);
+      inTheWay(output);
+      const staging = directory("staging", "new");
+      writeFileSync(join(staging, "release-files.json"), "record");
+      expect(() => publishOutput(staging, output, { last: "release-files.json" }), name).toThrow(/could not write .* without replacing what is in it/);
+      expect(existsSync(join(output, "release-files.json")), name).toBe(false);
+      if (name === "a file") expect(readFileSync(join(output, "main.js"), "utf8")).toBe("the user's");
+    }
   });
 
-  it("warn, naming the build, when the new output cannot be removed", () => {
-    const output = directory("dist-bundle", "previous");
+  it.skipIf(process.platform === "win32")("keep the staged folders' and files' modes in the output", () => {
+    const output = join(scratch, "dist-bundle");
+    claimOutput(output);
     const staging = directory("staging", "new");
-    const warnings = [];
-    const stuck = () => {
-      throw Object.assign(new Error("read-only"), { code: "EACCES" });
-    };
-    expect(() => publishOutput(staging, output, { remove: stuck, warn: (message) => warnings.push(message), label: "bundle build" })).toThrow(/already exists/);
-    expect(warnings).toEqual([`bundle build: the new output could not be removed from ${staging}`]);
-    expect(contents(output)).toEqual(["previous", "previous"]);
+    chmodSync(join(staging, "native"), 0o700);
+    chmodSync(join(staging, "main.js"), 0o755);
+    chmodSync(join(staging, "native", "urx-native.node"), 0o600);
+    publishOutput(staging, output, { label: "bundle build" });
+    const mode = (...path) => (statSync(join(output, ...path)).mode & 0o7777).toString(8);
+    expect([mode("native"), mode("main.js"), mode("native", "urx-native.node")]).toEqual(["700", "755", "600"]);
+  });
+
+  it("say that a build stopped after claiming its output leaves it for the user", () => {
+    expect(leftBehind("/repo/dist-bundle", "bundle build")).toBe("bundle build: /repo/dist-bundle is left as it is, without its record; remove it before building again");
   });
 
   it("record the files a release build made, with their hashes and sizes, and read them back", () => {
