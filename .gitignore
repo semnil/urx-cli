@@ -1,0 +1,11 @@
+# No pattern carries a trailing slash: a trailing slash matches directories only,
+# so `node_modules/` would not ignore a `node_modules` symlink, which is how a
+# shared install gets committed from a git worktree.
+node_modules
+dist
+target
+coverage
+# The maintainer's private design record and the local agent notes that point to
+# it. Neither is part of this repository.
+/reference
+/CLAUDE.local.md

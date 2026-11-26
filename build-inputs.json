@@ -1,0 +1,21 @@
+{
+  "note": "The exact tool versions and archive hashes a build uses. .node-version and package.json repeat some of them for the tools that read those files; `pnpm build-inputs:check` fails when they differ from this file. The urx-device commit is pinned by the vendor/urx-device gitlink alone and is not repeated here.",
+  "node": {
+    "version": "26.13.0",
+    "checksums": "https://nodejs.org/dist/v26.13.0/SHASUMS256.txt",
+    "archives": {
+      "darwin-arm64": {
+        "file": "node-v26.13.0-darwin-arm64.tar.gz",
+        "sha256": "d38bd5e5a2ddce6bbb5ce45e46e208337da4d51fffe611e567fd32073d6439f6"
+      },
+      "win-x64": {
+        "file": "node-v26.13.0-win-x64.zip",
+        "sha256": "dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a"
+      }
+    }
+  },
+  "pnpm": {
+    "version": "10.7.1",
+    "sha512": "2d92c86b7928dc8284f53494fb4201f983da65f0fb4f0d40baafa5cf628fa31dae3e5968f12466f17df7e97310e30f343a648baea1b9b350685dafafffdf5808"
+  }
+}
