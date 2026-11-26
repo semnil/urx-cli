@@ -26,7 +26,7 @@ export interface NativeOperation {
   finish(): void;
 }
 
-/** The request side of the addon's connection object. */
+/** The request and subscription side of the addon's connection object. */
 export interface NativeRequests {
   createOperation(): NativeOperation;
   /** A ticket the connection never issued before, whichever adapter asks. */

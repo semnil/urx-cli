@@ -106,8 +106,8 @@ pub struct BatchRecord {
 /// open connection does not by itself keep Node running.
 pub type BatchFunction = ThreadsafeFunction<BatchRecord, (), BatchRecord, Status, false, true, 1>;
 
-/// The handlers a connection is opened with (K37). The transport has no
-/// terminal event yet, so `notifications` is the only one.
+/// The handlers a connection is opened with (K37). The transport delivers no
+/// terminal event, so `notifications` is the only handler.
 #[napi(object, object_to_js = false)]
 pub struct Handlers {
     pub notifications: BatchFunction,
