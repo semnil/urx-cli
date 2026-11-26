@@ -4,6 +4,11 @@
 
 use napi_derive::napi;
 
+// Public so that the items only the exported functions reach stay reachable
+// when `cargo test` builds the crate without registering the exports.
+pub mod lifecycle;
+pub mod records;
+
 /// The revision of the interface between this addon and the CLI's
 /// JavaScript. The JavaScript side refuses device access when it expects a
 /// different one (src/bridge.ts holds its expectation).
