@@ -99,12 +99,13 @@ export function removeExport(root, destination) {
  * 2. `staging` is renamed into its place;
  * 3. the set-aside output is removed.
  *
- * When step 2 fails (another release put its output there in between, or the
+ * When step 2 fails (another build put its output there in between, or the
  * rename itself failed), the previous output is renamed back, so `output`
- * always holds one release's complete result, never a partly removed one. An
+ * always holds one build's complete result, never a partly removed one. An
  * interruption between the steps leaves the previous output complete under its
  * set-aside name. A failed step 3 only warns: the new output is complete, and
- * whatever could not be removed stays under the set-aside name.
+ * whatever could not be removed stays under the set-aside name. Warnings start
+ * with `label`, the build that publishes (the release build or the bundle build).
  */
 export function publishOutput(
   staging,

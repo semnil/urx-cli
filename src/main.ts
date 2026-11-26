@@ -17,7 +17,7 @@ import { EXIT } from "./result.js";
 
 /** What a device command needs beyond the streams; tests supply their own. */
 export interface DeviceIo {
-  /** Loads the addon and checks its identity; the default loads dist/native/urx-native.node. */
+  /** Loads the addon and checks its identity; the default loads the addon at `ADDON_URL` (src/native/addon.ts). */
   readonly addon?: () => AddonCheck;
   readonly interrupts: Interrupts;
   readonly now: () => number;
