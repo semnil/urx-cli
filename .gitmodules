@@ -1,0 +1,3 @@
+[submodule "vendor/urx-device"]
+	path = vendor/urx-device
+	url = https://github.com/semnil/urx-device.git
