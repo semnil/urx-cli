@@ -136,7 +136,7 @@ pub struct Connection {
     pub(crate) tickets: std::sync::atomic::AtomicU64,
     /// Hands an undeliverable result's slot to this connection's fatal
     /// thread, which ends the connection; dropping it lets the thread exit.
-    pub(crate) fatal: Mutex<Option<FatalSender>>,
+    pub(crate) fatal: Arc<Mutex<Option<FatalSender>>>,
 }
 
 /// One undeliverable result for the fatal thread: the slot it holds, and
@@ -185,7 +185,7 @@ impl Connection {
             inner: opened.connection,
             slots: SharedSlots::default(),
             tickets: std::sync::atomic::AtomicU64::new(0),
-            fatal: Mutex::new(Some(opened.fatal)),
+            fatal: Arc::new(Mutex::new(Some(opened.fatal))),
         }
     }
 }
@@ -205,11 +205,9 @@ impl Connection {
     /// Closes the connection (K4, N2). Repeated calls join the same close.
     #[napi]
     pub fn close(&self) -> AsyncTask<CloseTask> {
-        // The fatal thread is not needed once the connection is closing; this
-        // lets it exit instead of waiting until the object is collected.
-        lock(&self.fatal).take();
         AsyncTask::new(CloseTask {
             inner: Arc::clone(&self.inner),
+            fatal: Arc::clone(&self.fatal),
         })
     }
 }
@@ -306,6 +304,7 @@ pub fn open_connection(device_id: String, control: &Control) -> AsyncTask<OpenTa
 
 pub struct CloseTask {
     inner: Arc<connection::Connection>,
+    fatal: Arc<Mutex<Option<FatalSender>>>,
 }
 
 impl Task for CloseTask {
@@ -313,7 +312,12 @@ impl Task for CloseTask {
     type JsValue = UnitRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.inner.close(TEARDOWN_DEADLINE))
+        let outcome = self.inner.close(TEARDOWN_DEADLINE);
+        // Only once the connection has ended is its fatal thread let go, so
+        // it exits instead of waiting until the object is collected; until
+        // then an undeliverable slot can still be handed to it.
+        lock(&self.fatal).take();
+        Ok(outcome)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
