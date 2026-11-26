@@ -66,6 +66,14 @@ describe("release source check", () => {
     expect(releaseSourceProblems(root)).toEqual(["the CLI has staged or unstaged changes to tracked files"]);
   });
 
+  it("refuse index entries Git does not compare with the files, in either repository", () => {
+    git(root, "update-index", "--assume-unchanged", "package.json");
+    expect(releaseSourceProblems(root)).toEqual(["the CLI has index entries that Git does not compare with the files"]);
+    git(root, "update-index", "--no-assume-unchanged", "package.json");
+    git(common, "update-index", "--skip-worktree", "lib.txt");
+    expect(releaseSourceProblems(root)).toEqual([`${COMMON_PATH} has index entries that Git does not compare with the files`]);
+  });
+
   it("refuse an unknown version on either side", () => {
     rmSync(join(common, "package.json"));
     git(common, "commit", "-q", "-am", "drop the version");

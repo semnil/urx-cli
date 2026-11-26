@@ -54,6 +54,15 @@ export function releaseSourceProblems(root, run = git) {
   const commonChanges = run(common, ["status", "--porcelain=v1", "--untracked-files=no"]);
   if (commonChanges === null) problems.push(`the changes in ${COMMON_PATH} cannot be read`);
   else if (commonChanges.trim() !== "") problems.push(`${COMMON_PATH} has staged or unstaged changes to tracked files`);
+  // `git ls-files -v` tags an assume-unchanged entry in lowercase and a skip-worktree entry `S`.
+  for (const [directory, name] of [
+    [root, "the CLI"],
+    [common, COMMON_PATH],
+  ]) {
+    const entries = run(directory, ["ls-files", "-v"]);
+    if (entries === null) problems.push(`the index of ${name} cannot be read`);
+    else if (/^(?:[a-z]|S) /m.test(entries)) problems.push(`${name} has index entries that Git does not compare with the files`);
+  }
   if (versionOf(readOrNull(join(root, "package.json"))) === "unknown") problems.push("the CLI version is unknown");
   if (versionOf(readOrNull(join(common, "package.json"))) === "unknown") problems.push("the urx-device version is unknown");
   return problems;

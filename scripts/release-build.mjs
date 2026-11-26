@@ -2,12 +2,14 @@
 // recorded commits, not from the working tree. The CLI commit HEAD names and
 // the urx-device commit its gitlink pins are exported into a temporary
 // worktree of their own, so edits to the working tree, the index, Git's
-// change-display settings (assume-unchanged, skip-worktree) and the build order
-// cannot change what is built. Both builds run there with `--release`, and the
-// result is copied to dist-release/.
+// change-display settings (assume-unchanged, skip-worktree), a sparse checkout
+// and the build order cannot change what is built. Both builds run there with
+// `--release` and a Cargo target directory of their own, and the result
+// replaces dist-release/ as one directory, so concurrent release builds never
+// mix their halves.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +31,10 @@ export function exportRelease(root, destination) {
   const appCommit = git(root, ["rev-parse", "HEAD"]).trim();
   const commonCommit = gitlinkOf(git(root, ["ls-tree", "HEAD", COMMON_PATH]));
   if (commonCommit === null) throw new Error(`HEAD pins no commit for ${COMMON_PATH}`);
-  git(root, ["worktree", "add", "--detach", "--quiet", destination, appCommit]);
+  // A new worktree inherits the caller's sparse checkout; checking out with it
+  // turned off for that one command populates every tracked file.
+  git(root, ["worktree", "add", "--detach", "--no-checkout", "--quiet", destination, appCommit]);
+  git(destination, ["-c", "core.sparseCheckout=false", "checkout", "--quiet", "--force", "--detach", appCommit]);
   const localCommon = git(join(root, COMMON_PATH), ["rev-parse", "--absolute-git-dir"]).trim();
   git(destination, [
     "-c",
@@ -47,7 +52,11 @@ export function exportRelease(root, destination) {
   return { appCommit, commonCommit };
 }
 
-/** Removes a worktree made by `exportRelease`, including one it left half made. */
+/**
+ * Removes a worktree made by `exportRelease`, including one it left half made.
+ * Only that worktree's registration is touched: a repository-wide prune would
+ * also drop another worktree whose directory is out of sight for a while.
+ */
 export function removeExport(root, destination) {
   try {
     git(root, ["worktree", "remove", "--force", "--force", destination]);
@@ -55,7 +64,22 @@ export function removeExport(root, destination) {
     // Not registered (the export failed before creating it) or already gone.
   }
   rmSync(destination, { recursive: true, force: true });
-  git(root, ["worktree", "prune"]);
+}
+
+/**
+ * Makes `staging` the directory at `output`: the old output is removed and
+ * `staging` is renamed into its place. When another release has put its own
+ * output there in between, the rename fails and this release fails, so
+ * `output` always holds one release's complete result.
+ */
+export function publishOutput(staging, output, rename = renameSync) {
+  rmSync(output, { recursive: true, force: true });
+  try {
+    rename(staging, output);
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw new Error(`another release build replaced ${output} while this one finished`, { cause: error });
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -69,8 +93,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       execFileSync(process.execPath, args, {
         cwd: source,
         stdio: "inherit",
-        // One Cargo cache for every release build of this checkout.
-        env: { ...environment, CARGO_TARGET_DIR: join(root, "target", "release-build") },
+        // A target directory of this run's own: a shared one would let a
+        // concurrent release build overwrite this run's addon.
+        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
       });
     // `pnpm build:release` runs this script; pnpm names its own JavaScript entry.
     const pnpm = process.env.npm_execpath;
@@ -80,8 +105,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);
     const output = join(root, "dist-release");
-    rmSync(output, { recursive: true, force: true });
-    cpSync(join(source, "dist"), output, { recursive: true });
+    // Copied next to the output first, so the final rename stays on one file system.
+    const staging = mkdtempSync(join(root, "dist-release-"));
+    rmSync(staging, { recursive: true, force: true });
+    cpSync(join(source, "dist"), staging, { recursive: true });
+    publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
     removeExport(root, source);

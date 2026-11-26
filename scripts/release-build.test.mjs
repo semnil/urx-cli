@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, removeExport } from "./release-build.mjs";
+import { exportRelease, publishOutput, removeExport } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -20,6 +20,8 @@ let root;
 let common;
 let first;
 let second;
+/** File contents without the CRLF line endings a Windows checkout gives them. */
+const text = (path) => readFileSync(path, "utf8").replaceAll("\r\n", "\n");
 
 /** A CLI repository whose gitlink pins the second of two urx-device commits. */
 beforeEach(() => {
@@ -62,8 +64,8 @@ describe("release export", () => {
     const commits = exportRelease(root, destination);
     try {
       expect(commits).toEqual({ appCommit: git(root, "rev-parse", "HEAD"), commonCommit: second });
-      expect(readFileSync(join(destination, "app.txt"), "utf8")).toBe("recorded\n");
-      expect(readFileSync(join(destination, COMMON_PATH, "lib.txt"), "utf8")).toBe("second\n");
+      expect(text(join(destination, "app.txt"))).toBe("recorded\n");
+      expect(text(join(destination, COMMON_PATH, "lib.txt"))).toBe("second\n");
       expect(git(join(destination, COMMON_PATH), "rev-parse", "HEAD")).toBe(second);
       expect(git(destination, "status", "--porcelain=v1", "--untracked-files=no")).toBe("");
     } finally {
@@ -73,8 +75,73 @@ describe("release export", () => {
     expect(git(root, "worktree", "list", "--porcelain")).not.toContain(destination);
   });
 
+  it("export every tracked file when the caller has a sparse checkout, and leave the caller's sparse checkout as it is", () => {
+    mkdirSync(join(root, "kept"));
+    writeFileSync(join(root, "kept", "a.txt"), "a\n");
+    mkdirSync(join(root, "excluded"));
+    writeFileSync(join(root, "excluded", "b.txt"), "b\n");
+    git(root, "add", ".");
+    git(root, "commit", "-q", "-m", "two directories");
+    git(root, "sparse-checkout", "set", "kept");
+    expect(existsSync(join(root, "excluded", "b.txt"))).toBe(false);
+
+    const destination = join(scratch, "export");
+    exportRelease(root, destination);
+    try {
+      expect(text(join(destination, "excluded", "b.txt"))).toBe("b\n");
+      expect(text(join(destination, "app.txt"))).toBe("recorded\n");
+      expect(git(destination, "ls-files", "-v").split("\n").filter((line) => !line.startsWith("H "))).toEqual([]);
+    } finally {
+      removeExport(root, destination);
+    }
+    expect(existsSync(join(root, "excluded", "b.txt"))).toBe(false);
+  });
+
+  it("remove only its own worktree, keeping another whose directory is out of sight", () => {
+    const other = join(scratch, "other");
+    git(root, "worktree", "add", "-q", "--detach", other);
+    const moved = join(scratch, "other-moved");
+    renameSync(other, moved);
+    const destination = join(scratch, "export");
+    exportRelease(root, destination);
+    removeExport(root, destination);
+    expect(git(root, "worktree", "list", "--porcelain")).toContain(other);
+    renameSync(moved, other);
+    expect(git(other, "status", "--porcelain")).toBe("");
+  });
+
   it("clean up an export that was never created", () => {
     const destination = join(scratch, "never");
     expect(() => removeExport(root, destination)).not.toThrow();
+  });
+});
+
+describe("release output", () => {
+  it("replace the output with one complete staging directory", () => {
+    const output = join(scratch, "dist-release");
+    for (const content of ["first", "second"]) {
+      const staging = join(scratch, `staging-${content}`);
+      mkdirSync(staging);
+      writeFileSync(join(staging, "main.js"), content);
+      publishOutput(staging, output);
+      expect(readFileSync(join(output, "main.js"), "utf8")).toBe(content);
+      expect(existsSync(staging)).toBe(false);
+    }
+  });
+
+  it("fail, and leave the other release's output, when another release put its output there first", () => {
+    const output = join(scratch, "dist-release");
+    const staging = join(scratch, "staging");
+    mkdirSync(staging);
+    writeFileSync(join(staging, "main.js"), "this release");
+    const raced = (from, to) => {
+      // Another release finishes between this one's removal and rename.
+      mkdirSync(to);
+      writeFileSync(join(to, "main.js"), "other release");
+      renameSync(from, to);
+    };
+    expect(() => publishOutput(staging, output, raced)).toThrow(/another release build replaced/);
+    expect(readFileSync(join(output, "main.js"), "utf8")).toBe("other release");
+    expect(existsSync(staging)).toBe(false);
   });
 });
