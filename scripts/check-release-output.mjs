@@ -1,5 +1,6 @@
-// Checks a release output away from the checkout: copies it to a new
-// temporary directory, under a package.json that declares CommonJS, then runs
+// Checks a release output away from the checkout: it holds exactly the files
+// its record names, each as the release build made it; then it copies it to a
+// new temporary directory, under a package.json that declares CommonJS, then runs
 // `--help` and `--version`, checks that it holds exactly the modules the
 // release's commits compile to and loads each of them, opens the addon and
 // loads the device module there.
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { filesUnder } from "./build-bundle.mjs";
+import { recordedProblems, RELEASE_FILES, releaseRecord } from "./release-build.mjs";
 import { compiledModules, moduleDifference } from "./compiled-modules.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -22,6 +24,13 @@ const fail = (message) => {
 };
 
 const output = resolve(process.argv[2] ?? "dist-release");
+const recorded = releaseRecord(output);
+if (recorded === null) fail("the output has no record of the files the release build made");
+const problems = recordedProblems(output, recorded);
+const unrecorded = filesUnder(output).filter((path) => path !== RELEASE_FILES && !recorded.some((file) => file.path === path));
+if (problems.length > 0 || unrecorded.length > 0) {
+  fail(`the output is not as the release build made it: ${[...problems, ...unrecorded.map((path) => `${path} is not one of its files`)].join("; ")}`);
+}
 // The real path, so the comparison below holds where the temporary directory is a symlink (macOS /var).
 const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "urx-release-output-")));
 try {
