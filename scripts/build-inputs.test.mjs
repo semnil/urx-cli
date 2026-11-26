@@ -8,6 +8,7 @@ const actual = () => ({
   manifest: JSON.parse(read("build-inputs.json")),
   nodeVersionFile: read(".node-version"),
   packageJson: JSON.parse(read("package.json")),
+  rustToolchainFile: read("rust-toolchain.toml"),
 });
 
 describe("build inputs", () => {
@@ -44,6 +45,8 @@ describe("build inputs", () => {
       [(f) => (f.manifest.node.archives["linux-x64"] = { file: "x", sha256: "0".repeat(64) }), "node.archives lists"],
       [(f) => (f.manifest.node.archives["darwin-arm64"].file = "node-v26.13.0-darwin-x64.tar.gz"), "darwin-arm64.file"],
       [(f) => (f.manifest.node.archives["win-x64"].sha256 = "ABC"), "win-x64.sha256"],
+      [(f) => (f.rustToolchainFile = f.rustToolchainFile.replace(/channel = "[^"]*"/, 'channel = "1.0.0"')), "rust-toolchain.toml"],
+      [(f) => (f.rustToolchainFile = "[other]\nchannel = \"1.96.0\"\n"), "rust-toolchain.toml"],
     ];
     for (const [mutate, fragment] of cases) {
       const files = actual();
@@ -59,6 +62,7 @@ describe("build inputs", () => {
       (f) => (f.manifest.node.version = "26"),
       (f) => (f.manifest.pnpm.version = "latest"),
       (f) => (f.manifest.pnpm.sha512 = "00"),
+      (f) => (f.manifest.rust.channel = "stable"),
     ]) {
       const files = actual();
       mutate(files);

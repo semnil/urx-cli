@@ -1,0 +1,21 @@
+[package]
+name = "urx-cli-native"
+# Generated from the root package.json version by scripts/version.mjs.
+version = "0.1.0"
+description = "Node-API addon of the urx command over the urx-device transport"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Node-API 8 with the managed Tokio runtime for Promise-returning methods,
+# and nothing else (K38).
+napi = { version = "=3.16.1", default-features = false, features = ["napi8", "dyn-symbols", "tokio_rt", "tokio_sync"] }
+napi-derive = "=3.7.0"
+urx-device-transport = { path = "../vendor/urx-device/crates/transport" }
+
+[build-dependencies]
+napi-build = "=2.6.0"

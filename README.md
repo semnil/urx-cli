@@ -11,27 +11,32 @@ The `urx` command: operate a connected YAMAHA URX22, URX44 or URX44V and inspect
 | Path | Contents |
 | --- | --- |
 | `src` | The `urx` command: arguments, terminal and JSON output, exit codes and process lifecycle |
+| `native` | The Node-API addon over the urx-device transport (Rust, napi-rs) |
 | `vendor/urx-device` | The shared library, at the commit this repository adopts |
-| `scripts` | Repository tooling: `build-inputs.mjs` checks the build inputs, `build-info.mjs` embeds the versions and commits into the build |
-| `build-inputs.json` | The exact Node and pnpm versions and the Node archive hashes a build uses |
+| `scripts` | Repository tooling: `build-inputs.mjs` checks the build inputs, `build-info.mjs` embeds the versions and commits into the build, `build-native.mjs` builds the addon, `version.mjs` keeps the copies of the CLI version in step |
+| `build-inputs.json` | The exact Node, pnpm and Rust versions and the Node archive hashes a build uses |
 
 ## Building and testing
 
-Requirements: Node.js 26 (`.node-version`) and pnpm (`packageManager` in `package.json`). Clone with the submodule:
+Requirements: Node.js 26 (`.node-version`), pnpm (`packageManager` in `package.json`) and rustup, which installs the Rust toolchain pinned in `rust-toolchain.toml`. Clone with the submodule:
 
 ```sh
 git clone --recurse-submodules https://github.com/semnil/urx-cli.git
 cd urx-cli
 pnpm install --frozen-lockfile
 pnpm build-inputs:check
+pnpm version:check
 pnpm typecheck
 pnpm build
+pnpm build:native
 pnpm test
 ```
 
+`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`.
+
 ## Versioning
 
-The root `package.json` `version` is the CLI's version. It is independent of the urx-device version, and every other copy of the CLI version is generated from it.
+The root `package.json` `version` is the CLI's version. It is independent of the urx-device version. `pnpm version:write` regenerates the addon crate's version and its `Cargo.lock` entry from it, and `pnpm version:check` fails when they differ.
 
 ## Contributing
 

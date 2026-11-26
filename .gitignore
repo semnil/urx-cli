@@ -3,6 +3,7 @@
 # shared install gets committed from a git worktree.
 node_modules
 dist
+dist-release*
 target
 coverage
 # The maintainer's private design record and the local agent notes that point to

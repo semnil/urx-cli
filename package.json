@@ -13,11 +13,19 @@
     "build": "tsc -p tsconfig.json && node scripts/build-info.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "build-inputs:check": "node scripts/build-inputs.mjs"
+    "build-inputs:check": "node scripts/build-inputs.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "version:write": "node scripts/version.mjs --write",
+    "build:release": "node scripts/release-build.mjs"
   },
   "devDependencies": {
+    "@napi-rs/cli": "3.10.12",
     "@types/node": "26.6.7",
     "typescript": "7.0.2",
     "vitest": "5.1.1"
+  },
+  "napi": {
+    "binaryName": "urx-native"
   }
 }
