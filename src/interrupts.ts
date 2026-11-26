@@ -40,15 +40,17 @@ export const ABANDONED: unique symbol = Symbol("abandoned");
  */
 export class CommandInterruption {
   #interrupted = false;
+  #abandoned = false;
   readonly #handlers: (() => void)[] = [];
   #abandon: () => void = () => {};
   /** Settles at the second interruption: the command stops waiting for the device. */
-  readonly #abandoned = new Promise<typeof ABANDONED>((resolve) => (this.#abandon = () => resolve(ABANDONED)));
+  readonly #stopWaiting = new Promise<typeof ABANDONED>((resolve) => (this.#abandon = () => resolve(ABANDONED)));
   readonly #unsubscribe: () => void;
 
   constructor(interrupts: Interrupts) {
     this.#unsubscribe = interrupts.subscribe((count) => {
       if (count > 1) {
+        this.#abandoned = true;
         this.#abandon();
         return;
       }
@@ -61,6 +63,11 @@ export class CommandInterruption {
     return this.#interrupted;
   }
 
+  /** Whether a second interruption has stopped every wait: nothing more is awaited or written. */
+  get abandoned(): boolean {
+    return this.#abandoned;
+  }
+
   /** Calls `handler` at the first interruption, or now if it has arrived already. */
   onInterrupt(handler: () => void): void {
     this.#handlers.push(handler);
@@ -69,7 +76,7 @@ export class CommandInterruption {
 
   /** `work`, or ABANDONED once a second interruption stops the wait for it. */
   race<T>(work: Promise<T>): Promise<T | typeof ABANDONED> {
-    return Promise.race([work, this.#abandoned]);
+    return this.#abandoned ? Promise.resolve(ABANDONED) : Promise.race([work, this.#stopWaiting]);
   }
 
   /** Stops listening; the command's result has been written. */

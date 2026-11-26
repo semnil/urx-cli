@@ -54,7 +54,7 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
         const interruption = new CommandInterruption(device.interrupts);
         try {
           const diagnostics = new Diagnostics(
-            { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now },
+            { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now, interruption },
             path,
           );
           const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./native/addon.js")]));

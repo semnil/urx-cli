@@ -6,6 +6,7 @@
 import type { BuildInfo } from "./build-info.js";
 import { BRIDGE_API_EXPECTED } from "./bridge.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
+import { ABANDONED, type CommandInterruption } from "./interrupts.js";
 import { writeWithDeadline, type OutputFailure, type OutputStream } from "./output.js";
 import type { CauseCode, ResultError } from "./result.js";
 
@@ -18,6 +19,8 @@ export interface DiagnosticsOptions {
   readonly build: BuildInfo;
   readonly runtime: Runtime;
   readonly now: () => number;
+  /** The command's Ctrl+C: a second one stops a write that has not completed, and every later one. */
+  readonly interruption?: Pick<CommandInterruption, "race" | "abandoned">;
 }
 
 export class Diagnostics {
@@ -63,7 +66,11 @@ export class Diagnostics {
   }
 
   async #write(text: string): Promise<void> {
-    if (this.#failure !== null) return;
-    this.#failure = await writeWithDeadline(this.#options.stderr, text);
+    const { interruption } = this.#options;
+    if (this.#failure !== null || interruption?.abandoned === true) return;
+    const write = writeWithDeadline(this.#options.stderr, text);
+    const outcome = interruption === undefined ? await write : await interruption.race(write);
+    // A write given up at the second Ctrl+C is neither a success nor a failure seen.
+    if (outcome !== ABANDONED) this.#failure = outcome;
   }
 }

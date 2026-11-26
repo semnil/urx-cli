@@ -8,7 +8,7 @@ import { ABANDONED, type CommandInterruption } from "./interrupts.js";
 import { addonFailure, failure, lifecycleFailure } from "./messages.js";
 import type { AddonCheck } from "./native/addon.js";
 import { discoverDevices } from "./native/device.js";
-import { stdoutFailureLine, writeWithDeadline, type OutputStream } from "./output.js";
+import { stdoutFailureLine, writeWithDeadline, type OutputFailure, type OutputStream } from "./output.js";
 import { baseExitCode, EXIT, jsonLine, type CauseCode, type ResultError } from "./result.js";
 
 const COMMAND = "device list";
@@ -53,6 +53,11 @@ class Stops {
     if (this.#first === null) this.#first = error;
     else this.later.push(error);
   }
+
+  /** Every stop, in the order found. */
+  all(): ResultError[] {
+    return this.#first === null ? [] : [this.#first, ...this.later];
+  }
 }
 
 /** Runs `urx device list` and returns its exit code. */
@@ -96,28 +101,31 @@ export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<nu
   }
 
   await note("result output", "started");
-  // The result is decided here; anything after it is reported beside it.
+  // A second Ctrl+C stops every wait, and nothing more is written (I3).
+  if (interruption.abandoned) return EXIT.interrupted;
+  // The result is decided here. Stops found later are still collected and reported after it.
   const error = stops.first();
   const listed = error === null ? devices : null;
   const record = { type: "result" as const, command: COMMAND, data: { mode: "execute", device: null, target: null, devices: listed }, error };
-  let exit = error === null ? EXIT.success : baseExitCode(error.code);
-  // What was found after the first stop; a Ctrl+C after this point only sets the exit code.
-  const later = [...stops.later];
   // JSON carries a failure in its record; human-readable output reports it on standard error.
-  const written = json ? await writeWithDeadline(io.stdout, jsonLine(record)) : listed !== null ? await writeWithDeadline(io.stdout, renderDevices(listed)) : null;
+  const text = json ? jsonLine(record) : listed !== null ? renderDevices(listed) : null;
+  const written = text === null ? null : await interruption.race(writeWithDeadline(io.stdout, text));
+  if (written === ABANDONED) return EXIT.interrupted;
+  // A failed write of the result stops the command where the CLI detects it, after any earlier stop.
+  const stdoutFailure: { readonly failure: OutputFailure; readonly error: ResultError } | null = written === null ? null : { failure: written, error: failure(written) };
+  if (stdoutFailure !== null) stops.stop(stdoutFailure.error);
   if (!json && error !== null) await diagnostics.line(`urx: ${error.message}\n`);
-  if (written !== null) {
-    if (error === null) {
-      await diagnostics.line(stdoutFailureLine(written));
-      exit = EXIT.failure;
-    } else {
-      later.push(failure(written));
-    }
+  // Every stop besides the recorded one, once each, in the order found (E3). After a result
+  // without an error, the first of them is the command's own failure.
+  for (const [index, stop] of stops.all().filter((stop) => stop !== error).entries()) {
+    if (error === null && index === 0) await diagnostics.line(stop === stdoutFailure?.error ? stdoutFailureLine(stdoutFailure.failure) : `urx: ${stop.message}\n`);
+    else await diagnostics.additional(stop);
   }
-  for (const additional of later) await diagnostics.additional(additional);
-  await diagnostics.stage("result output", written === null ? "finished" : "failed", written ?? undefined);
-  // A diagnostic that could not be written fails a command that otherwise succeeded (U5).
-  if (exit === EXIT.success && diagnostics.failure !== null) exit = EXIT.failure;
+  await diagnostics.stage("result output", stdoutFailure === null ? "finished" : "failed", stdoutFailure?.failure);
   // Ctrl+C during the command takes precedence (E1), even once its result is out.
-  return interruption.interrupted ? EXIT.interrupted : exit;
+  if (interruption.interrupted || interruption.abandoned) return EXIT.interrupted;
+  const first = stops.first();
+  if (first !== null) return baseExitCode(first.code);
+  // A diagnostic that could not be written fails a command that otherwise succeeded (U5).
+  return diagnostics.failure === null ? EXIT.success : EXIT.failure;
 }
