@@ -224,8 +224,10 @@ fn the_runtime_holds_the_gate_while_it_runs_and_maintenance_can_start_once_it_ha
         wait_for(&done, Duration::from_secs(10)),
         "the runtime did not finish"
     );
+    // On Windows this is the killed launcher's status, already reaped.
+    let status = launcher.wait().unwrap();
     if cfg!(unix) {
-        assert_eq!(launcher.wait().unwrap().code(), Some(0));
+        assert_eq!(status.code(), Some(0));
     }
     // Once the last user has exited, maintenance can start.
     let started = Instant::now();
