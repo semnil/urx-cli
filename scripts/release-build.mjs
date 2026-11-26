@@ -18,6 +18,8 @@ import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+/** The common TypeScript package inside the export. */
+const CONTROL_PATH = join(COMMON_PATH, "packages", "control");
 
 function git(directory, args, extra = {}) {
   return execFileSync("git", ["-C", directory, ...args], { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "pipe"], ...extra });
@@ -51,6 +53,18 @@ export function exportRelease(root, destination) {
     COMMON_PATH,
   ]);
   return { appCommit, commonCommit };
+}
+
+/**
+ * Copies the compiled common package from the export into the output's own
+ * node_modules, as real files: the output then loads the urx-device code of
+ * this release wherever it is placed, without the checkout or a symlink.
+ */
+export function copyCommonPackage(source, output) {
+  const from = join(source, CONTROL_PATH);
+  const to = join(output, "node_modules", "@urx", "device-control");
+  cpSync(join(from, "package.json"), join(to, "package.json"));
+  cpSync(join(from, "dist"), join(to, "dist"), { recursive: true, dereference: true });
 }
 
 /**
@@ -152,6 +166,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const staging = mkdtempSync(join(root, "dist-release-"));
     rmSync(staging, { recursive: true, force: true });
     cpSync(join(source, "dist"), staging, { recursive: true });
+    copyCommonPackage(source, staging);
     publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
