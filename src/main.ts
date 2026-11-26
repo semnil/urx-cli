@@ -1,5 +1,6 @@
 // Entry point of the `urx` command. Help and version need only this module's
-// static imports: no addon, no connection and no file reads (H5).
+// static imports: no addon, no connection and no file reads (H5). A device
+// command's module, and through it the addon, is loaded only when it runs.
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -8,16 +9,28 @@ import { BUILD_INFO, type BuildInfo } from "./build-info.js";
 import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
-import { processOutput, writeWithDeadline, type OutputStream } from "./output.js";
+import { Diagnostics } from "./diagnostics.js";
+import { processInterrupts, type Interrupts } from "./interrupts.js";
+import type { AddonCheck } from "./native/addon.js";
+import { processOutput, stdoutFailureLine, writeWithDeadline, type OutputStream } from "./output.js";
+import { EXIT } from "./result.js";
 
-/** E1 exit codes used here. */
-export const EXIT = Object.freeze({ success: 0, failure: 1, invalidInput: 2 });
+/** What a device command needs beyond the streams; tests supply their own. */
+export interface DeviceIo {
+  /** Loads the addon and checks its identity; the default loads dist/native/urx-native.node. */
+  readonly addon?: () => AddonCheck;
+  readonly interrupts: Interrupts;
+  readonly now: () => number;
+  /** A local peer's list port, for tests; Device Center's own when absent. */
+  readonly listPort?: number;
+}
 
 export interface Io {
   readonly stdout: OutputStream;
   readonly stderr: OutputStream;
   readonly build: BuildInfo;
   readonly runtime: Runtime;
+  readonly device?: DeviceIo;
 }
 
 /** Runs one one-shot invocation and returns its exit code. */
@@ -33,9 +46,21 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
     case "error":
       // An input error the user never sees is an output failure (exit 1), not exit 2.
       return (await writeWithDeadline(io.stderr, `urx: ${parsed.message}\n`)) === null ? EXIT.invalidInput : EXIT.failure;
-    case "command":
-      await writeWithDeadline(io.stderr, `urx: \`urx ${parsed.command.path.join(" ")}\` is not available in this build.\n`);
+    case "command": {
+      const path = parsed.command.path.join(" ");
+      if (path === "device list") {
+        const device = io.device ?? { interrupts: processInterrupts(), now: () => performance.now() };
+        const diagnostics = new Diagnostics(
+          { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now },
+          path,
+        );
+        const [{ runDeviceList }, { expectedIdentity, openAddon }] = await Promise.all([import("./device-list.js"), import("./native/addon.js")]);
+        const addon = device.addon ?? (() => openAddon(expectedIdentity(io.build)));
+        return runDeviceList({ stdout: io.stdout, diagnostics, addon, interrupts: device.interrupts, listPort: device.listPort }, parsed.arguments.has("json"));
+      }
+      await writeWithDeadline(io.stderr, `urx: \`urx ${path}\` is not available in this build.\n`);
       return EXIT.failure;
+    }
   }
 }
 
@@ -46,8 +71,7 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
 async function emit(io: Io, text: string): Promise<number> {
   const failure = await writeWithDeadline(io.stdout, text);
   if (failure === null) return EXIT.success;
-  const reason = failure === "output_timeout" ? "did not accept the output within 5 seconds" : "could not be written";
-  await writeWithDeadline(io.stderr, `urx: standard output ${reason}.\n`);
+  await writeWithDeadline(io.stderr, stdoutFailureLine(failure));
   return EXIT.failure;
 }
 

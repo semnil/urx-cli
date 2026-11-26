@@ -65,8 +65,8 @@ describe("one-shot invocation", () => {
 
   it("exit 1 for a command this build does not run, without stdout output", async () => {
     const run = io();
-    expect(await main(["device", "list"], run.value)).toBe(1);
+    expect(await main(["run", "commands.txt"], run.value)).toBe(1);
     expect(run.stdout()).toBe("");
-    expect(run.stderr()).toBe("urx: `urx device list` is not available in this build.\n");
+    expect(run.stderr()).toBe("urx: `urx run` is not available in this build.\n");
   });
 });
