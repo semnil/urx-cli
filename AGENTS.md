@@ -7,8 +7,9 @@ The `urx` command line tool for the YAMAHA URX22 / URX44 / URX44V: one-shot read
 ## Structure
 
 - `src/` — the command: argument grammar, help and version, terminal and JSON output, exit codes, process lifecycle. `src/cli/commands.ts` is the command-binding table that the parser and help both read
-- `native/` — the Node-API addon (napi-rs) over the urx-device transport crate. `src/native/addon.ts` loads it and checks its build identity before any device access
-- `vendor/urx-device/` — the shared library at the adopted commit. Never edited here
+- `native/` — the Node-API addon (napi-rs) over the urx-device transport crate. `src/native/addon.ts` loads it and checks its build identity before any device access; `src/native/device.ts` discovers, selects, opens and closes devices through it, validating every record with urx-device's validators
+- `test/device-center-peer.ts` — a controlled local Device Center peer for the addon's integration tests (K30). It supplies protocol replies and faults, not a model of a unit
+- `vendor/urx-device/` — the shared library at the adopted commit. Never edited here. Its control package is a pnpm workspace member (`@urx/device-control`), compiled by `pnpm build:common`; its transport crate is a path dependency kept out of the Cargo workspace, so its own checks stay in urx-device
 - `scripts/` — repository tooling: `build-inputs.mjs` (checks the build inputs), `build-info.mjs` (writes `dist/build-info.js`, the versions and commits that `urx --version` shows), `build-native.mjs` (builds `dist/native/urx-native.node` with the same urx-device identity), `source-info.mjs` (how both read a checkout's versions and commits), `release-source.mjs` (the release source check), `release-build.mjs` (the release build) and `version.mjs` (the addon crate's copy of the CLI version)
 - `build-inputs.json` — the exact Node, pnpm and Rust versions and Node archive hashes a build uses, the one record of them
 - `.github/required-checks.json` — the status checks the `main` ruleset requires, the only copy outside GitHub's settings
@@ -20,12 +21,13 @@ git submodule update --init
 pnpm install --frozen-lockfile
 pnpm build-inputs:check   # build-inputs.json agrees with .node-version, package.json and rust-toolchain.toml
 pnpm version:check        # the addon crate's version and Cargo.lock entry match package.json
-pnpm typecheck            # source config and test config
+pnpm typecheck            # the control package, then the source and test configs
 pnpm build                # tsc emit of src/ into dist/, then dist/build-info.js from the checkout
 pnpm build:native         # the addon into dist/native/; pnpm test loads it
 pnpm test                 # vitest: src/**/*.test.ts, test/**/*.test.ts and scripts/**/*.test.mjs
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
 A local verification names every one of these commands; a command left out is named as left out in the report.
@@ -45,7 +47,7 @@ A local verification names every one of these commands; a command left out is na
 ## Versioning
 
 - The root `package.json` `version` is the CLI's version and its only hand-edited copy; it is independent of the urx-device version. `pnpm version:write` regenerates `native/Cargo.toml` and its `Cargo.lock` entry, and CI fails on drift
-- Build tools are pinned: Node in `.node-version`, pnpm in `packageManager` and Rust in `rust-toolchain.toml`, all recorded in `build-inputs.json`. The napi crates are pinned with `=` and the napi CLI exactly. No step resolves a floating `latest`
+- Build tools are pinned: Node in `.node-version`, pnpm in `packageManager` and Rust in `rust-toolchain.toml`, all recorded in `build-inputs.json`. The napi crates are pinned with `=` and the napi CLI exactly; napi and napi-derive move together, since the code napi-derive generates calls into napi. No step resolves a floating `latest`
 - The addon and the JavaScript are two halves of one build. The addon reports its bridge revision and the urx-device version and commit it was built from; the CLI refuses device access unless they match its own (`src/bridge.ts`, `dist/build-info.js`), and a side that cannot name its commit or version does not match
 - `pnpm build:release` builds both halves from the recorded commits, never from the working tree. It exports HEAD, with `vendor/urx-device` at the commit the gitlink pins, into a temporary worktree, builds there with `--release` and copies the result to `dist-release/`. With `--release`, `scripts/build-info.mjs` and `scripts/build-native.mjs` refuse a checkout whose `vendor/urx-device` is not at the pinned gitlink, whose CLI or urx-device has staged or unstaged changes to tracked files, or whose versions are unknown. A development build embeds whatever it was built from
 

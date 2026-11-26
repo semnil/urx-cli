@@ -46,6 +46,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         timeout-minutes: 10
+      - run: cargo test --workspace --locked
+        timeout-minutes: 10
       - run: pnpm build:native
         timeout-minutes: 10
       - run: pnpm test
