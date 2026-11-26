@@ -21,7 +21,8 @@
     "version:check": "node scripts/version.mjs --check",
     "version:write": "node scripts/version.mjs --write",
     "build:release": "node scripts/release-build.mjs",
-    "build:common": "tsc -p vendor/urx-device/packages/control/tsconfig.json"
+    "build:common": "tsc -p vendor/urx-device/packages/control/tsconfig.json",
+    "build:bundle": "node scripts/build-bundle.mjs"
   },
   "dependencies": {
     "@urx/device-control": "workspace:*"

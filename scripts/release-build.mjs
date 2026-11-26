@@ -170,11 +170,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);
+    // The installed command, from the same export and target directory (K22).
+    execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher"], {
+      cwd: source,
+      stdio: "inherit",
+      env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+    });
     const output = join(root, "dist-release");
     // Copied next to the output first, so the final rename stays on one file system.
     const staging = mkdtempSync(join(root, "dist-release-"));
     rmSync(staging, { recursive: true, force: true });
     cpSync(join(source, "dist"), staging, { recursive: true });
+    const launcher = process.platform === "win32" ? "urx.exe" : "urx";
+    cpSync(join(scratch, "target", "release", launcher), join(staging, "launcher", launcher));
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
     publishOutput(staging, output);
