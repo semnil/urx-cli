@@ -9,14 +9,15 @@ import {
   type DiscoveredDevice,
   type LifecycleOutcome,
 } from "@urx/device-control/operations";
+import type { NativeRequests } from "./transport.js";
 
 /** The addon's control object (K37): created before discovery, cancelled by the CLI. */
 export interface NativeControl {
   cancel(): void;
 }
 
-/** The addon's connection object (K31). */
-export interface NativeConnection {
+/** The addon's connection object (K31): its lifecycle and its requests. */
+export interface NativeConnection extends NativeRequests {
   readonly firmware: string | null;
   close(): Promise<unknown>;
 }
