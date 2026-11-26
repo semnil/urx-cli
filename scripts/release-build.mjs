@@ -10,7 +10,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,15 @@ export function copyCommonPackage(source, output) {
   const to = join(output, "node_modules", "@urx", "device-control");
   cpSync(join(from, "package.json"), join(to, "package.json"));
   cpSync(join(from, "dist"), join(to, "dist"), { recursive: true, dereference: true });
+}
+
+/**
+ * Gives the output a package.json of its own that says its `.js` files are ES
+ * modules, so a `"type": "commonjs"` in a directory above it cannot change how
+ * Node reads them.
+ */
+export function markModuleFormat(output) {
+  writeFileSync(join(output, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
 }
 
 /**
@@ -167,6 +176,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     rmSync(staging, { recursive: true, force: true });
     cpSync(join(source, "dist"), staging, { recursive: true });
     copyCommonPackage(source, staging);
+    markModuleFormat(staging);
     publishOutput(staging, output);
     process.stderr.write(`release build written to ${output}\n`);
   } finally {

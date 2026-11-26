@@ -1,10 +1,12 @@
 // Checks a release output away from the checkout: copies it to a new
-// temporary directory, then runs `--version`, opens the addon and loads the
-// device module there. Reading anything from outside the copy (the
-// checkout's vendor directory or node_modules) makes the check fail.
+// temporary directory, under a package.json that declares CommonJS, then runs
+// `--help` and `--version`, opens the addon and loads the device module there.
+// Reading anything from outside the copy (the checkout's vendor directory or
+// node_modules), or depending on the module format of a directory above it,
+// makes the check fail.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,10 +15,13 @@ const output = resolve(process.argv[2] ?? "dist-release");
 // The real path, so the comparison below holds where the temporary directory is a symlink (macOS /var).
 const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "urx-release-output-")));
 try {
-  const copy = join(scratch, "urx");
+  // A project above the output that declares its own `.js` files CommonJS.
+  writeFileSync(join(scratch, "package.json"), `${JSON.stringify({ type: "commonjs" })}\n`);
+  const copy = join(scratch, "tools", "urx");
   cpSync(output, copy, { recursive: true });
   const url = (path) => JSON.stringify(pathToFileURL(join(copy, path)).href);
   const node = (args) => execFileSync(process.execPath, args, { cwd: scratch, encoding: "utf8" });
+  node([join(copy, "main.js"), "--help"]);
   process.stdout.write(node([join(copy, "main.js"), "--version"]));
   node([
     "--input-type=module",
