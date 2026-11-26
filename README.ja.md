@@ -21,6 +21,7 @@
 
 ```sh
 git clone --recurse-submodules https://github.com/semnil/urx-cli.git
+cd urx-cli
 pnpm install --frozen-lockfile
 pnpm build-inputs:check
 pnpm typecheck
