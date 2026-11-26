@@ -58,6 +58,21 @@ export function lifecycleFailure(record: LifecycleFailure): ResultError {
   return { code: record.code, message: `${BASE[record.code]} ${DURING[record.phase]}.` };
 }
 
+/** A failed write of standard output, the stream that carries the result. */
+export const stdoutFailure = (code: "output_error" | "output_timeout"): ResultError => ({
+  code,
+  message: code === "output_timeout" ? "Standard output did not accept the output within 5 seconds." : "Standard output could not be written.",
+});
+
+/** A failed write of standard error, the stream that carries diagnostics. */
+export const stderrFailure = (code: "output_error" | "output_timeout"): ResultError => ({
+  code,
+  message: code === "output_timeout" ? "Standard error did not accept the output within 5 seconds." : "Standard error could not be written.",
+});
+
+/** The human-readable line of a device command's failure: its cause code, then its explanation. */
+export const failureLine = (error: ResultError): string => `urx: ${error.code}: ${error.message}\n`;
+
 /** Why the native addon cannot be used: device access is refused before it starts. */
 export function addonFailure(problem: AddonProblem): ResultError {
   const message = {

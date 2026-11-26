@@ -5,10 +5,10 @@ import type { DiscoveredDevice } from "@urx/device-control/operations";
 import type { Diagnostics, Stage } from "./diagnostics.js";
 import { escapeForDisplay } from "./escape.js";
 import { ABANDONED, type CommandInterruption } from "./interrupts.js";
-import { addonFailure, failure, lifecycleFailure } from "./messages.js";
+import { addonFailure, failure, failureLine, lifecycleFailure, stderrFailure, stdoutFailure as stdoutFailureOf } from "./messages.js";
 import type { AddonCheck } from "./native/addon.js";
 import { discoverDevices } from "./native/device.js";
-import { stdoutFailureLine, writeWithDeadline, type OutputFailure, type OutputStream } from "./output.js";
+import { writeWithDeadline, type OutputFailure, type OutputStream } from "./output.js";
 import { baseExitCode, EXIT, jsonLine, type CauseCode, type ResultError } from "./result.js";
 
 const COMMAND = "device list";
@@ -75,7 +75,7 @@ export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<nu
     await diagnostics.stage(stage, event, cause);
     if (diagnostics.failure !== null && !errorOutputNoted) {
       errorOutputNoted = true;
-      stops.stop(failure(diagnostics.failure));
+      stops.stop(stderrFailure(diagnostics.failure));
     }
   };
 
@@ -117,14 +117,15 @@ export async function runDeviceList(io: DeviceListIo, json: boolean): Promise<nu
   const written = text === null ? null : await interruption.race(writeWithDeadline(io.stdout, text));
   if (written === ABANDONED) return EXIT.interrupted;
   // A failed write of the result stops the command where the CLI detects it, after any earlier stop.
-  const stdoutFailure: { readonly failure: OutputFailure; readonly error: ResultError } | null = written === null ? null : { failure: written, error: failure(written) };
+  const stdoutFailure: { readonly failure: OutputFailure; readonly error: ResultError } | null = written === null ? null : { failure: written, error: stdoutFailureOf(written) };
   if (stdoutFailure !== null) stops.stop(stdoutFailure.error);
-  if (!json && error !== null) await diagnostics.line(`urx: ${error.message}\n`);
+  // Every failure line carries its cause code, so none is reported without it.
+  if (!json && error !== null) await diagnostics.line(failureLine(error));
   // Every stop besides the recorded one, once each, in the order found (E3). After a result
   // without an error, the first of them is the command's own failure. No stop is added while
   // these lines are written.
   for (const [index, stop] of stops.all().filter((stop) => stop !== error).entries()) {
-    if (error === null && index === 0) await diagnostics.line(stop === stdoutFailure?.error ? stdoutFailureLine(stdoutFailure.failure) : `urx: ${stop.message}\n`);
+    if (error === null && index === 0) await diagnostics.line(failureLine(stop));
     else await diagnostics.additional(stop);
   }
   await diagnostics.stage("result output", stdoutFailure === null ? "finished" : "failed", stdoutFailure?.failure);

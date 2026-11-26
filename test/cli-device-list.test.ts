@@ -77,6 +77,6 @@ describe("urx device list through the addon", () => {
     const result = await urx(["device", "list"], listPort);
     expect(result.exit).toBe(3);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("urx: A connection could not be opened during discovery.\n");
+    expect(result.stderr).toBe("urx: connection_failed: A connection could not be opened during discovery.\n");
   });
 });

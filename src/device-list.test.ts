@@ -127,7 +127,7 @@ describe("urx device list (D14)", () => {
       const human = await run(addon(() => Promise.resolve(record)), false);
       expect(human.exit, code).toBe(exit);
       expect(human.stdout).toBe("");
-      expect(human.stderr).toMatch(/^urx: [^\n]+\.\n$/);
+      expect(human.stderr).toMatch(new RegExp(`^urx: ${code}: [^\\n]+\\.\\n$`));
       const json = await run(addon(() => Promise.resolve(record)), true);
       expect(json.exit).toBe(exit);
       expect(json.stderr).toBe("");
@@ -186,7 +186,7 @@ describe("urx device list (D14)", () => {
   it("exit 1 when stdout fails after a successful list, saying so on stderr", async () => {
     const result = await run(addon(listed([])), false, { stdoutFailure: new Error("EPIPE") });
     expect(result.exit).toBe(1);
-    expect(result.stderr).toBe("urx: standard output could not be written.\n");
+    expect(result.stderr).toBe("urx: output_error: Standard output could not be written.\n");
   });
 
   it("show stages with --verbose, without device IDs, after the build context", async () => {
@@ -217,7 +217,7 @@ describe("urx device list when output fails or Ctrl+C overlaps (U5, I1, E3)", ()
       const result = await run(discovery.check, json, { verbose: true, stderrFailure: new Error("EPIPE") });
       expect(discovery.calls()).toBe(0);
       expect(result.exit).toBe(1);
-      if (json) expect(JSON.parse(result.stdout).error).toEqual({ code: "output_error", message: "The output could not be written." });
+      if (json) expect(JSON.parse(result.stdout).error).toEqual({ code: "output_error", message: "Standard error could not be written." });
       else expect(result.stdout).toBe("");
     }
   });
@@ -288,7 +288,7 @@ describe("urx device list when output fails or Ctrl+C overlaps (U5, I1, E3)", ()
   it("report a failed write of a failure result with its cause code, keeping the exit code", async () => {
     const result = await run(addon(() => Promise.resolve(record("connection_failed"))), true, { stdoutFailure: new Error("EPIPE") });
     expect(result.exit).toBe(3);
-    expect(result.stderr).toBe("urx: also: output_error: The output could not be written.\n");
+    expect(result.stderr).toBe("urx: also: output_error: Standard output could not be written.\n");
   });
 });
 
@@ -338,7 +338,7 @@ describe("urx device list after its result is decided (I3, E3)", () => {
     for (const json of [true, false]) {
       const interrupt = interrupts();
       const sending = (chunk: string) => (chunk.startsWith("urx: ") ? null : (interrupt.send(), null));
-      const options = json ? { stdoutFailure: sending, interrupt } : { stderrFailure: (chunk: string) => (chunk.startsWith("urx: A connection") ? (interrupt.send(), null) : null), interrupt };
+      const options = json ? { stdoutFailure: sending, interrupt } : { stderrFailure: (chunk: string) => (chunk.startsWith("urx: connection_failed:") ? (interrupt.send(), null) : null), interrupt };
       const result = await run(addon(() => Promise.resolve(record("connection_failed"))), json, options);
       expect(result.exit).toBe(130);
       expect(result.stderr).not.toContain("interrupted");
@@ -357,12 +357,12 @@ describe("urx device list after its result is decided (I3, E3)", () => {
       const failing = () => (interrupt.send(), new Error("EPIPE"));
       const result = await run(addon(listed([])), json, { stdoutFailure: failing, interrupt });
       expect(result.exit).toBe(130);
-      expect(result.stderr).toBe("urx: standard output could not be written.\n");
+      expect(result.stderr).toBe("urx: output_error: Standard output could not be written.\n");
     }
     const interrupt = interrupts();
     const failing = () => (interrupt.send(), new Error("EPIPE"));
     const failed = await run(addon(() => Promise.resolve(record("connection_failed"))), true, { stdoutFailure: failing, interrupt });
     expect(failed.exit).toBe(130);
-    expect(failed.stderr).toBe("urx: also: output_error: The output could not be written.\n");
+    expect(failed.stderr).toBe("urx: also: output_error: Standard output could not be written.\n");
   });
 });
