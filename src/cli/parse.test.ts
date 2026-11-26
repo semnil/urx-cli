@@ -36,6 +36,12 @@ describe("help and version invocation (H4, H5)", () => {
     }
   });
 
+  it("run nothing for an empty console or command-file line", () => {
+    expect(parse([], "console")).toEqual({ kind: "empty" });
+    expect(parse([], "command-file")).toEqual({ kind: "empty" });
+    for (const mode of MODES) expect(kind(parse([""], mode)), mode).toBe("error");
+  });
+
   it("accept help and version in the console, and neither in a command file", () => {
     expect(parse(["--version"], "console")).toEqual({ kind: "version" });
     expect(parse(["device", "list", "--help"], "console")).toEqual({ kind: "help", path: ["device", "list"] });
@@ -63,6 +69,16 @@ describe("command path and argument placement (C10)", () => {
     for (const line of ["device", "nothing", "device nothing", "devices list", "Device list"]) {
       expect(kind(shell(line)), line).toBe("error");
     }
+  });
+
+  it("match command words token by token, not a token that contains spaces", () => {
+    for (const mode of MODES) {
+      for (const tokens of [["device list"], ["device list", "--help"], ["device current"], ["device use", "--id", "x"], ["device", "list --json"], ["run f"]]) {
+        expect(kind(parse(tokens, mode)), `${JSON.stringify(tokens)} in ${mode}`).toBe("error");
+      }
+    }
+    expect(shell("run my-file --device=a")).toMatchObject({ positional: "my-file" });
+    expect(parse(["run", "my file.txt", "--device", "a b"], "one-shot")).toMatchObject({ positional: "my file.txt", arguments: new Map([["device", "a b"]]) });
   });
 
   it("accept canonical names only (H3)", () => {

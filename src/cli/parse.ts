@@ -8,6 +8,8 @@
 import { acceptsArgument, COMMANDS, type CommandSpec, type Mode } from "./commands.js";
 
 export type ParseResult =
+  /** A line with no tokens in the console or a command file: nothing to run. */
+  | { readonly kind: "empty" }
   | { readonly kind: "help"; readonly path: readonly string[] }
   | { readonly kind: "version" }
   | {
@@ -21,8 +23,12 @@ export type ParseResult =
 
 const isOption = (token: string) => token.startsWith("--");
 
-/** The command paths and the groups (proper prefixes) they form, each keyed by its words. */
-const key = (path: readonly string[]) => path.join(" ");
+/**
+ * The command paths and the groups (proper prefixes) they form, each keyed by its
+ * words. The key keeps the word boundaries, so one token "device list" is not
+ * the two words `device list`.
+ */
+const key = (path: readonly string[]) => JSON.stringify(path);
 const COMMAND_BY_PATH = new Map(COMMANDS.map((command) => [key(command.path), command]));
 const GROUPS = new Set(COMMANDS.flatMap((command) => command.path.slice(0, -1).map((_, end) => key(command.path.slice(0, end + 1)))));
 
@@ -45,7 +51,8 @@ export function parse(tokens: readonly string[], mode: Mode): ParseResult {
   const error = (message: string): ParseResult => ({ kind: "error", message });
   const helpHint = (path: readonly string[]) => `See \`${prefix}${[...path, "--help"].join(" ")}\`.`;
 
-  if (tokens.length === 0) return { kind: "help", path: [] };
+  // A bare `urx` shows the root help; an empty console or command-file line runs nothing.
+  if (tokens.length === 0) return mode === "one-shot" ? { kind: "help", path: [] } : { kind: "empty" };
   const [first] = tokens as [string, ...string[]];
   if (first === "--version" || first === "--help") {
     if (mode === "command-file") return error(`${first} is not accepted in a command file.`);

@@ -24,6 +24,8 @@ export interface Io {
 export async function main(args: readonly string[], io: Io): Promise<number> {
   const parsed = parse(args, "one-shot");
   switch (parsed.kind) {
+    case "empty": // only a console or command-file line can be empty
+      return EXIT.success;
     case "help":
       return emit(io, renderHelp(parsed.path, "one-shot"));
     case "version":
