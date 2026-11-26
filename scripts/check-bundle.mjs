@@ -2,9 +2,9 @@
 // (K18, K38): the release manifest lists exactly the bundle's files with
 // their hashes; on macOS its directories and executables are 0755 and its
 // other files 0644; a copy under a directory that declares CommonJS runs the
-// CLI with the bundled Node, loads every one of its modules and those they
-// import on demand, opens the addon from the bundle's `native` and loads the
-// common package from the bundle's own `app`; and the launcher, run away from
+// CLI with the bundled Node, holds exactly the modules the release's commits
+// compile to and loads each of them, opens the addon from the bundle's
+// `native` and loads the common package from the bundle's own `app`; and the launcher, run away from
 // any bundle, starts nothing and exits 1 with one line, whatever is installed
 // on this machine.
 //
@@ -14,8 +14,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { filesUnder, platformOf, sha256 } from "./build-bundle.mjs";
+import { compiledModules, moduleDifference } from "./compiled-modules.mjs";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const COMMON_DIST = "node_modules/@urx/device-control/dist/";
 
 const bundle = resolve(process.argv[2] ?? "dist-bundle");
 const platform = platformOf();
@@ -70,18 +74,29 @@ try {
   node([join(copy, "app", "main.js"), "--help"]);
   process.stdout.write(node([join(copy, "app", "main.js"), "--version"]));
   const url = (path) => JSON.stringify(pathToFileURL(join(copy, path)).href);
-  // Every module in the bundle's app loads from it, with the modules it imports, on demand too.
-  const modules = filesUnder(join(copy, "app"))
-    .filter((path) => path.endsWith(".js"))
-    .map((path) => pathToFileURL(join(copy, "app", path)).href);
-  const loader = JSON.stringify(new URL("./load-modules.mjs", import.meta.url).href);
+  const APP = join(copy, "app");
+  // The copy holds exactly the modules the release's commits compile to, and each of them loads from it.
+  const { BUILD_INFO } = await import(pathToFileURL(join(APP, "build-info.js")).href);
+  const expected = compiledModules(root, BUILD_INFO);
+  const scripts = filesUnder(APP).filter((path) => path.endsWith(".js"));
+  const groups = [
+    ["CLI", scripts.filter((path) => !path.startsWith("node_modules/")), expected.cli],
+    ["common package", scripts.filter((path) => path.startsWith(COMMON_DIST)).map((path) => path.slice(COMMON_DIST.length)), expected.common],
+    ["other package", scripts.filter((path) => path.startsWith("node_modules/") && !path.startsWith(COMMON_DIST)), []],
+  ];
+  for (const [name, present, wanted] of groups) {
+    const { missing, extra } = moduleDifference(present, wanted);
+    if (missing.length > 0 || extra.length > 0) {
+      fail(`the ${name} modules are not those its commit compiles to; missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}`);
+    }
+  }
+  const modules = scripts.map((path) => pathToFileURL(join(APP, path)).href);
   node([
     "--input-type=module",
     "-e",
     `
     import { createRequire } from "node:module";
-    const { loadModules } = await import(${loader});
-    await loadModules(${JSON.stringify(modules)});
+    for (const module of ${JSON.stringify(modules)}) await import(module);
     const addon = await import(${url("app/native/addon.js")});
     const build = await import(${url("app/build-info.js")});
     if (addon.ADDON_URL.href !== ${url("native/urx-native.node")}) throw new Error("the addon is looked for at " + addon.ADDON_URL.href);
