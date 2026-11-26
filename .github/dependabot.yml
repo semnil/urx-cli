@@ -19,6 +19,16 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
+  # The addon crate's dependencies (Dependabot reads Cargo.lock). The napi
+  # crates are pinned with `=`, so each bump is its own reviewed change.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 0 * * *"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+
   # Actions are SHA-pinned with a version comment (`@<sha> # vX.Y.Z`);
   # Dependabot bumps the pin and comment together.
   - package-ecosystem: github-actions
