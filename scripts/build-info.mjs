@@ -50,8 +50,9 @@ const readOrNull = (url) => {
  * stay, since they carry settings such as safe.directory.
  */
 export function withoutGitLocation(environment, localVariables = gitLocalVariables(environment)) {
-  const drop = new Set(localVariables.filter((name) => !name.startsWith("GIT_CONFIG")));
-  return Object.fromEntries(Object.entries(environment).filter(([name]) => !drop.has(name)));
+  // Windows treats environment variable names case-insensitively, so `Git_Dir` is GIT_DIR there.
+  const drop = new Set(localVariables.filter((name) => !name.startsWith("GIT_CONFIG")).map((name) => name.toUpperCase()));
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => !drop.has(name.toUpperCase())));
 }
 
 /** The variables git treats as local to one repository. */

@@ -55,8 +55,13 @@ describe("embedded build information", () => {
       const elsewhere = { ...process.env, GIT_DIR: join(directory, ".git"), GIT_WORK_TREE: directory };
       expect(revParse(join(directory, "vendor"), elsewhere)).toBeNull();
       expect(commitOf(revParse(directory, elsewhere))).toBe(head);
-      // A repository that only safe.directory lets git read keeps its commit.
-      const foreign = { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+      // A repository that only safe.directory lets git read keeps its commit. The
+      // machine's own global and system configuration (CI allows every directory)
+      // is replaced with an empty file.
+      const emptyConfig = join(directory, "empty.gitconfig");
+      writeFileSync(emptyConfig, "");
+      const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_CONFIG/i.test(name)));
+      const foreign = { ...inherited, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1", GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: "1" };
       expect(revParse(directory, foreign)).toBeNull();
       const allowed = { ...foreign, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" };
       expect(commitOf(revParse(directory, allowed))).toBe(head);
@@ -75,5 +80,9 @@ describe("embedded build information", () => {
       PATH: "p",
     });
     expect(Object.keys(withoutGitLocation({ ...process.env, GIT_DIR: "a", GIT_WORK_TREE: "b", GIT_COMMON_DIR: "c" }))).not.toEqual(expect.arrayContaining(["GIT_DIR"]));
+    expect(withoutGitLocation({ Git_Dir: "a", git_work_tree: "b", gIt_InDeX_fIlE: "c", Git_Config_Count: "1", PATH: "p" }, ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT"])).toEqual({
+      Git_Config_Count: "1",
+      PATH: "p",
+    });
   });
 });
