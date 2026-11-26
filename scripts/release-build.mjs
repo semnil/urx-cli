@@ -232,14 +232,15 @@ export function leftBehind(output, label = "release build") {
  * Writes the files of `staging` into `output`, the empty folder `claimOutput`
  * made, without replacing anything: each folder is created where nothing is,
  * each file is copied where nothing is, and `last`, the record at the top of
- * the output that marks it finished, is copied after every other file. When
- * anything is in the way, it is left as it is and this throws, leaving
- * `output` without that record. Outside Windows, folders and files keep the
- * modes they have in `staging`.
+ * the output that marks it finished, is copied after every other file and
+ * after the modes are set. When anything is in the way, it is left as it is
+ * and this throws, leaving `output` without that record; so does a file in
+ * `output` that this did not write. Outside Windows, folders and files keep
+ * the modes they have in `staging`.
  */
-export function publishOutput(staging, output, { last, label = "release build" } = {}) {
+export function publishOutput(staging, output, { last, label = "release build", chmod = chmodSync } = {}) {
   const keepMode = (from, to) => {
-    if (process.platform !== "win32") chmodSync(to, statSync(from).mode & 0o7777);
+    if (process.platform !== "win32") chmod(to, statSync(from).mode & 0o7777);
   };
   const copyTree = (from, to) => {
     for (const entry of readdirSync(from, { withFileTypes: true })) {
@@ -259,8 +260,18 @@ export function publishOutput(staging, output, { last, label = "release build" }
   };
   try {
     copyTree(staging, output);
-    if (last !== undefined) copyFileSync(join(staging, last), join(output, last), constants.COPYFILE_EXCL);
     keepMode(staging, output);
+  } catch (error) {
+    throw new Error(`the ${label} could not write ${output} without replacing what is in it`, { cause: error });
+  }
+  // The record goes in only when the output holds exactly the files written beside it.
+  const written = filesUnder(staging).filter((path) => path !== last);
+  const present = filesUnder(output);
+  const beside = present.filter((path) => !written.includes(path));
+  if (beside.length > 0) throw new Error(`${output} holds files the ${label} did not write, left as they are: ${beside.join(", ")}`);
+  if (last === undefined) return;
+  try {
+    copyFileSync(join(staging, last), join(output, last), constants.COPYFILE_EXCL);
   } catch (error) {
     throw new Error(`the ${label} could not write ${output} without replacing what is in it`, { cause: error });
   }

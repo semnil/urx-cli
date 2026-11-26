@@ -192,6 +192,30 @@ describe("release output", () => {
     }
   });
 
+  it("write no record while the output holds a file it did not write, and leave that file", () => {
+    const output = join(scratch, "dist-release");
+    claimOutput(output);
+    writeFileSync(join(output, "notes.txt"), "the user's");
+    const staging = directory("staging", "new");
+    writeFileSync(join(staging, "release-files.json"), "record");
+    expect(() => publishOutput(staging, output, { last: "release-files.json" })).toThrow(/holds files the release build did not write, left as they are: notes.txt/);
+    expect(existsSync(join(output, "release-files.json"))).toBe(false);
+    expect(readFileSync(join(output, "notes.txt"), "utf8")).toBe("the user's");
+  });
+
+  it.skipIf(process.platform === "win32")("set the output's own mode before writing its record", () => {
+    const output = join(scratch, "dist-bundle");
+    claimOutput(output);
+    const staging = directory("staging", "new");
+    writeFileSync(join(staging, "release-manifest.json"), "manifest");
+    const failing = (path, mode) => {
+      if (path === output) throw Object.assign(new Error("denied"), { code: "EACCES" });
+      chmodSync(path, mode);
+    };
+    expect(() => publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", chmod: failing })).toThrow(/could not write/);
+    expect(existsSync(join(output, "release-manifest.json"))).toBe(false);
+  });
+
   it.skipIf(process.platform === "win32")("keep the staged folders' and files' modes in the output", () => {
     const output = join(scratch, "dist-bundle");
     claimOutput(output);
