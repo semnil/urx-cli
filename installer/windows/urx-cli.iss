@@ -751,7 +751,9 @@ begin
       begin
         // Without the record there is no telling whether the PATH entry is this installer's, so nothing is removed.
         ReleaseGate;
-        SuppressibleMsgBox('The installation state ' + StatePath + ' is missing, so this removal cannot tell which PATH entry urx-cli added and changes nothing. Remove ' + ExpandConstant('{app}') + ' and the bin folder''s PATH entry by hand.', mbError, MB_OK, IDOK);
+        Problem := 'The installation state ' + StatePath + ' is missing, so this removal cannot tell which PATH entry urx-cli added and changes nothing.';
+        Log('urx-cli: ' + Problem);
+        SuppressibleMsgBox(Problem + #13#10 + 'To remove urx-cli by hand, first move any files of your own out of ' + ExpandConstant('{app}') + ', then delete that folder. Take ' + ExpandConstant('{app}\bin') + ' off your PATH only if it was not there before urx-cli was installed.', mbError, MB_OK, IDOK);
         Exit;
       end;
     1: PathAdded := Added;
