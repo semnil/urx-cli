@@ -243,6 +243,19 @@ export function removeExport(root, destination) {
 }
 
 /**
+ * Runs `clean`, a build's removal of its own scratch or export, so that its
+ * failure changes neither the build's result nor its error: a failure is a
+ * warning naming `label` and what is left at `path`.
+ */
+export function cleanUp(label, path, clean, warn = (message) => process.stderr.write(`${message}\n`)) {
+  try {
+    clean();
+  } catch (error) {
+    warn(`${label}: ${path} could not be removed and is left there: ${error?.message ?? error}`);
+  }
+}
+
+/**
  * Stops the build when anything is at `output`, an empty folder or a link
  * included: a build never removes or replaces a previous output, so the user
  * removes it before building again. Checked before building anything; the
@@ -326,7 +339,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
-    removeExport(root, source);
-    rmSync(scratch, { recursive: true, force: true });
+    // The output is published or not by now; removing the scratch changes neither.
+    cleanUp("release build", source, () => removeExport(root, source));
+    cleanUp("release build", scratch, () => rmSync(scratch, { recursive: true, force: true }));
   }
 }

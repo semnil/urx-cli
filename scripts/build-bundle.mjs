@@ -26,7 +26,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describeFiles, filesUnder, isModuleFormat, isRecordedPath, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -237,7 +237,8 @@ async function main(argv) {
     publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {
-    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+    // The bundle is published or not by now; removing the scratch changes neither.
+    if (scratch !== undefined) cleanUp("bundle build", scratch, () => rmSync(scratch, { recursive: true, force: true }));
   }
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -199,6 +199,20 @@ describe("release output", () => {
     publishOutput(staging, output, { label: "bundle build", tool });
     const mode = (...path) => (statSync(join(output, ...path)).mode & 0o7777).toString(8);
     expect([mode(), mode("native"), mode("main.js"), mode("native", "urx-native.node")]).toEqual(["755", "700", "755", "600"]);
+  });
+
+  it("turn a failed removal of the build's own scratch into a warning, so it changes neither the result nor the error", () => {
+    const warnings = [];
+    expect(() =>
+      cleanUp("bundle build", "/tmp/urx-bundle-x", () => {
+        throw Object.assign(new Error("ENOTEMPTY: directory not empty"), { code: "ENOTEMPTY" });
+      }, (message) => warnings.push(message)),
+    ).not.toThrow();
+    expect(warnings).toEqual(["bundle build: /tmp/urx-bundle-x could not be removed and is left there: ENOTEMPTY: directory not empty"]);
+    let ran = false;
+    cleanUp("release build", "/tmp/urx-release-x", () => (ran = true), (message) => warnings.push(message));
+    expect(ran).toBe(true);
+    expect(warnings).toHaveLength(1);
   });
 
   it("tell the package.json that says the output's modules are ES modules", () => {
