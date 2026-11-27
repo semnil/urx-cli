@@ -1,0 +1,22 @@
+[package]
+name = "urx-output"
+# Build tooling, not published and not part of any output.
+version = "0.0.0"
+description = "Claims a build output folder where nothing is and writes into that folder alone, replacing nothing"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "urx-output"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+] }
