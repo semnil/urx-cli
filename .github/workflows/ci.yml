@@ -101,8 +101,14 @@ jobs:
       - run: node scripts/build-macos-installer.mjs
         if: runner.os == 'macOS'
         timeout-minutes: 15
+      # The macOS distribution files: the read-only disk image of the installer
+      # tree and the recovery ZIP of the removal tool, each read back.
+      - run: node scripts/build-macos-distribution.mjs
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
       # The runner is a throwaway machine with sudo needing no password, so the
-      # check installs, repairs and removes urx-cli system-wide.
+      # check installs from the mounted disk image, repairs, and removes urx-cli
+      # system-wide with the installed and the recovery removal tools.
       - run: node scripts/check-macos-installer.mjs
         if: runner.os == 'macOS'
         timeout-minutes: 10

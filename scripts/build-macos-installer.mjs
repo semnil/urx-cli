@@ -1,19 +1,21 @@
 // The macOS installer tree (K41): `urx-install` beside `urx-cli/`, a copy of
-// the bundle in dist-bundle/, written to dist-installer/. The disk image is
-// made from this tree. The copy is checked to hold exactly the files its
+// the bundle in dist-bundle/, written to dist-installer/ with its record,
+// installer.json, which names the SHA-256 and size of urx-install and the
+// SHA-256 of the release manifest it is built for. The disk image is made from
+// this tree, checked against that record. The copy is checked to hold exactly the files its
 // release manifest lists, each as built, with the modes the bundle has, and
 // to be a macOS arm64 bundle of the commit HEAD names. urx-install is built
 // from that commit, exported as the release build exports it, with the
 // SHA-256 of the copy's release manifest compiled in: it installs that
 // release and no other. Like the other builds, it stops before reading
 // anything when anything is at dist-installer/, and publishes the tree with
-// tools/output: in a work folder beside it, then renamed to dist-installer/
-// only where nothing is.
+// tools/output: in a work folder beside it, the record last, then renamed to
+// dist-installer/ only where nothing is.
 //
 // Usage: node scripts/build-macos-installer.mjs
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +24,17 @@ import { cargoArtifact, cleanUp, exportRelease, outputTool, publishOutput, remov
 import { withoutGitLocation } from "./source-info.mjs";
 
 const MANIFEST = "release-manifest.json";
+
+/** The record of the installer tree, at its top. */
+export const INSTALLER_RECORD = "installer.json";
+
+/**
+ * The record of an installer tree whose urx-install is `program` (its bytes),
+ * built for the release manifest `manifestBytes`.
+ */
+export function installerRecord(program, manifestBytes) {
+  return { installer: { path: "urx-install", sha256: sha256(program), size: program.length }, releaseManifest: sha256(manifestBytes) };
+}
 
 /** The files a macOS bundle cannot be without (K18, K20). */
 const REQUIRED = ["bin/urx", "runtime/node", "native/urx-native.node", "app/main.js", "maintenance/urx-uninstall"];
@@ -88,8 +101,10 @@ function main(argv) {
     });
     cpSync(cargoArtifact(messages, "urx-install"), join(staging, "urx-install"));
     chmodSync(join(staging, "urx-install"), 0o755);
+    writeFileSync(join(staging, INSTALLER_RECORD), `${JSON.stringify(installerRecord(readFileSync(join(staging, "urx-install")), manifestBytes), null, 2)}\n`);
+    chmodSync(join(staging, INSTALLER_RECORD), 0o644);
     chmodSync(staging, 0o755);
-    publishOutput(staging, output, { label: "installer build", tool });
+    publishOutput(staging, output, { last: INSTALLER_RECORD, label: "installer build", tool });
     process.stderr.write(`installer written to ${output}\n`);
   } finally {
     // The tree is published or not by now; removing the scratch changes neither.
