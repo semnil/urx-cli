@@ -263,9 +263,24 @@ export function claimOutput(output, label, tool) {
   return result.stdout.trim();
 }
 
-/** Says, when a build stops after claiming `output`, that the folder stays and is the user's to remove. */
-export function leftBehind(output, label = "release build") {
-  return `${label}: ${output} is left as it is, without its record; remove it before building again`;
+/**
+ * Whether `output` is still the folder `claim` names, so a build that stops
+ * points the user only at a folder that is its own.
+ */
+export function stillClaimed(output, claim, tool) {
+  const result = spawnSync(tool, ["check", output, claim], { encoding: "utf8" });
+  return result.error === undefined && result.status === 0;
+}
+
+/**
+ * Says, when a build stops after claiming `output`, what is left there: its
+ * own folder, without its record, for the user to remove, or, when `ours` is
+ * false, a folder that is not this build's, which it leaves alone.
+ */
+export function leftBehind(output, label = "release build", ours = true) {
+  return ours
+    ? `${label}: ${output} is left as it is, without its record; remove it before building again`
+    : `${label}: ${output} is no longer the folder this build claimed; what is there is not its own and is left as it is`;
 }
 
 /**
@@ -274,14 +289,20 @@ export function leftBehind(output, label = "release build") {
  * itself so that a path swapped meanwhile cannot redirect a write, each
  * folder and file created where nothing is, folder modes kept outside
  * Windows, and `last`, the record at the top of the output that marks it
- * finished, written after everything else and only when the output holds
- * exactly the files written beside it. Anything in the way is left as it is
- * and this throws, leaving `output` without that record.
+ * finished, written after everything else, only when the output holds
+ * exactly the files written beside it with the bytes written, and renamed
+ * into place complete. Anything in the way is left as it is and this throws,
+ * leaving `output` without that record. When `output` no longer names the
+ * claimed folder, before or after the files were written, it throws an error
+ * with the code `URX_OUTPUT_MOVED`.
  */
 export function publishOutput(staging, output, { claim, last, label = "release build", tool }) {
   const result = spawnSync(tool, ["publish", staging, output, claim, ...(last === undefined ? [] : ["--last", last])], { encoding: "utf8" });
   if (result.error) throw result.error;
-  if (result.status === 4) throw new Error(`${output} is no longer the folder the ${label} claimed; it is left as it is`);
+  // 4: swapped before anything was written; 5: moved while it was written, its files gone with it.
+  if (result.status === 4 || result.status === 5) {
+    throw Object.assign(new Error(`${output} is no longer the folder the ${label} claimed, so it names no output of this build; what is there is left as it is`), { code: "URX_OUTPUT_MOVED" });
+  }
   if (result.status !== 0) throw new Error(`the ${label} could not write ${output} without replacing what is in it: ${result.stderr.trim()}`);
 }
 
@@ -331,7 +352,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     publishOutput(staging, output, { claim, last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);
   } catch (error) {
-    process.stderr.write(`${leftBehind(output)}\n`);
+    process.stderr.write(`${leftBehind(output, "release build", stillClaimed(output, claim, tool))}\n`);
     throw error;
   } finally {
     removeExport(root, source);

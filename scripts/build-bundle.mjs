@@ -25,7 +25,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
+import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256, stillClaimed } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -236,7 +236,7 @@ async function main(argv) {
     publishOutput(staging, output, { claim, last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } catch (error) {
-    process.stderr.write(`${leftBehind(output, "bundle build")}\n`);
+    process.stderr.write(`${leftBehind(output, "bundle build", stillClaimed(output, claim, tool))}\n`);
     throw error;
   } finally {
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });

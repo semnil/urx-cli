@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { claimOutput, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, leftBehind, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { claimOutput, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, leftBehind, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, sha256, stillClaimed, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -189,9 +189,19 @@ describe("release output", () => {
     mkdirSync(output);
     const staging = directory("staging", "new");
     writeFileSync(join(staging, "release-manifest.json"), "manifest");
-    expect(() => publishOutput(staging, output, { claim, last: "release-manifest.json", label: "bundle build", tool })).toThrow(/is no longer the folder the bundle build claimed; it is left as it is/);
+    let thrown;
+    try {
+      publishOutput(staging, output, { claim, last: "release-manifest.json", label: "bundle build", tool });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown?.message).toMatch(/is no longer the folder the bundle build claimed, so it names no output of this build; what is there is left as it is/);
+    expect(thrown?.code).toBe("URX_OUTPUT_MOVED");
     expect(readdirSync(output)).toEqual([]);
     expect(readdirSync(join(scratch, "moved"))).toEqual([]);
+    // The folder at the path now is not this build's, so the user is not told to remove it.
+    expect(stillClaimed(output, claim, tool)).toBe(false);
+    expect(stillClaimed(join(scratch, "moved"), claim, tool)).toBe(true);
   });
 
   it("replace nothing that appears in the claimed output, and then write no record", () => {
@@ -233,8 +243,11 @@ describe("release output", () => {
     expect(isModuleFormat(Buffer.from("not json"))).toBe(false);
   });
 
-  it("say that a build stopped after claiming its output leaves it for the user", () => {
+  it("say that a build stopped after claiming its output leaves it for the user, unless the folder there is not its own", () => {
     expect(leftBehind("/repo/dist-bundle", "bundle build")).toBe("bundle build: /repo/dist-bundle is left as it is, without its record; remove it before building again");
+    expect(leftBehind("/repo/dist-bundle", "bundle build", false)).toBe(
+      "bundle build: /repo/dist-bundle is no longer the folder this build claimed; what is there is not its own and is left as it is",
+    );
   });
 
   it("record the files a release build made, with their hashes and sizes, and read them back", () => {
