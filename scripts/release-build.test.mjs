@@ -151,7 +151,9 @@ describe("release output", () => {
     const previous = directory("dist-release", "previous");
     writeFileSync(join(previous, "keep.txt"), "the user's");
     expect(() => requireNoOutput(previous)).toThrow(/already exists; the release build leaves it as it is, so remove it to build again/);
-    expect(() => publishOutput(directory("staging", "new"), previous, { tool })).toThrow(/already exists; the release build leaves it as it is/);
+    // Put there after the build started, so the error names it as another's and asks nothing about it.
+    expect(() => publishOutput(directory("staging", "new"), previous, { tool })).toThrow(/was put in place by another build or program while the release build ran; it is left as it is/);
+    expect(() => publishOutput(directory("staging", "new"), previous, { tool })).not.toThrow(/remove it to build again/);
     expect(contents(previous)).toEqual(["previous", "previous"]);
     expect(readFileSync(join(previous, "keep.txt"), "utf8")).toBe("the user's");
 
@@ -159,13 +161,13 @@ describe("release output", () => {
     mkdirSync(empty);
     const before = statSync(empty).ino;
     expect(() => requireNoOutput(empty, "bundle build")).toThrow(/already exists; the bundle build leaves it as it is/);
-    expect(() => publishOutput(directory("staging", "new"), empty, { label: "bundle build", tool })).toThrow(/already exists; the bundle build leaves it/);
+    expect(() => publishOutput(directory("staging", "new"), empty, { label: "bundle build", tool })).toThrow(/while the bundle build ran; it is left as it is/);
     expect(statSync(empty).ino).toBe(before);
     expect(readdirSync(empty)).toEqual([]);
 
     const file = join(scratch, "dist-installer");
     writeFileSync(file, "the user's");
-    expect(() => publishOutput(directory("staging", "new"), file, { label: "installer build", tool })).toThrow(/already exists; the installer build leaves it/);
+    expect(() => publishOutput(directory("staging", "new"), file, { label: "installer build", tool })).toThrow(/while the installer build ran; it is left as it is/);
     expect(readFileSync(file, "utf8")).toBe("the user's");
     expect(workFolders()).toEqual([]);
   });
@@ -181,9 +183,9 @@ describe("release output", () => {
       return; // Creating a link needs a privilege this Windows account may lack.
     }
     expect(() => requireNoOutput(output)).toThrow(/already exists/);
-    expect(() => publishOutput(directory("staging", "new"), output, { tool })).toThrow(/already exists/);
+    expect(() => publishOutput(directory("staging", "new"), output, { tool })).toThrow(/it is left as it is/);
     expect(contents(output)).toEqual(["the user's", "the user's"]);
-    expect(() => publishOutput(directory("staging", "new"), dangling, { label: "bundle build", tool })).toThrow(/already exists/);
+    expect(() => publishOutput(directory("staging", "new"), dangling, { label: "bundle build", tool })).toThrow(/it is left as it is/);
     expect(existsSync(join(scratch, "nowhere"))).toBe(false);
   });
 

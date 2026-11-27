@@ -266,15 +266,17 @@ export function requireNoOutput(output, label = "release build") {
  * the output that marks it finished, and last the work folder renamed to
  * `output` only where nothing is. That rename is the moment the build
  * succeeds and the next stage can see the output. When anything is at
- * `output` by then, it is left as it is; on any failure the output's path
- * is untouched and the work folder is left, without the record, under a name
- * the error gives.
+ * `output` by then, another build's or program's, it is left as it is and the
+ * error does not ask to remove it; on any failure the output's path is
+ * untouched and the work folder is left, without the record, under a name the
+ * error gives.
  */
 export function publishOutput(staging, output, { last, label = "release build", tool }) {
   const result = spawnSync(tool, ["publish", staging, output, ...(last === undefined ? [] : ["--last", last])], { encoding: "utf8" });
   if (result.error) throw result.error;
   const detail = result.stderr.trim().replace(/^urx-output: /, "");
-  if (result.status === 3) throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again (${detail})`);
+  // It was not there when the build started (requireNoOutput): another build or program put it there meanwhile.
+  if (result.status === 3) throw new Error(`${output} was put in place by another build or program while the ${label} ran; it is left as it is (${detail})`);
   if (result.status !== 0) throw new Error(`the ${label} could not publish ${output}: ${detail}`);
 }
 
