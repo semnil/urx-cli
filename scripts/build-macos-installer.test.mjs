@@ -31,6 +31,8 @@ describe("the macOS installer tree (K41)", () => {
     expect(macosBundleProblems(manifest({ files: manifest().files.filter((file) => file.path !== "maintenance/urx-uninstall") }), inputs, commit)).toEqual([
       "the bundle lists no maintenance/urx-uninstall",
     ]);
+    const unicode = [...manifest().files, { path: "app/caf\u00e9.js", sha256: "0".repeat(64), size: 1 }];
+    expect(macosBundleProblems(manifest({ files: unicode }), inputs, commit)).toEqual([`the bundle lists a path the installer cannot take: "app/caf\u00e9.js"`]);
   });
 
   it("runs the launcher, the runtime and the bundle's maintenance tools as programs", () => {

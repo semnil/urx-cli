@@ -113,19 +113,25 @@ export function bundleProblems(bundle, manifest) {
  * Gives the bundle at `root` the modes it is distributed with, whatever the
  * umask or its sources gave it: 0755 for directories and for the
  * `executables` (relative paths), 0644 for every other file. Windows has no
- * such modes.
+ * such modes. The tree is first checked to hold only directories and regular
+ * files, so that no mode is set through a link on anything outside it.
  */
 export function normalizeModes(root, executables, platform = process.platform) {
   if (platform === "win32") return;
-  const walk = (directory) => {
-    chmodSync(directory, 0o755);
+  const entries = [];
+  const collect = (directory) => {
+    if (!lstatSync(directory).isDirectory()) throw new Error(`${directory} is not a directory`);
+    entries.push({ path: directory, mode: 0o755 });
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else chmodSync(path, executables.includes(relative(root, path).split(sep).join("/")) ? 0o755 : 0o644);
+      const inside = relative(root, path).split(sep).join("/");
+      if (entry.isDirectory()) collect(path);
+      else if (entry.isFile()) entries.push({ path, mode: executables.includes(inside) ? 0o755 : 0o644 });
+      else throw new Error(`${inside} is not a regular file or a directory`);
     }
   };
-  walk(root);
+  collect(root);
+  for (const { path, mode } of entries) chmodSync(path, mode);
 }
 
 /** The release manifest of the bundle at `root`: identities, then each owned file with its hash and size. */

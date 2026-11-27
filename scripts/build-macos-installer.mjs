@@ -44,6 +44,8 @@ export function macosBundleProblems(manifest, inputs, commit) {
   if (!/^[0-9A-Za-z.+-]{1,64}$/.test(manifest.release ?? "")) problems.push(`the bundle names no release version the installer can record: ${manifest.release}`);
   const listed = new Set(manifest.files.map((file) => file.path));
   for (const path of REQUIRED) if (!listed.has(path)) problems.push(`the bundle lists no ${path}`);
+  // The installer takes only printable ASCII paths, so a file system finds each under one name.
+  for (const path of listed) if (!/^[\x20-\x7e]+$/.test(path)) problems.push(`the bundle lists a path the installer cannot take: ${JSON.stringify(path)}`);
   return problems;
 }
 

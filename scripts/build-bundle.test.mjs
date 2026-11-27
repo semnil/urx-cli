@@ -71,6 +71,23 @@ describe("the installed bundle (K18, K38)", () => {
     expect([mode(), mode("app"), mode("bin"), mode("bin", "urx"), mode("app", "main.js")]).toEqual([0o755, 0o755, 0o755, 0o755, 0o644]);
   });
 
+  it.skipIf(process.platform === "win32")("refuses a tree with a link before setting any mode, so nothing outside it changes", () => {
+    for (const make of [(dir, outside) => symlinkSync(join(outside, "file"), join(dir, "app", "link")), (dir, outside) => symlinkSync(outside, join(dir, "app", "folder"))]) {
+      const dir = scratch();
+      const outside = scratch();
+      write(dir, "app/main.js");
+      write(outside, "file");
+      chmodSync(join(outside, "file"), 0o600);
+      chmodSync(outside, 0o700);
+      chmodSync(join(dir, "app", "main.js"), 0o600);
+      make(dir, outside);
+      expect(() => normalizeModes(dir, [])).toThrow(/is not a regular file or a directory/);
+      expect([statSync(outside).mode & 0o7777, statSync(join(outside, "file")).mode & 0o7777]).toEqual([0o700, 0o600]);
+      // Nothing inside it was changed either.
+      expect(statSync(join(dir, "app", "main.js")).mode & 0o7777).toBe(0o600);
+    }
+  });
+
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
     const dir = scratch();
     const release = join(dir, "release");
