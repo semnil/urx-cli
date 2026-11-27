@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { compiledPackages, crateNotices, isLicenseFile, licenseTexts, metadataArguments, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS } from "./rust-notices.mjs";
+import { compiledPackages, crateNotices, isLicenseFile, licenseTexts, metadataArguments, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS, unitFolder } from "./rust-notices.mjs";
 
 const made = [];
 afterEach(() => {
@@ -63,6 +63,15 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     const args = metadataArguments("aarch64-apple-darwin");
     expect(args.slice(args.indexOf("--filter-platform"), args.indexOf("--filter-platform") + 2)).toEqual(["--filter-platform", "aarch64-apple-darwin"]);
     expect(args).toContain("--locked");
+  });
+
+  it("look for the units in the target directory, and stop when cargo builds apart from it", () => {
+    expect(unitFolder({ target_directory: "/scratch/target", build_directory: "/scratch/target" })).toBe("/scratch/target");
+    // A cargo older than its build directory builds in its target directory.
+    expect(unitFolder({ target_directory: "/scratch/target" })).toBe("/scratch/target");
+    expect(() => unitFolder({ target_directory: "/scratch/target", build_directory: "/scratch/build" })).toThrow(
+      "cargo builds in /scratch/build, apart from its target directory /scratch/target; build the release with both the same (CARGO_BUILD_BUILD_DIR)",
+    );
   });
 
   it("count every compiled package but this repository's and urx-device's own, and require a unit of each program", () => {

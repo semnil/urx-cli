@@ -4,7 +4,10 @@
 // programs is built for the platform the release is built on, named
 // explicitly (`--target`), with `--message-format=json-render-diagnostics`,
 // and every unit Cargo compiles into the target's folder (`<target
-// directory>/<triple>/`) is part of a program. Build scripts, procedural
+// directory>/<triple>/`) is part of a program. The release build gives Cargo
+// one folder as both its target and its build directory, and a `cargo
+// metadata` that names them apart stops the notices, so no unit lies
+// elsewhere. Build scripts, procedural
 // macros and what only they use are built for the host outside that folder,
 // and features another package of the workspace enables are not built at
 // all, so neither is counted. Each unit names its package by ID, which
@@ -92,6 +95,21 @@ export function compiledPackages(reports, targetDirectory, triple) {
     }
   }
   return ids;
+}
+
+/**
+ * The folder `compiledPackages` looks in for the units of `metadata`'s
+ * workspace (`cargo metadata --format-version 1`): its target directory,
+ * where Cargo also builds when its build directory is the same. A build
+ * directory apart from it would hold the dependencies' units where they are
+ * not looked for, so it stops the notices.
+ */
+export function unitFolder(metadata) {
+  const build = metadata.build_directory ?? metadata.target_directory;
+  if (build !== metadata.target_directory) {
+    throw new Error(`cargo builds in ${build}, apart from its target directory ${metadata.target_directory}; build the release with both the same (CARGO_BUILD_BUILD_DIR)`);
+  }
+  return metadata.target_directory;
 }
 
 /**
@@ -242,7 +260,8 @@ export function metadataArguments(triple) {
  * The notices of the Rust crates in the programs of the export at `source`,
  * built for `triple` and reported in `reports` (`compiledPackages`), their
  * recorded texts read from the export. `environment` is the cargo builds'
- * environment (its CARGO_TARGET_DIR names where they built).
+ * environment (its CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR name the one
+ * folder they built in).
  */
 export function rustNotices(source, environment, triple, reports, platform = process.platform) {
   const metadata = JSON.parse(
@@ -254,7 +273,7 @@ export function rustNotices(source, environment, triple, reports, platform = pro
       env: environment,
     }),
   );
-  const ids = compiledPackages(reports, metadata.target_directory, triple);
+  const ids = compiledPackages(reports, unitFolder(metadata), triple);
   return crateNotices(programCrates(metadata, ids, ownOf(source), programPackages(platform)), {
     filesOf: licenseTexts,
     readRecorded: (path) => readFileSync(join(source, ...path.split("/")), "utf8"),

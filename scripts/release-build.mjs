@@ -4,7 +4,10 @@
 // worktree of their own, so edits to the working tree, the index, Git's
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
-// `--release` and a Cargo target directory of their own. The build stops
+// `--release` and a Cargo folder of their own, which every cargo the build
+// runs takes as both its target and its build directory, whatever Cargo's
+// settings say, so that what each build compiles lies where the notices look
+// for it. The build stops
 // before building when anything is at dist-release/, and publishes its
 // output with tools/output: complete, record included, in a work folder
 // beside it, then renamed to dist-release/ only where nothing is, so the path
@@ -29,6 +32,15 @@ import { hostTriple, rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+
+/**
+ * The environment of the cargo builds and `cargo metadata` of a release build:
+ * `folder` as both the target directory and the build directory, over any
+ * Cargo setting of either, so that every unit lies under it.
+ */
+export function cargoEnvironment(base, folder) {
+  return { ...base, CARGO_TARGET_DIR: folder, CARGO_BUILD_BUILD_DIR: folder };
+}
 /** The common TypeScript package inside the export. */
 const CONTROL_PATH = join(COMMON_PATH, "packages", "control");
 
@@ -320,9 +332,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       execFileSync(process.execPath, args, {
         cwd: source,
         stdio: "inherit",
-        // A target directory of this run's own: a shared one would let a
+        // A Cargo folder of this run's own: a shared one would let a
         // concurrent release build overwrite this run's addon.
-        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+        env: cargoEnvironment(environment, join(scratch, "target")),
       });
     // `pnpm build:release` runs this script; pnpm names its own JavaScript entry.
     const pnpm = process.env.npm_execpath;
@@ -342,7 +354,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+      env: cargoEnvironment(environment, join(scratch, "target")),
     });
     // Laid out in this run's scratch, then published, its record last.
     const staging = join(scratch, "output");
@@ -358,7 +370,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         encoding: "utf8",
         maxBuffer: 256 * 1024 * 1024,
         stdio: ["ignore", "pipe", "inherit"],
-        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+        env: cargoEnvironment(environment, join(scratch, "target")),
       });
       cpSync(cargoArtifact(built, tool), join(staging, "maintenance", tool));
       reports.push(built);
@@ -367,7 +379,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     markModuleFormat(staging);
     // The licenses of the third-party Rust crates those builds compiled into the programs.
     mkdirSync(join(staging, "notices"), { recursive: true });
-    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, { ...environment, CARGO_TARGET_DIR: join(scratch, "target") }, triple, reports));
+    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, cargoEnvironment(environment, join(scratch, "target")), triple, reports));
     writeReleaseFiles(staging);
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);
