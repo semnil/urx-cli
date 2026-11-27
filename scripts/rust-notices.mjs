@@ -5,19 +5,21 @@
 // dependencies that go into the program: not procedural macros, which run
 // only while it is compiled, nor build scripts' or tests' dependencies, nor
 // what only they use, and with the features that build enables, not those
-// another package of the workspace enables. Every crate that is not this
-// repository's or urx-device's own (whose licenses the bundle carries
-// already) counts, wherever Cargo takes it from. For each, the notices name
-// the crate, its version, license expression and repository, and hold the
-// text of the license file its manifest names (`license-file`) and of every
-// license file at the top of its package. A crate whose package holds none
+// another package of the workspace enables. Each is matched to its package
+// by its name, version and where Cargo took it from, and every crate that is
+// not one of this repository's or urx-device's own manifests (OWN_MANIFESTS,
+// whose licenses the bundle carries already) counts, wherever it lies. For
+// each, the notices name the crate, its version, license expression and
+// repository, and hold the text of the license file its manifest names
+// (`license-file`) and of every license file at the top of its package, read
+// through a link, a folder by its files. A crate whose package holds none
 // takes the text this repository records for exactly that version, license
 // and repository (RECORDED_TEXTS); a crate with neither, a recorded text for
 // another version, license or repository, and a recorded text no crate
 // takes each stop the build.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 /** The packages whose programs a release holds, by platform. */
@@ -43,53 +45,105 @@ export function isLicenseFile(name) {
   return /^(licen[cs]e|copying|notice|unlicense)/i.test(name);
 }
 
-/** The packages `cargo tree --prefix none --format "{p}"` printed, each as `name@version`. */
+/**
+ * This repository's and urx-device's own packages, by the path of their
+ * manifest in the export: their licenses are the bundle's urx-cli and
+ * urx-device notices. Any other package is a third party's, wherever Cargo
+ * takes it from.
+ */
+export const OWN_MANIFESTS = ["launcher/Cargo.toml", "maintenance/Cargo.toml", "native/Cargo.toml", "tools/output/Cargo.toml", "vendor/urx-device/crates/transport/Cargo.toml"];
+
+/**
+ * Whether a package of `cargo metadata` is one of OWN_MANIFESTS in the
+ * export at `source`: taken from a folder, and that manifest.
+ */
+export function ownOf(source) {
+  const own = new Set(OWN_MANIFESTS.map((path) => realpathSync(join(source, ...path.split("/")))));
+  return (item) => item.source === null && own.has(realpathSync(item.manifest_path));
+}
+
+/**
+ * The packages `cargo tree --prefix none --format "{p}"` printed, each once:
+ * its name, version and where Cargo took it from (`path` for a folder, `git`
+ * for a repository, neither for a registry).
+ */
 export function treePackages(output) {
-  const found = new Set();
+  const found = new Map();
   for (const line of output.split(/\r?\n/)) {
     if (line.trim() === "") continue;
-    const match = /^(\S+) v(\S+)/.exec(line);
+    const match = /^(\S+) v(\S+)((?: \([^)]*\))*)$/.exec(line.trimEnd());
     if (match === null) throw new Error(`cargo tree printed a line that names no package: ${JSON.stringify(line)}`);
-    found.add(`${match[1]}@${match[2]}`);
+    const notes = [...match[3].matchAll(/ \(([^)]*)\)/g)].map((note) => note[1]).filter((note) => note !== "*");
+    if (notes.length > 1) throw new Error(`cargo tree printed a package from more than one place: ${JSON.stringify(line)}`);
+    const [note] = notes;
+    const origin = note === undefined ? {} : /^(https?|ssh|git):/.test(note) ? { git: note } : { path: note };
+    if (note !== undefined && note.startsWith("registry ")) throw new Error(`cargo tree printed a package of another registry: ${JSON.stringify(line)}`);
+    found.set(`${match[1]}@${match[2]}@${JSON.stringify(origin)}`, { name: match[1], version: match[2], ...origin });
   }
-  return found;
+  return [...found.values()];
 }
 
 /**
  * The packages of `metadata` (`cargo metadata --format-version 1`) that
- * `linked` names (`name@version`) and `isOwn` does not take for this
- * repository's or urx-device's own, sorted by name and version.
+ * `linked` (`treePackages`) names, each matched by its name, version and
+ * where it was taken from, without those `isOwn` takes for this
+ * repository's or urx-device's own, sorted by name, version and source.
+ * `samePath` tells whether two folders are one.
  */
-export function programCrates(metadata, linked, isOwn) {
-  const crates = [];
-  for (const key of linked) {
-    const found = metadata.packages.filter((item) => `${item.name}@${item.version}` === key);
-    if (found.length === 0) throw new Error(`cargo metadata has no package ${key}, which cargo tree names`);
-    crates.push(...found.filter((item) => !isOwn(item)));
+export function programCrates(metadata, linked, isOwn, samePath = (a, b) => a === b) {
+  const crates = new Map();
+  for (const entry of linked) {
+    const matches = metadata.packages.filter((item) => {
+      if (item.name !== entry.name || item.version !== entry.version) return false;
+      if (entry.path !== undefined) return item.source === null && samePath(dirname(item.manifest_path), entry.path);
+      if (entry.git !== undefined) return typeof item.source === "string" && item.source.startsWith("git+") && item.source.slice(4).split("#")[0] === entry.git.split("#")[0];
+      return typeof item.source === "string" && /^(registry|sparse)\+/.test(item.source);
+    });
+    const where = entry.path ?? entry.git ?? "the registry";
+    if (matches.length !== 1) throw new Error(`cargo metadata has ${matches.length} packages ${entry.name} ${entry.version} from ${where}, which cargo tree names, not one`);
+    const [item] = matches;
+    if (!isOwn(item)) crates.set(item.id, item);
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  return crates.sort((a, b) => order(a.name, b.name) || order(a.version, b.version) || order(String(a.source), String(b.source)));
+  return [...crates.values()].sort((a, b) => order(a.name, b.name) || order(a.version, b.version) || order(String(a.source), String(b.source)));
 }
 
 /**
  * The license texts of the package `item` as [name, text], sorted by name
- * (code unit order, whatever the locale):
- * the file its manifest names (`license_file`, which must be there) and every
- * license file at the top of its package folder, each once.
+ * (code unit order, whatever the locale): every license file at the top of
+ * its package folder and the file its manifest names (`license_file`), each
+ * read through a link to where it is, a folder by the files in it, and each
+ * file once. One that leads to no file stops the build with its path.
  */
 export function licenseTexts(item) {
   const directory = dirname(item.manifest_path);
   const texts = new Map();
-  for (const name of readdirSync(directory)) {
-    if (isLicenseFile(name) && lstatSync(join(directory, name)).isFile()) texts.set(name, readFileSync(join(directory, name), "utf8"));
-  }
+  const visited = new Set();
+  const add = (name, path) => {
+    let real;
+    try {
+      real = realpathSync(path);
+    } catch {
+      throw new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which leads to no file`);
+    }
+    const stat = statSync(real);
+    if (stat.isDirectory()) {
+      if (visited.has(real)) return;
+      visited.add(real);
+      for (const entry of readdirSync(real).sort()) add(`${name}/${entry}`, join(real, entry));
+    } else if (stat.isFile()) {
+      if (!texts.has(real)) texts.set(real, [name, readFileSync(real, "utf8")]);
+    } else {
+      throw new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which is not a file`);
+    }
+  };
+  for (const name of readdirSync(directory).sort()) if (isLicenseFile(name)) add(name, join(directory, name));
   if (item.license_file) {
     const path = isAbsolute(item.license_file) ? item.license_file : join(directory, item.license_file);
-    if (!existsSync(path) || !lstatSync(path).isFile()) throw new Error(`the Rust crate ${item.name} ${item.version} names ${item.license_file} as its license file, which its package does not hold`);
-    const name = relative(directory, path).split(sep).join("/");
-    texts.set(name, readFileSync(path, "utf8"));
+    if (!existsSync(path)) throw new Error(`the Rust crate ${item.name} ${item.version} names ${item.license_file} as its license file, which its package does not hold`);
+    add(relative(directory, path).split(sep).join("/"), path);
   }
-  return [...texts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...texts.values()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 const RULE = "=".repeat(78);
@@ -133,21 +187,13 @@ export function rustNotices(source, environment, platform = process.platform) {
     execFileSync(command, args, { cwd: source, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], env: environment });
   const host = /^host: (\S+)$/m.exec(run("rustc", ["-vV"]))?.[1];
   if (host === undefined) throw new Error("rustc names no host platform");
-  const linked = new Set();
-  for (const program of programPackages(platform)) {
-    const tree = run("cargo", ["tree", "--locked", "--target", host, "-p", program, "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}"]);
-    for (const key of treePackages(tree)) linked.add(key);
-  }
+  const linked = programPackages(platform).flatMap((program) =>
+    treePackages(run("cargo", ["tree", "--locked", "--target", host, "-p", program, "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}"])),
+  );
   const metadata = JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked", "--filter-platform", host]));
-  const workspace = new Set(metadata.workspace_members);
-  const common = realpathSync(join(source, "vendor", "urx-device"));
-  const isOwn = (item) => {
-    if (workspace.has(item.id)) return true;
-    if (item.source !== null) return false;
-    const inside = relative(common, realpathSync(dirname(item.manifest_path)));
-    return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside));
-  };
-  return crateNotices(programCrates(metadata, linked, isOwn), {
+  const isOwn = ownOf(source);
+  const samePath = (a, b) => realpathSync(a) === realpathSync(b);
+  return crateNotices(programCrates(metadata, linked, isOwn, samePath), {
     filesOf: licenseTexts,
     readRecorded: (path) => readFileSync(join(source, ...path.split("/")), "utf8"),
   });

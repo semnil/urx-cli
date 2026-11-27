@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { crateNotices, isLicenseFile, licenseTexts, programCrates, programPackages, RECORDED_TEXTS, treePackages } from "./rust-notices.mjs";
+import { crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS, treePackages } from "./rust-notices.mjs";
 
 const made = [];
 afterEach(() => {
@@ -33,31 +34,86 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     expect(programPackages("win32")).toEqual(["urx-launcher", "urx-cli-native"]);
   });
 
-  it("read the packages cargo tree names", () => {
-    const output = ["urx-launcher v0.0.0 (/repo/launcher)", "libc v0.2.191", "itoa v1.0.19", "futures-util v0.3.34 (*)", "", "transport v0.2.0 (/repo/vendor/urx-device/crates/transport)"].join("\n");
-    expect([...treePackages(output)]).toEqual(["urx-launcher@0.0.0", "libc@0.2.191", "itoa@1.0.19", "futures-util@0.3.34", "transport@0.2.0"]);
+  it("read the packages cargo tree names, with where each was taken from", () => {
+    const output = [
+      "urx-launcher v0.0.0 (/repo/launcher)",
+      "libc v0.2.191",
+      "itoa v1.0.19",
+      "futures-util v0.3.34 (*)",
+      "futures-util v0.3.34",
+      "",
+      "transport v0.2.0 (/repo/vendor/urx-device/crates/transport) (*)",
+      "fork v1.0.0 (https://github.com/someone/fork?branch=main#0123abc)",
+    ].join("\n");
+    expect(treePackages(output)).toEqual([
+      { name: "urx-launcher", version: "0.0.0", path: "/repo/launcher" },
+      { name: "libc", version: "0.2.191" },
+      { name: "itoa", version: "1.0.19" },
+      { name: "futures-util", version: "0.3.34" },
+      { name: "transport", version: "0.2.0", path: "/repo/vendor/urx-device/crates/transport" },
+      { name: "fork", version: "1.0.0", git: "https://github.com/someone/fork?branch=main#0123abc" },
+    ]);
     expect(() => treePackages("[build-dependencies]\nlibc v0.2.191")).toThrow("cargo tree printed a line that names no package");
+    expect(() => treePackages("libc v0.2.191 (registry `other`)")).toThrow("cargo tree printed a package of another registry");
   });
 
-  it("count every crate the programs link that is not this repository's or urx-device's own, wherever Cargo takes it from", () => {
+  it("count each crate the programs link by where it was taken from, and all but this repository's and urx-device's own manifests", () => {
+    const registry = "registry+https://github.com/rust-lang/crates.io-index";
     const metadata = {
       packages: [
-        pkg("urx-launcher", { source: null }),
-        pkg("transport", { source: null }),
-        pkg("libc"),
+        pkg("urx-launcher", { source: null, manifest: "/repo/launcher/Cargo.toml" }),
+        pkg("transport", { source: null, manifest: "/repo/vendor/urx-device/crates/transport/Cargo.toml" }),
+        pkg("libc", { source: registry }),
+        // The same name and version from a folder, used only by a test: not the program's.
+        pkg("libc", { source: null, manifest: "/elsewhere/libc/Cargo.toml" }),
         pkg("itoa", { source: null, manifest: "/patched/itoa/Cargo.toml" }),
-        pkg("libc", { version: "0.1.0" }),
-        pkg("unlinked"),
+        pkg("copied", { source: null, manifest: "/repo/vendor/urx-device/third/copied/Cargo.toml" }),
+        pkg("fork", { source: "git+https://github.com/someone/fork?branch=main#0123abcdef" }),
       ],
     };
-    const own = new Set(["urx-launcher", "transport"]);
-    const crates = programCrates(metadata, new Set(["urx-launcher@1.0.0", "transport@1.0.0", "libc@1.0.0", "itoa@1.0.0"]), (item) => own.has(item.name));
-    expect(crates.map((item) => `${item.name} ${item.version}`)).toEqual(["itoa 1.0.0", "libc 1.0.0"]);
-    expect(() => programCrates(metadata, new Set(["gone@1.0.0"]), () => false)).toThrow("cargo metadata has no package gone@1.0.0, which cargo tree names");
+    const own = new Set(["/repo/launcher/Cargo.toml", "/repo/vendor/urx-device/crates/transport/Cargo.toml"]);
+    const isOwn = (item) => item.source === null && own.has(item.manifest_path);
+    const linked = [
+      { name: "urx-launcher", version: "1.0.0", path: "/repo/launcher" },
+      { name: "transport", version: "1.0.0", path: "/repo/vendor/urx-device/crates/transport" },
+      { name: "libc", version: "1.0.0" },
+      { name: "itoa", version: "1.0.0", path: "/patched/itoa" },
+      { name: "copied", version: "1.0.0", path: "/repo/vendor/urx-device/third/copied" },
+      { name: "fork", version: "1.0.0", git: "https://github.com/someone/fork?branch=main#0123abc" },
+    ];
+    const crates = programCrates(metadata, linked, isOwn);
+    expect(crates.map((item) => `${item.name} ${item.source ?? item.manifest_path}`)).toEqual([
+      "copied /repo/vendor/urx-device/third/copied/Cargo.toml",
+      `fork git+https://github.com/someone/fork?branch=main#0123abcdef`,
+      "itoa /patched/itoa/Cargo.toml",
+      `libc ${registry}`,
+    ]);
+    // Both copies, when the programs link both.
+    expect(programCrates(metadata, [...linked, { name: "libc", version: "1.0.0", path: "/elsewhere/libc" }], isOwn).filter((item) => item.name === "libc")).toHaveLength(2);
+    expect(() => programCrates(metadata, [{ name: "gone", version: "1.0.0" }], isOwn)).toThrow("cargo metadata has 0 packages gone 1.0.0 from the registry, which cargo tree names, not one");
+    expect(() => programCrates(metadata, [{ name: "libc", version: "1.0.0", path: "/nowhere/libc" }], isOwn)).toThrow("cargo metadata has 0 packages libc 1.0.0 from /nowhere/libc");
   });
 
-  it("take the license file the manifest names and those at the top of the package, each once", () => {
-    for (const name of ["LICENSE", "LICENSE-MIT", "license-apache", "LICENCE.txt", "COPYING", "NOTICE", "UNLICENSE"]) expect(isLicenseFile(name), name).toBe(true);
+  it("name as this repository's and urx-device's own only manifests that are there", () => {
+    const root = fileURLToPath(new URL("../", import.meta.url));
+    for (const path of OWN_MANIFESTS) expect(existsSync(join(root, path)), path).toBe(true);
+  });
+
+  it("take for this repository's and urx-device's own only the packages of those manifests", () => {
+    const root = folder();
+    for (const path of [...OWN_MANIFESTS, "vendor/urx-device/third/copied/Cargo.toml"]) {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), "");
+    }
+    const isOwn = ownOf(root);
+    const at = (path, source = null) => pkg("crate", { source, manifest: join(root, path) });
+    for (const path of OWN_MANIFESTS) expect(isOwn(at(path)), path).toBe(true);
+    expect(isOwn(at("vendor/urx-device/third/copied/Cargo.toml"))).toBe(false);
+    expect(isOwn(at("launcher/Cargo.toml", "registry+https://github.com/rust-lang/crates.io-index"))).toBe(false);
+  });
+
+  it("take the license files at the top of the package and the one the manifest names, through links and folders, each once", () => {
+    for (const name of ["LICENSE", "LICENSE-MIT", "license-apache", "LICENCE.txt", "COPYING", "NOTICE", "UNLICENSE", "LICENSES"]) expect(isLicenseFile(name), name).toBe(true);
     for (const name of ["README.md", "Cargo.toml", "src"]) expect(isLicenseFile(name), name).toBe(false);
     const directory = folder();
     writeFileSync(join(directory, "Cargo.toml"), "");
@@ -82,6 +138,38 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     ]);
     expect(licenseTexts(item(join(directory, "legal", "terms.txt"))).map(([name]) => name)).toEqual(["LICENSE-MIT", "NOTICE", "legal/terms.txt"]);
     expect(() => licenseTexts(item("legal/missing.txt"))).toThrow("names legal/missing.txt as its license file, which its package does not hold");
+  });
+
+  it.skipIf(process.platform === "win32")("read a license file through a link as the file itself, and stop at one that leads nowhere", () => {
+    const linked = folder();
+    writeFileSync(join(linked, "Cargo.toml"), "");
+    mkdirSync(join(linked, "legal"));
+    writeFileSync(join(linked, "legal", "body.txt"), "mit text\n");
+    symlinkSync(join("legal", "body.txt"), join(linked, "LICENSE"));
+    writeFileSync(join(linked, "NOTICE"), "notice text\n");
+    const plain = folder();
+    writeFileSync(join(plain, "Cargo.toml"), "");
+    writeFileSync(join(plain, "LICENSE"), "mit text\n");
+    writeFileSync(join(plain, "NOTICE"), "notice text\n");
+    const item = (directory, licenseFile = null) => pkg("crate", { manifest: join(directory, "Cargo.toml"), licenseFile });
+    expect(licenseTexts(item(linked))).toEqual(licenseTexts(item(plain)));
+    expect(licenseTexts(item(linked, "LICENSE"))).toEqual(licenseTexts(item(plain, "LICENSE")));
+    // Named both ways, it is one file.
+    expect(licenseTexts(item(linked, "legal/body.txt"))).toEqual(licenseTexts(item(plain)));
+    symlinkSync(join("legal", "gone.txt"), join(linked, "LICENSE-APACHE"));
+    expect(() => licenseTexts(item(linked))).toThrow("has LICENSE-APACHE, which leads to no file");
+  });
+
+  it("read a license folder by the files in it", () => {
+    const directory = folder();
+    writeFileSync(join(directory, "Cargo.toml"), "");
+    mkdirSync(join(directory, "LICENSES"));
+    writeFileSync(join(directory, "LICENSES", "MIT.txt"), "mit\n");
+    writeFileSync(join(directory, "LICENSES", "Apache-2.0.txt"), "apache\n");
+    expect(licenseTexts(pkg("crate", { manifest: join(directory, "Cargo.toml") }))).toEqual([
+      ["LICENSES/Apache-2.0.txt", "apache\n"],
+      ["LICENSES/MIT.txt", "mit\n"],
+    ]);
   });
 
   it("name each crate with its license and hold its texts, its own or the one recorded for exactly it", () => {
