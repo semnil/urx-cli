@@ -6,7 +6,9 @@ name: Dependabot auto-merge
 # enable it for a newer one; the merge then waits for the checks the main ruleset requires. A
 # minor update of a cargo crate below 1.0 does not count: Cargo treats a 0.x minor as
 # incompatible, while Dependabot labels it semver-minor. The exception is cargo's alone; a minor
-# update of an npm package below 1.0 counts.
+# update of an npm package below 1.0 counts. The napi crates count like any other crate: they
+# arrive together in one pull request (the `napi` group in .github/dependabot.yml), and the
+# addon's build and tests in ci.yml check that the versions in it work together.
 # It enables auto-merge only when the pull request is one commit, that commit is the head the
 # event names, dependabot[bot] wrote it, GitHub (web-flow) committed it and GitHub verified its
 # signature: fetch-metadata reads the first commit alone, and an amend keeps the author while it
