@@ -63,7 +63,8 @@ const IN_REQUEST: Record<OperationPhase, string> = {
   admission: "before the request was sent",
   send: "while the request was sent",
   response: "while its response was awaited",
-  delivery: "after its response arrived",
+  // The result could not be handed back; whether a response arrived is not known.
+  delivery: "while its result was handed back",
   preparation: "before any request",
 };
 

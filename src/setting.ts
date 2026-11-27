@@ -187,7 +187,8 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
         if (dryRun) human = error === null ? `${where}: would send ${value}${asked}; nothing was sent (dry run)\n` : null;
         else if (outcome === "accepted") human = `${where}: ${value} accepted${asked}\n`;
         else if (outcome === "rejected") human = `${where}: ${value} rejected by the device${asked}\n`;
-        else if (outcome === "uncertain") human = `${where}: ${value} sent; whether the device accepted it is unknown${asked}\n`;
+        // Uncertain covers a send that may not have finished as well as an answer that never came (K34).
+        else if (outcome === "uncertain") human = `${where}: whether the device received and accepted ${value} is unknown${asked}\n`;
         else human = `${where}: ${value} not sent${asked}\n`;
       }
       return { data, human };

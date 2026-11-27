@@ -250,7 +250,11 @@ describe("set of a basic channel control", () => {
     const result = await urx(["channel", "on", "set", "--channel", "1", "--value", "on", "--json"], at.listPort);
     expect(result.exit).toBe(5);
     expect(JSON.parse(result.stdout)).toMatchObject({ data: { outcome: "uncertain" }, error: { code: "response_timeout" } });
-  }, 15000);
+    // The person is told only what the request's evidence shows: not that it was sent, nor that it was accepted.
+    const human = await urx(["channel", "on", "set", "--channel", "1", "--value", "on"], at.listPort);
+    expect(human.exit).toBe(5);
+    expect(human.stdout).toBe("channel 1: whether the device received and accepted on is unknown\n");
+  }, 30000);
 });
 
 describe("device selection for a setting command (D13)", () => {
