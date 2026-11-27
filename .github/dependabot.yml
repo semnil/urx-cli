@@ -2,6 +2,9 @@ version: 2
 # Every entry runs every day at 00:00 JST on a cron schedule; `interval: daily`
 # runs on weekdays only.
 #
+# Which of these pull requests merge on their own, and why: the header of
+# .github/workflows/dependabot-auto-merge.yml.
+#
 # vendor/urx-device has no entry on purpose: a new common commit is adopted in
 # its own pull request with this repository's checks, never by a scheduled bump.
 updates:
