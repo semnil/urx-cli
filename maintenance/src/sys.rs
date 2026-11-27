@@ -370,6 +370,54 @@ pub fn swap(parent: &Fd, a: &CStr, b: &CStr) -> io::Result<()> {
     Ok(())
 }
 
+/// Gives the open `fd` the extended attribute `name` holding `value`.
+#[cfg(target_os = "macos")]
+pub fn set_mark(fd: libc::c_int, name: &CStr, value: &[u8]) -> io::Result<()> {
+    // SAFETY: `fd` is open, `name` NUL-terminated, and `value` readable for its length.
+    checked(unsafe {
+        libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0)
+    })?;
+    Ok(())
+}
+
+/// The extended attribute `name` of the open `fd`, None when it has none;
+/// one longer than `limit` bytes reads as empty.
+#[cfg(target_os = "macos")]
+pub fn mark_of(fd: libc::c_int, name: &CStr, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut value = vec![0u8; limit];
+    // SAFETY: `fd` is open, `name` NUL-terminated, and `value` writable for its length.
+    let read = unsafe {
+        libc::fgetxattr(
+            fd,
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    if read < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOATTR) => Ok(None),
+            Some(libc::ERANGE) => Ok(Some(Vec::new())),
+            _ => Err(error),
+        };
+    }
+    value.truncate(read as usize);
+    Ok(Some(value))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_mark(_fd: libc::c_int, _name: &CStr, _value: &[u8]) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn mark_of(_fd: libc::c_int, _name: &CStr, _limit: usize) -> io::Result<Option<Vec<u8>>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn rename_exclusive(_parent: &Fd, _from: &CStr, _to: &CStr) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))

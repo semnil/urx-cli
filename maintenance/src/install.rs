@@ -2,19 +2,19 @@
 //! the root): one process, under the exclusive gate, admits and inspects,
 //! records `installing` (this release's files, the tree's at the root and
 //! its object), makes a work folder beside the root and records it, assembles
-//! the complete release in it through its journal (`journal`), verifies it,
-//! and puts it in place with one rename (a swap with the previous tree, or a
-//! rename where no root is). It then removes the previous tree, left at the
-//! work folder's name, by its recorded paths, makes the command link,
-//! removes the journal from the root, verifies everything and makes it
-//! durable, and only then records `complete`, with the root's inode. Which
+//! the complete release in it, each entry marked (`mark`), verifies that it
+//! holds exactly the release, and puts it in place with one rename (a swap
+//! with the previous tree, or a rename where no root is). It then removes the
+//! previous tree, left at the work folder's name, by its recorded paths,
+//! makes the command link, verifies everything and makes it durable, and
+//! only then records `complete`, with the root's inode. Which
 //! tree is at the root, and which at the work folder's name, is read from
 //! the objects' inodes, so
 //! an interruption at any point, a failed record update included, leaves
 //! nothing the next run or a removal mistakes; the `installing` record keeps
 //! the CLI from starting until the same release is installed again.
 
-use crate::journal::{self, Journal, JOURNAL};
+use crate::mark::Maker;
 use crate::place::{self, Access, Layout, LinkState};
 use crate::records::{pending_tag, Phase, State, Work, MANIFEST};
 use crate::source::{self, Source};
@@ -166,7 +166,7 @@ pub fn install(
         // and the previous tree's, at the work folder's name, which goes by its list.
         placed_id = inspection.root_id.expect("a root is there");
         if let Some(work) = &inspection.left {
-            if let Cleared::Kept { kept, .. } = work::clear(layout, &parent, volume, work)? {
+            if let Cleared::Kept(kept) = work::clear(layout, &parent, volume, work)? {
                 report.line(work::kept_line(layout, work, &kept));
             }
         }
@@ -178,16 +178,10 @@ pub fn install(
             inspection.left.clone(),
         ))?;
         // What an interrupted run left at its work folder: the previous tree by its list, a
-        // release partly assembled by its journal.
+        // release partly assembled by its marks.
         if let Some(work) = &inspection.left {
-            if let Cleared::Kept { kept, journal } = work::clear(layout, &parent, volume, work)? {
+            if let Cleared::Kept(kept) = work::clear(layout, &parent, volume, work)? {
                 report.line(work::kept_line(layout, work, &kept));
-                if journal {
-                    // Kept with what is not the installation's: no longer recorded, so its
-                    // journal can go.
-                    held.write_state(&record(inspection.root_id, inspection.base.clone(), None))?;
-                    work::drop_journal(layout, &parent, volume, work)?;
-                }
             }
         }
         if stop() {
@@ -222,8 +216,8 @@ pub fn install(
                 check: true,
             }),
         ))?;
-        // Assemble (step 3), every entry through the journal, the manifest first.
-        let mut journal = Journal::start(&staging, volume).map_err(failed)?;
+        // Assemble (step 3), every entry made marked, the manifest first.
+        let mut maker = Maker::new(staging_id, volume);
         let order = target
             .iter()
             .filter(|path| *path == MANIFEST)
@@ -232,12 +226,19 @@ pub fn install(
             if stop() {
                 return Err(Problem::Interrupted);
             }
-            put(layout, &staging, &staging_path, &source, path, &mut journal)?;
+            put(layout, &staging, &staging_path, &source, path, &mut maker)?;
         }
-        drop(journal);
         settle_folders(&staging, &staging_path, &target)?;
         for path in &target {
             check(layout, &staging, &staging_path, &source, path)?;
+        }
+        // Nothing but the release goes in place: anything else put in the work folder stops it
+        // here, kept there, with the previous tree still at the root.
+        let target_set: BTreeSet<String> = target.iter().cloned().collect();
+        match tree::only_listed(&staging, "", &target_set, layout.owner) {
+            Ok(Ok(())) => {}
+            Ok(Err(entry)) => return Err(Problem::Conflict(staging_path.join(entry))),
+            Err(_) => return Err(Problem::Verify(staging_path.clone())),
         }
         sys::flush(staging.raw()).map_err(failed)?;
         drop(staging);
@@ -276,7 +277,7 @@ pub fn install(
                 files: inspection.base.clone(),
                 check: false,
             };
-            if let Cleared::Kept { kept, .. } = work::clear(layout, &parent, volume, &swapped)? {
+            if let Cleared::Kept(kept) = work::clear(layout, &parent, volume, &swapped)? {
                 report.line(work::kept_line(layout, &swapped, &kept));
             }
         }
@@ -285,17 +286,15 @@ pub fn install(
         return Err(Problem::Interrupted);
     }
     place::make_link(layout)?;
-    // Verify and make durable (step 4): the root is the object put in place, its journal gone.
+    // Verify and make durable (step 4): the root is the object put in place.
     let root = place::open_ours(&parent, &root_name, &layout.root, layout.owner)?
         .ok_or_else(|| Problem::Verify(layout.root.clone()))?;
     let root_entry = sys::entry(root.raw()).map_err(|_| Problem::Verify(layout.root.clone()))?;
     if place::inode_on(&root_entry, volume, &layout.root)? != placed_id {
         return Err(Problem::Verify(layout.root.clone()));
     }
-    journal::remove(&root, layout.owner)
-        .map_err(|_| Problem::Conflict(layout.root.join(JOURNAL)))?;
     let target_set: BTreeSet<String> = target.iter().cloned().collect();
-    if !is_release(layout, &root, &source, &target_set, false) {
+    if !is_release(layout, &root, &source, &target_set) {
         return Err(Problem::Verify(layout.root.clone()));
     }
     if place::link_state(layout)? != LinkState::Owned {
@@ -463,15 +462,12 @@ fn inspect(
         Some(root)
             if assembled.is_some()
                 && assembled == root_id
-                && is_release(layout, root, source, &target, true) =>
+                && is_release(layout, root, source, &target) =>
         {
             (Root::Target, root_files.clone())
         }
         Some(root) => {
-            // The journal at the top is the installation's: a release put in place before its
-            // journal went.
-            let mut files: BTreeSet<String> = root_files.iter().cloned().collect();
-            files.insert(JOURNAL.to_owned());
+            let files: BTreeSet<String> = root_files.iter().cloned().collect();
             match tree::only_listed(root, "", &files, layout.owner) {
                 Ok(Ok(())) => {}
                 Ok(Err(entry)) => return Err(Problem::Conflict(layout.root.join(entry))),
@@ -498,15 +494,8 @@ fn inspect(
 }
 
 /// Whether the open root holds exactly this release: each of its files as
-/// listed, the root and each folder of its files 0755, and nothing else but,
-/// with `journal`, the journal at the top.
-fn is_release(
-    layout: &Layout,
-    root: &Fd,
-    source: &Source,
-    target: &BTreeSet<String>,
-    journal: bool,
-) -> bool {
+/// listed, the root and each folder of its files 0755, and nothing else.
+fn is_release(layout: &Layout, root: &Fd, source: &Source, target: &BTreeSet<String>) -> bool {
     let folders_made = || {
         let folders: BTreeSet<&str> = target
             .iter()
@@ -518,12 +507,8 @@ fn is_release(
                     if matches!(sys::entry_at(&parent, &name), Ok(Some(entry)) if entry.kind == Kind::Folder && entry.mode == 0o755))
             })
     };
-    let mut allowed = target.clone();
-    if journal {
-        allowed.insert(JOURNAL.to_owned());
-    }
     matches!(
-        tree::only_listed(root, "", &allowed, layout.owner),
+        tree::only_listed(root, "", target, layout.owner),
         Ok(Ok(()))
     ) && folders_made()
         && target
@@ -533,12 +518,12 @@ fn is_release(
 
 /// The open folder holding `path` in the work folder `staging`, and the
 /// path's last name: each folder on the way one this run made, the missing
-/// ones made through the journal. Anything else on the way is a conflict.
+/// ones made marked. Anything else on the way is a conflict.
 fn parent_made(
     staging: &Fd,
     path: &str,
     owner: u32,
-    journal: &mut Journal,
+    maker: &mut Maker,
 ) -> Result<(Fd, CString), WalkError> {
     let names: Vec<&str> = path.split('/').collect();
     let (last, folders) = names.split_last().expect("split gives one name at least");
@@ -552,7 +537,7 @@ fn parent_made(
         let name = sys::c_name(folder.as_bytes())?;
         let parent = current.as_ref().unwrap_or(staging);
         let next = match tree::spelled(parent, &name)? {
-            Spelled::Missing => match journal.new_folder(parent, &name) {
+            Spelled::Missing => match maker.new_folder(parent, &name) {
                 Ok(made) => made,
                 Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
                     return Err(WalkError::Conflict(walked))
@@ -560,7 +545,7 @@ fn parent_made(
                 Err(error) => return Err(WalkError::Io(error)),
             },
             Spelled::Exact(entry)
-                if journal.made(&entry) && place::is_ours(&entry, Kind::Folder, owner) =>
+                if maker.made(&entry) && place::is_ours(&entry, Kind::Folder, owner) =>
             {
                 sys::open_folder_at(parent, &name)?
             }
@@ -576,26 +561,26 @@ fn parent_made(
 }
 
 /// Writes the owned file `path` from the source into the work folder
-/// `staging` (at `at`), made by this run: made under a reserved name in the
-/// journal, hashed as it is copied, given its mode and flushed, then moved
-/// to its path where nothing is. A file that no longer matches the manifest
-/// stops the installation.
+/// `staging` (at `at`), made by this run: made marked under a reserved name,
+/// hashed as it is copied, given its mode and written through to the disk,
+/// then moved to its path where nothing is. A file that no longer matches
+/// the manifest stops the installation.
 fn put(
     layout: &Layout,
     staging: &Fd,
     at: &Path,
     source: &Source,
     path: &str,
-    journal: &mut Journal,
+    maker: &mut Maker,
 ) -> Result<(), Problem> {
     let written = at.join(path);
-    let (parent, name) = match parent_made(staging, path, layout.owner, journal) {
+    let (parent, name) = match parent_made(staging, path, layout.owner, maker) {
         Ok(found) => found,
         Err(WalkError::Conflict(conflict)) => return Err(Problem::Conflict(at.join(conflict))),
         Err(WalkError::Io(_)) => return Err(Problem::Write(written)),
     };
     let failed = |_| Problem::Write(written.clone());
-    let (mut file, reserved) = journal.new_file(&parent).map_err(failed)?;
+    let (mut file, reserved) = maker.new_file(&parent).map_err(failed)?;
     if path == MANIFEST {
         file.write_all(&source.manifest_bytes).map_err(failed)?;
     } else {
@@ -617,7 +602,7 @@ fn put(
         }
     }
     sys::set_mode(&file, source::mode_of(path)).map_err(failed)?;
-    sys::flush(std::os::unix::io::AsRawFd::as_raw_fd(&file)).map_err(failed)?;
+    sys::sync(std::os::unix::io::AsRawFd::as_raw_fd(&file)).map_err(failed)?;
     drop(file);
     sys::rename_exclusive(&parent, &reserved, &name).map_err(|error| {
         if error.raw_os_error() == Some(libc::EEXIST) {

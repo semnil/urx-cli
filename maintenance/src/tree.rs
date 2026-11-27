@@ -223,7 +223,7 @@ pub fn remove_listed(
                         left.kept.extend(inner_left.kept);
                         drop(inner);
                         if inner_left.empty {
-                            crate::journal::remove_folder(folder, &name)?;
+                            crate::mark::remove_folder(folder, &name)?;
                         }
                     }
                 }

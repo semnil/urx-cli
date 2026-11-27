@@ -10,7 +10,6 @@
 //! `removing` for the removal to be run again. The gate and its folder stay
 //! (K21).
 
-use crate::journal::JOURNAL;
 use crate::place::{self, Access, Layout, LinkState};
 use crate::records::{pending_tag, Phase, State, Work, MANIFEST};
 use crate::sys::{self, Fd, Kind};
@@ -202,33 +201,20 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         ));
     }
     // The work folder an interrupted installation left, by its inode: the previous tree by its
-    // list, a release partly assembled by its journal.
+    // list, a release partly assembled by its marks.
     if let (Some(parent), Some(volume), Some(work)) = (&parent, volume, &work) {
-        if let Cleared::Kept { kept, journal } =
+        if let Cleared::Kept(kept) =
             work::clear(layout, parent, volume, work).map_err(&unfinished)?
         {
             report.line(work::kept_line(layout, work, &kept));
-            if journal {
-                // Kept with what is not the installation's: no longer recorded, so its journal
-                // can go.
-                held.write_state(&State {
-                    work: None,
-                    ..removing.clone()
-                })
-                .map_err(&unfinished)?;
-                work::drop_journal(layout, parent, volume, work).map_err(&unfinished)?;
-            }
         }
     }
     // The removal tool after the others, so that while any other file is left, the installed one
     // is too; the manifest last.
-    // The journal a release put in place may still have at the top goes with the others.
-    let journal = JOURNAL.to_owned();
     let mut order: Vec<&String> = files
         .iter()
         .filter(|path| path.as_str() != TOOL && path.as_str() != MANIFEST)
         .collect();
-    order.push(&journal);
     order.extend(files.iter().filter(|path| path.as_str() == TOOL));
     order.extend(files.iter().filter(|path| path.as_str() == MANIFEST));
     if let Some(root) = &root {

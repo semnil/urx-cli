@@ -24,7 +24,7 @@ pub const REQUIRED: [&str; 5] = [
 pub const PENDING_SUFFIX: &str = ".urx-pending";
 
 /// The start of the names maintenance keeps for itself inside a tree it
-/// makes (its journal, and each entry before it is moved to its path): no
+/// makes (each entry before it is moved to its path): no
 /// name of an owned path starts with it, in any letter case.
 pub const RESERVED_PREFIX: &str = ".urx-";
 
@@ -205,8 +205,8 @@ impl Phase {
 
 /// A work folder beside the root (K41 as revised): its name, which object
 /// it is (its inode), the files it may hold, and whether what it holds is
-/// told by its journal (`check`: a release being assembled, of which only
-/// what the journal names is the installation's) or by the list (the
+/// told by its marks (`check`: a release being assembled, of which only
+/// what carries the folder's mark is the installation's) or by the list (the
 /// previous tree, swapped out of the root).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
