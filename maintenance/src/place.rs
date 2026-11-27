@@ -287,6 +287,42 @@ pub fn open_root(layout: &Layout, create: bool) -> Result<Option<Fd>, Problem> {
     Ok(Some(root))
 }
 
+/// Checks that only root (the layout's owner) can change the folder the root
+/// is in and the one the maintenance folder is in, and every folder above
+/// them up to the layout's top, links resolved: the installation's names are
+/// made, swapped and removed there, so anyone else who could write one could
+/// change them between a check and the change it guards. As far as the
+/// folders exist; a missing one is made by root.
+pub fn check_not_exposed(layout: &Layout) -> Result<(), Problem> {
+    let top = std::fs::canonicalize(&layout.top).unwrap_or_else(|_| layout.top.clone());
+    for place in [&layout.root, &layout.maintenance] {
+        let Some(parent) = place.parent() else {
+            continue;
+        };
+        let Some(existing) = parent
+            .ancestors()
+            .find(|folder| std::fs::symlink_metadata(folder).is_ok())
+        else {
+            continue;
+        };
+        let real = std::fs::canonicalize(existing)
+            .map_err(|_| Problem::Exposed(existing.to_path_buf()))?;
+        for folder in real.ancestors() {
+            if !folder.starts_with(&top) {
+                break;
+            }
+            let found =
+                std::fs::metadata(folder).map_err(|_| Problem::Exposed(folder.to_path_buf()))?;
+            let owner = std::os::unix::fs::MetadataExt::uid(&found);
+            let mode = std::os::unix::fs::MetadataExt::mode(&found);
+            if (owner != 0 && owner != layout.owner) || mode & 0o022 != 0 {
+                return Err(Problem::Exposed(folder.to_path_buf()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The work folder beside the root where the release whose manifest digest
 /// starts with `tag` is assembled, and where the previous tree is left by
 /// the swap that puts the release in place (K41 as revised).

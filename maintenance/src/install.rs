@@ -53,6 +53,8 @@ struct Inspection {
     /// from when it was interrupted.
     base: Vec<String>,
     root: Root,
+    /// Which object the root is, when there is one.
+    root_id: Option<(u64, u64)>,
     link: LinkState,
 }
 
@@ -68,7 +70,10 @@ pub fn install(
     stop: &dyn Fn() -> bool,
 ) -> Result<Report, Problem> {
     let source = source::verify(source_path, expected)?;
+    place::check_not_exposed(layout)?;
     place::check_reachable(layout, false)?;
+    // The root's parent, opened once: every name below is acted on through this descriptor.
+    let parent_now = place::root_parent(layout, false)?;
     let held = place::hold(
         layout,
         if apply {
@@ -81,7 +86,7 @@ pub fn install(
         Some(held) => held.state(layout.owner)?,
         None => None,
     };
-    let inspection = inspect(layout, &source, state.as_ref())?;
+    let inspection = inspect(layout, parent_now.as_ref(), &source, state.as_ref())?;
     let release = &source.manifest.release;
     if !apply {
         let mut report = Report::default();
@@ -130,15 +135,20 @@ pub fn install(
         owned: owned.clone(),
         base: Some(inspection.base.clone()),
     })?;
-    let parent = place::root_parent(layout, true)?.expect("a made parent is open");
+    let parent = match parent_now {
+        Some(parent) => parent,
+        None => place::root_parent(layout, true)?.expect("a made parent is open"),
+    };
     let staging_path = place::staging(layout, &tag);
     let staging_name = c_last(&staging_path);
     let root_name = c_last(&layout.root);
     let listed: BTreeSet<String> = owned.iter().cloned().collect();
     let mut report = Report::default();
+    // The work folder this run put in place, once it is.
+    let mut placed_id: Option<(u64, u64)> = None;
     if inspection.root != Root::Target {
         // A work folder an interrupted run of this release left goes first.
-        if !clear_staging(layout, &parent, &staging_name, &staging_path, &listed)? {
+        if !clear_staging(layout, &parent, &staging_name, &staging_path, &listed, None)? {
             return Err(Problem::Conflict(staging_path));
         }
         if stop() {
@@ -146,6 +156,7 @@ pub fn install(
         }
         let failed = |_| Problem::Write(staging_path.clone());
         let staging = sys::make_folder_at(&parent, &staging_name, 0o755).map_err(failed)?;
+        let staging_id = sys::entry(staging.raw()).map_err(failed)?.id;
         // Assemble (step 3), every file in a folder of this run's own.
         for path in &target {
             if stop() {
@@ -162,6 +173,21 @@ pub fn install(
         if stop() {
             return Err(Problem::Interrupted);
         }
+        // The names are still the objects checked: the work folder made here, and the root
+        // inspected (or nothing there).
+        let at_name = |name: &std::ffi::CStr| {
+            sys::entry_at(&parent, name)
+                .ok()
+                .flatten()
+                .map(|entry| entry.id)
+        };
+        if at_name(&staging_name) != Some(staging_id) {
+            return Err(Problem::Conflict(staging_path));
+        }
+        if at_name(&root_name) != inspection.root_id {
+            return Err(Problem::Conflict(layout.root.clone()));
+        }
+        placed_id = Some(staging_id);
         // Put in place with one rename: the previous tree goes to the work folder's name.
         let placed = if inspection.root == Root::Absent {
             sys::rename_exclusive(&parent, &staging_name, &root_name)
@@ -175,7 +201,21 @@ pub fn install(
     if stop() {
         return Err(Problem::Interrupted);
     }
-    if !clear_staging(layout, &parent, &staging_name, &staging_path, &listed)? {
+    // After this run's swap the work folder's name holds the previous root; after an interrupted
+    // run's, what it left there, checked by the preflight.
+    let previous = if placed_id.is_some() {
+        inspection.root_id
+    } else {
+        None
+    };
+    if !clear_staging(
+        layout,
+        &parent,
+        &staging_name,
+        &staging_path,
+        &listed,
+        previous,
+    )? {
         report.line(format!(
             "Kept {}: the previous installation left files there that it did not make.",
             staging_path.display()
@@ -188,6 +228,9 @@ pub fn install(
     // Verify and make durable (step 4).
     let root = place::open_ours(&parent, &root_name, &layout.root, layout.owner)?
         .ok_or_else(|| Problem::Verify(layout.root.clone()))?;
+    if placed_id.is_some_and(|id| sys::entry(root.raw()).ok().map(|entry| entry.id) != Some(id)) {
+        return Err(Problem::Verify(layout.root.clone()));
+    }
     for path in &target {
         check(layout, &root, &layout.root, &source, path)?;
     }
@@ -254,9 +297,13 @@ fn c_last(path: &Path) -> CString {
 /// replace it, and that the root and the work folder hold nothing but the
 /// installation's recorded files. Anything else there stops it here, before
 /// the record changes, and is kept (K18).
-fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<Inspection, Problem> {
-    let parent = place::root_parent(layout, false)?;
-    let root = match &parent {
+fn inspect(
+    layout: &Layout,
+    parent: Option<&Fd>,
+    source: &Source,
+    state: Option<&State>,
+) -> Result<Inspection, Problem> {
+    let root = match parent {
         Some(parent) => {
             place::open_ours(parent, &c_last(&layout.root), &layout.root, layout.owner)?
         }
@@ -304,7 +351,7 @@ fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<In
         Err(_) => Err(Problem::Conflict(at.to_path_buf())),
     };
     // A work folder an interrupted run of this release left holds only recorded files.
-    if let Some(parent) = &parent {
+    if let Some(parent) = parent {
         let staging_path = place::staging(layout, pending_tag(&digest));
         if let Some(staging) =
             place::open_ours(parent, &c_last(&staging_path), &staging_path, layout.owner)?
@@ -332,11 +379,20 @@ fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<In
             Root::Previous
         }
     };
+    let root_id = match &root {
+        Some(root) => Some(
+            sys::entry(root.raw())
+                .map_err(|_| Problem::Conflict(layout.root.clone()))?
+                .id,
+        ),
+        None => None,
+    };
     Ok(Inspection {
         action,
         previous,
         base,
         root: root_state,
+        root_id,
         link,
     })
 }
@@ -362,11 +418,16 @@ fn clear_staging(
     name: &std::ffi::CStr,
     path: &Path,
     listed: &BTreeSet<String>,
+    expected: Option<(u64, u64)>,
 ) -> Result<bool, Problem> {
     let Some(staging) = place::open_ours(parent, name, path, layout.owner)? else {
         return Ok(true);
     };
     let failed = |_| Problem::Write(path.to_path_buf());
+    // Only the object expected there: anything else under the name is kept.
+    if expected.is_some_and(|id| sys::entry(staging.raw()).ok().map(|entry| entry.id) != Some(id)) {
+        return Ok(false);
+    }
     if !tree::clear_listed(&staging, "", listed, layout.owner).map_err(failed)? {
         return Ok(false);
     }

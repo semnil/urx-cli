@@ -64,6 +64,8 @@ pub struct Entry {
     pub owner: u32,
     pub mode: u32,
     pub size: u64,
+    /// The device and the inode: which object this is, whatever its name.
+    pub id: (u64, u64),
 }
 
 fn entry_of(found: &libc::stat) -> Entry {
@@ -78,6 +80,7 @@ fn entry_of(found: &libc::stat) -> Entry {
         owner: found.st_uid,
         mode: u32::from(found.st_mode) & 0o7777,
         size: found.st_size as u64,
+        id: (found.st_dev as u64, found.st_ino),
     }
 }
 

@@ -1003,3 +1003,28 @@ fn a_folder_other_users_cannot_pass_behind_a_link_stops_the_installation() {
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
+
+#[test]
+fn a_parent_others_can_change_stops_the_installation_before_any_change() {
+    for (folder, mode_given) in [
+        ("usr/local/lib", 0o777),
+        ("usr/local/lib", 0o775),
+        ("Library", 0o757),
+    ] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+        let at = scene.base.join(folder);
+        fs::create_dir_all(&at).unwrap();
+        fs::set_permissions(&at, fs::Permissions::from_mode(mode_given)).unwrap();
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &never),
+            Err(Problem::Exposed(fs::canonicalize(&at).unwrap())),
+            "{folder} {mode_given:o}"
+        );
+        assert!(!scene.layout.maintenance.exists(), "{folder}");
+        assert!(!scene.layout.root.exists(), "{folder}");
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+        install(&scene.layout, &source, &expected, true, &never).unwrap();
+        assert!(launcher_accepts(&scene), "{folder}");
+    }
+}
