@@ -9,10 +9,12 @@ use urx_launcher::install::{FORMAT, PRODUCT};
 /// The name of the release manifest in a bundle; it is owned too.
 pub const MANIFEST: &str = "release-manifest.json";
 
-/// The files a bundle needs for the launcher, the CLI and its removal (K18, K20).
-pub const REQUIRED: [&str; 4] = [
+/// The files a bundle needs for the launcher, the CLI, its addon and its
+/// removal (K18, K20), as the installer build requires them.
+pub const REQUIRED: [&str; 5] = [
     "bin/urx",
     "runtime/node",
+    "native/urx-native.node",
     "app/main.js",
     "maintenance/urx-uninstall",
 ];

@@ -56,6 +56,7 @@ fn release(scene: &Scene, name: &str, version: &str, files: &[(&str, &str)]) -> 
     let mut all: Vec<(String, String)> = vec![
         ("bin/urx".into(), format!("launcher {version}")),
         ("runtime/node".into(), "node".into()),
+        ("native/urx-native.node".into(), "addon".into()),
         ("app/main.js".into(), format!("main {version}")),
         ("maintenance/urx-uninstall".into(), "uninstall".into()),
     ];
