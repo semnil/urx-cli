@@ -1,0 +1,32 @@
+[package]
+name = "urx-launcher"
+# Not published and not shown anywhere: the CLI's version is the root
+# package.json's, and this crate holds no copy of it.
+version = "0.0.0"
+description = "The installed urx command: starts the bundled Node runtime under the installation's use protection"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "urx"
+path = "src/main.rs"
+
+[dependencies]
+# The installation state names the release manifest by its SHA-256 (K38).
+sha2 = { version = "=0.11.1", default-features = false }
+serde_json = "=1.0.154"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+] }

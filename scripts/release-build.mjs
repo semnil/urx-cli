@@ -4,15 +4,20 @@
 // worktree of their own, so edits to the working tree, the index, Git's
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
-// `--release` and a Cargo target directory of their own, and the result
-// replaces dist-release/ as one directory, so concurrent release builds never
-// mix their halves.
+// `--release` and a Cargo target directory of their own. The build stops
+// before building when anything is at dist-release/, and publishes its
+// output with tools/output: complete, record included, in a work folder
+// beside it, then renamed to dist-release/ only where nothing is, so the path
+// shows nothing or the whole output and nothing there is removed or
+// replaced. The launcher is built from the same export into the same target
+// directory and placed at dist-release/launcher/ for the bundle
+// (scripts/build-bundle.mjs).
 
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { cpSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
@@ -73,7 +78,154 @@ export function copyCommonPackage(source, output) {
  * Node reads them.
  */
 export function markModuleFormat(output) {
-  writeFileSync(join(output, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+  writeFileSync(join(output, "package.json"), MODULE_FORMAT);
+}
+
+const MODULE_FORMAT = `${JSON.stringify({ type: "module" })}\n`;
+
+/**
+ * The package files the release build writes beside the compiled modules:
+ * Node reads the CLI's `.js` files as ES modules by the first, whatever lies
+ * above the output, and finds the common package's entry points by the
+ * second.
+ */
+export const PACKAGE_FILES = Object.freeze({ module: "package.json", common: "node_modules/@urx/device-control/package.json" });
+
+/** Whether `bytes` are the package.json `markModuleFormat` writes. */
+export const isModuleFormat = (bytes) => {
+  try {
+    const value = JSON.parse(bytes.toString("utf8"));
+    return JSON.stringify(value) === JSON.stringify({ type: "module" });
+  } catch {
+    return false;
+  }
+};
+
+/** Every regular file under `root`, as sorted relative paths with `/` separators; a link or another kind of file is refused. */
+export function filesUnder(root) {
+  const found = [];
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`the output may hold no link: ${relative(root, path)}`);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) found.push(relative(root, path).split(sep).join("/"));
+      else throw new Error(`the output may hold regular files only: ${relative(root, path)}`);
+    }
+  };
+  walk(root);
+  return found.sort();
+}
+
+export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+/** The record of the files a release build made in its output, each with its SHA-256 and size, kept in that output. */
+export const RELEASE_FILES = "release-files.json";
+
+/** Each file under `root` but `excluded`, with its SHA-256 and size. */
+export function describeFiles(root, excluded) {
+  return filesUnder(root)
+    .filter((path) => path !== excluded)
+    .map((path) => {
+      const bytes = readFileSync(join(root, ...path.split("/")));
+      return { path, sha256: sha256(bytes), size: bytes.length };
+    });
+}
+
+/** Records in `output` the files it holds, as the files this release build made there. */
+export function writeReleaseFiles(output) {
+  const files = describeFiles(output, RELEASE_FILES);
+  writeFileSync(join(output, RELEASE_FILES), `${JSON.stringify({ product: "urx-cli", output: "release", files }, null, 2)}\n`);
+}
+
+/**
+ * Whether `path` is a file path as `filesUnder` gives one: relative, with `/`
+ * between non-empty segments, none of them `.` or `..`, and no character that
+ * Windows cannot hold in a name, so it names one file inside the directory it
+ * is joined to on either platform.
+ */
+export function isRecordedPath(path) {
+  return typeof path === "string" && path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".." && !/[\\:*?"<>|\u0000-\u001f]/.test(segment));
+}
+
+const isFileRecord = (file) => isRecordedPath(file?.path) && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "") && Number.isSafeInteger(file?.size) && file.size >= 0;
+
+/**
+ * The files the record at `path` says a release build made there, with their
+ * hashes, or null when it is not a release output: a record whose paths are
+ * not each one file inside the output, or name one file twice (letter case
+ * aside, as the file systems of both platforms compare names), is not one.
+ */
+export function releaseRecord(path) {
+  try {
+    const record = JSON.parse(readFileSync(join(path, RELEASE_FILES), "utf8"));
+    if (record?.product !== "urx-cli" || record?.output !== "release" || !Array.isArray(record.files) || !record.files.every(isFileRecord)) return null;
+    const names = new Set(record.files.map((file) => file.path.toLowerCase()));
+    if (names.size !== record.files.length || names.has(RELEASE_FILES)) return null;
+    return record.files;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How the files under `root` differ from `files` (path, SHA-256, size): each
+ * one missing or changed, by path. A recorded path is read only when it is a
+ * regular file under `root` reached through no link, as `filesUnder` lists
+ * them; anything else at that path is missing. A link anywhere under `root`
+ * throws, as in `filesUnder`.
+ */
+export function recordedProblems(root, files) {
+  const present = new Set(filesUnder(root));
+  const problems = [];
+  for (const file of files) {
+    let bytes;
+    try {
+      if (!present.has(file.path)) throw new Error("not a regular file under the root");
+      bytes = readFileSync(join(root, ...file.path.split("/")));
+    } catch {
+      problems.push(`${file.path} is missing`);
+      continue;
+    }
+    if (bytes.length !== file.size || sha256(bytes) !== file.sha256) problems.push(`${file.path} is not as it was built`);
+  }
+  return problems;
+}
+
+/**
+ * The executable `name` that `cargo build --message-format=json` reports
+ * building, wherever the target in use puts it.
+ */
+export function cargoArtifact(messages, name) {
+  let found;
+  for (const line of messages.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    const message = JSON.parse(line);
+    if (message.reason === "compiler-artifact" && message.target?.name === name && message.target.kind?.includes("bin") && typeof message.executable === "string") {
+      found = message.executable;
+    }
+  }
+  if (found === undefined) throw new Error(`cargo reported building no ${name} executable`);
+  return found;
+}
+
+/** The `urx` executable that `cargo build --message-format=json` reports building. */
+export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
+
+/**
+ * Builds `tools/output` in the checkout at `root` and returns its executable,
+ * which publishes a build's output (see its main.rs). It is
+ * build tooling, built from the working tree; nothing of it is in an output.
+ */
+export function outputTool(root) {
+  const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "inherit"],
+    env: environment,
+  });
+  return cargoArtifact(messages, "urx-output");
 }
 
 /**
@@ -91,64 +243,62 @@ export function removeExport(root, destination) {
 }
 
 /**
- * Makes `staging` the directory at `output`, one directory rename at a time:
- *
- * 1. the previous output is renamed aside, whole, to `<output>-previous-<id>`;
- * 2. `staging` is renamed into its place;
- * 3. the set-aside output is removed.
- *
- * When step 2 fails (another release put its output there in between, or the
- * rename itself failed), the previous output is renamed back, so `output`
- * always holds one release's complete result, never a partly removed one. An
- * interruption between the steps leaves the previous output complete under its
- * set-aside name. A failed step 3 only warns: the new output is complete, and
- * whatever could not be removed stays under the set-aside name.
+ * Runs `clean`, a build's removal of its own scratch or export, so that its
+ * failure changes neither the build's result nor its error: a failure is a
+ * warning naming `label` and what is left at `path`.
  */
-export function publishOutput(staging, output, { rename = renameSync, remove = (path) => rmSync(path, { recursive: true, force: true }), warn = (message) => process.stderr.write(`${message}\n`) } = {}) {
-  const aside = `${output}-previous-${process.pid}-${randomUUID()}`;
-  let setAside = false;
+export function cleanUp(label, path, clean, warn = (message) => process.stderr.write(`${message}\n`)) {
   try {
-    rename(output, aside);
-    setAside = true;
+    clean();
   } catch (error) {
-    if (error?.code !== "ENOENT") {
-      try {
-        remove(staging);
-      } catch {
-        warn(`release build: the new output could not be removed from ${staging}`);
-      }
-      throw new Error(`the previous ${output} could not be set aside`, { cause: error });
-    }
+    warn(`${label}: ${path} could not be removed and is left there: ${error?.message ?? error}`);
   }
+}
+
+/**
+ * Stops the build when anything is at `output`, an empty folder or a link
+ * included: a build never removes or replaces a previous output, so the user
+ * removes it before building again. Checked before building anything; the
+ * rename that publishes the output checks again.
+ */
+export function requireNoOutput(output, label = "release build") {
   try {
-    rename(staging, output);
+    lstatSync(output);
   } catch (error) {
-    // Restoring comes first, so a failing cleanup cannot leave `output` empty.
-    if (setAside) {
-      try {
-        rename(aside, output);
-      } catch {
-        warn(`release build: the previous output is kept at ${aside}`);
-      }
-    }
-    try {
-      remove(staging);
-    } catch {
-      warn(`release build: the new output could not be removed from ${staging}`);
-    }
-    throw new Error(`${output} could not be replaced; another release build may have replaced it first`, { cause: error });
+    if (error?.code === "ENOENT") return;
+    throw new Error(`${output} could not be examined`, { cause: error });
   }
-  if (setAside) {
-    try {
-      remove(aside);
-    } catch {
-      warn(`release build: the previous output could not be removed from ${aside}`);
-    }
-  }
+  throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
+}
+
+/**
+ * Publishes the files of `staging` as `output` with `tool` (`outputTool`):
+ * written into a work folder beside `output` through the open folder, each
+ * folder and file created where nothing is, folder modes kept outside
+ * Windows, read back against `staging`, then `last`, the record at the top of
+ * the output that marks it finished, and last the work folder renamed to
+ * `output` only where nothing is. That rename is the moment the build
+ * succeeds and the next stage can see the output. When anything is at
+ * `output` by then, another build's or program's, it is left as it is and the
+ * error does not ask to remove it; on any failure the output's path is
+ * untouched and the work folder is left, without the record, under a name the
+ * error gives.
+ */
+export function publishOutput(staging, output, { last, label = "release build", tool }) {
+  const result = spawnSync(tool, ["publish", staging, output, ...(last === undefined ? [] : ["--last", last])], { encoding: "utf8" });
+  if (result.error) throw result.error;
+  const detail = result.stderr.trim().replace(/^urx-output: /, "");
+  // It was not there when the build started (requireNoOutput): another build or program put it there meanwhile.
+  if (result.status === 3) throw new Error(`${output} was put in place by another build or program while the ${label} ran; it is left as it is (${detail})`);
+  if (result.status !== 0) throw new Error(`the ${label} could not publish ${output}: ${detail}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL("../", import.meta.url));
+  const output = join(root, "dist-release");
+  // Checked before building anything; the rename that publishes the output checks again.
+  requireNoOutput(output);
+  const tool = outputTool(root);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
   try {
@@ -170,17 +320,27 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
     run(["scripts/build-native.mjs", "--release"]);
-    const output = join(root, "dist-release");
-    // Copied next to the output first, so the final rename stays on one file system.
-    const staging = mkdtempSync(join(root, "dist-release-"));
-    rmSync(staging, { recursive: true, force: true });
+    // The installed command, from the same export and target directory (K22).
+    const messages = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
+      cwd: source,
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+    });
+    // Laid out in this run's scratch, then published, its record last.
+    const staging = join(scratch, "output");
     cpSync(join(source, "dist"), staging, { recursive: true });
+    const launcher = process.platform === "win32" ? "urx.exe" : "urx";
+    cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
-    publishOutput(staging, output);
+    writeReleaseFiles(staging);
+    publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);
   } finally {
-    removeExport(root, source);
-    rmSync(scratch, { recursive: true, force: true });
+    // The output is published or not by now; removing the scratch changes neither.
+    cleanUp("release build", source, () => removeExport(root, source));
+    cleanUp("release build", scratch, () => rmSync(scratch, { recursive: true, force: true }));
   }
 }

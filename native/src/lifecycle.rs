@@ -75,7 +75,9 @@ impl Task for DiscoverTask {
     type JsValue = DiscoveryRecord;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        let outcome = discovery::discover(&self.options, &self.control);
+        // How a lost link was lost (urx-device 0.2.0's `LinkFailure::lost_link`) is not reported yet; the failure is.
+        let outcome =
+            discovery::discover(&self.options, &self.control).map_err(|link| link.failure);
         if let Ok(entries) = &outcome {
             *lock(&self.ports) = entries
                 .iter()
@@ -201,12 +203,15 @@ impl Connection {
 #[napi]
 impl Connection {
     /// The System firmware version the opening read, or null when the unit
-    /// reports none (D15).
+    /// reports none (D15) or a `firm_list` the version cannot be read from
+    /// (urx-device 0.2.0's `SystemFirmware::Unreadable`). No command shows a
+    /// connection's firmware yet; the one that does decides how to tell the
+    /// two apart.
     #[napi(getter)]
     pub fn firmware(&self) -> Either<String, Null> {
         match self.inner.firmware() {
             SystemFirmware::Version(version) => Either::A(version.clone()),
-            SystemFirmware::Absent => Either::B(Null),
+            SystemFirmware::Absent | SystemFirmware::Unreadable => Either::B(Null),
         }
     }
 
@@ -274,7 +279,7 @@ impl Task for OpenTask {
             match connection::open_with(port, &self.device_id, &options, &self.control, handler) {
                 Ok(opened) => Arc::new(opened),
                 // A failed open owns nothing afterwards (K37).
-                Err(failure) => return Ok(Err((failure, Cleanup::COMPLETE))),
+                Err(link) => return Ok(Err((link.failure, Cleanup::COMPLETE))),
             };
         match start_fatal_thread(Arc::clone(&opened)) {
             Ok(fatal) => {

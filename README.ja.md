@@ -14,7 +14,7 @@
 | `native` | urx-device の通信の上に作る Node-API のアドオン (Rust、napi-rs) |
 | `vendor/urx-device` | 共通ライブラリ。このリポジトリが取り込んだコミットのもの |
 | `scripts` | リポジトリの道具: `build-inputs.mjs` はビルドの入力を確かめ、`build-info.mjs` は版とコミットをビルドに埋め込み、`build-native.mjs` はアドオンを組み立て、`version.mjs` は CLI の版の写しをそろえる |
-| `build-inputs.json` | ビルドに使う Node・pnpm・Rust の正確な版と、Node のアーカイブのハッシュ |
+| `build-inputs.json` | ビルドに使う Node・pnpm・Rust・Inno Setup の正確な版と、Node のアーカイブと Inno Setup のインストーラのハッシュ |
 
 ## ビルドとテスト
 
@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。`pnpm build:release` は、作業ツリーではなくコミット済みのソースから両方を `dist-release` に組み立てる。
+`pnpm test` は、`pnpm build:native` が `dist/native` に組み立てたアドオンを読み込む。`pnpm build:release` は、作業ツリーではなくコミット済みのソースから両方を `dist-release` に組み立てる。`pnpm build:bundle --node-archive <path>` は、その `dist-release` と Node の公式アーカイブから、インストールする一式を `dist-bundle` に組み立てる。アーカイブは `build-inputs.json` のハッシュと照らし、何もダウンロードしない。Windows では、`node scripts/build-windows-installer.mjs --iscc <ISCC.exe のパス>` が、`build-inputs.json` に記録した版の Inno Setup で、`dist-bundle` からインストーラを `dist-installer` に組み立てる。どのビルドも前の出力を消さず、置き換えもしない (空のフォルダも同じ)。もう一度組み立てる前に、`dist-release`・`dist-bundle`・`dist-installer` を自分で消す。失敗したビルドは出力の場所に何も残さず、書いたファイルを隣の `dist-release.work-…`・`dist-bundle.work-…`・`dist-installer.work-…` のフォルダに残すので、それを自分で消す。
 
 ## 版
 

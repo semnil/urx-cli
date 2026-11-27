@@ -2,6 +2,7 @@
 // device access (V5/V6, H5). Help and version never reach this module: it is
 // imported only by code that opens a device connection.
 
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { BRIDGE_API_EXPECTED } from "../bridge.js";
@@ -55,8 +56,19 @@ export type AddonProblem =
 
 export type AddonCheck = { readonly ok: true; readonly addon: NativeAddon } | { readonly ok: false; readonly problem: AddonProblem };
 
-/** The addon's location next to this module in the build: dist/native/urx-native.node. */
-export const ADDON_URL = new URL("./urx-native.node", import.meta.url);
+/**
+ * Where the addon is for this module's layout. In an installed bundle (K18)
+ * the compiled CLI is under `app` and the addon under the bundle's own
+ * `native`, beside the bundle's release manifest; in a build it is next to
+ * this module: dist/native/urx-native.node. The layout is the bundle's
+ * manifest being there, never the addon being found in either place.
+ */
+export function addonUrl(module: string | URL = import.meta.url, exists: (url: URL) => boolean = existsSync): URL {
+  const manifest = new URL("../../release-manifest.json", module);
+  return exists(manifest) ? new URL("../../native/urx-native.node", module) : new URL("./urx-native.node", module);
+}
+
+export const ADDON_URL = addonUrl();
 
 /** Loads the addon at `url`; a load failure is reported as `missing`, not thrown. */
 export function loadAddon(url: URL = ADDON_URL, load: (url: URL) => unknown = defaultLoad): AddonCheck {

@@ -1,6 +1,9 @@
-// Checks a release output away from the checkout: copies it to a new
-// temporary directory, under a package.json that declares CommonJS, then runs
-// `--help` and `--version`, opens the addon and loads the device module there.
+// Checks a release output away from the checkout: it holds exactly the files
+// its record names, each as the release build made it; then it copies it to a
+// new temporary directory, under a package.json that declares CommonJS, then runs
+// `--help` and `--version`, checks that it holds exactly the modules the
+// release's commits compile to and loads each of them, opens the addon and
+// loads the device module there.
 // Reading anything from outside the copy (the checkout's vendor directory or
 // node_modules), or depending on the module format of a directory above it,
 // makes the check fail.
@@ -9,9 +12,24 @@ import { execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { filesUnder } from "./build-bundle.mjs";
+import { recordedProblems, RELEASE_FILES, releaseRecord } from "./release-build.mjs";
+import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const fail = (message) => {
+  throw new Error(`release output check: ${message}`);
+};
 
 const output = resolve(process.argv[2] ?? "dist-release");
+const recorded = releaseRecord(output);
+if (recorded === null) fail("the output has no well-formed record of the files the release build made");
+const problems = recordedProblems(output, recorded);
+const unrecorded = filesUnder(output).filter((path) => path !== RELEASE_FILES && !recorded.some((file) => file.path === path));
+if (problems.length > 0 || unrecorded.length > 0) {
+  fail(`the output is not as the release build made it: ${[...problems, ...unrecorded.map((path) => `${path} is not one of its files`)].join("; ")}`);
+}
 // The real path, so the comparison below holds where the temporary directory is a symlink (macOS /var).
 const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "urx-release-output-")));
 try {
@@ -20,6 +38,14 @@ try {
   const copy = join(scratch, "tools", "urx");
   cpSync(output, copy, { recursive: true });
   const url = (path) => JSON.stringify(pathToFileURL(join(copy, path)).href);
+  const APP = copy;
+  // The copy holds exactly the modules the release's commits compile to, and each of them loads from it.
+  const { BUILD_INFO } = await import(pathToFileURL(join(APP, "build-info.js")).href);
+  const expected = compiledModules(root, BUILD_INFO);
+  const scripts = filesUnder(APP).filter((path) => path.endsWith(".js"));
+  const moduleIssues = moduleProblems(scripts, expected);
+  if (moduleIssues.length > 0) fail(moduleIssues.join("; "));
+  const modules = scripts.map((path) => pathToFileURL(join(APP, path)).href);
   const node = (args) => execFileSync(process.execPath, args, { cwd: scratch, encoding: "utf8" });
   node([join(copy, "main.js"), "--help"]);
   process.stdout.write(node([join(copy, "main.js"), "--version"]));
@@ -28,6 +54,7 @@ try {
     "-e",
     `
     import { createRequire } from "node:module";
+    for (const module of ${JSON.stringify(modules)}) await import(module);
     const addon = await import(${url("native/addon.js")});
     const device = await import(${url("native/device.js")});
     const build = await import(${url("build-info.js")});
