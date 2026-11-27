@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { compiledPackages, crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS } from "./rust-notices.mjs";
+import { compiledPackages, crateNotices, isLicenseFile, licenseTexts, metadataArguments, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS } from "./rust-notices.mjs";
 
 const made = [];
 afterEach(() => {
@@ -57,6 +57,12 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     // Another platform's units are not this release's.
     expect([...compiledPackages([report], target, "x86_64-pc-windows-msvc")]).toEqual([]);
     expect(() => compiledPackages(["{not json"], target, "aarch64-apple-darwin")).toThrow("cargo's report holds a line that is not a message");
+  });
+
+  it("read cargo metadata for the platform the programs are built for only", () => {
+    const args = metadataArguments("aarch64-apple-darwin");
+    expect(args.slice(args.indexOf("--filter-platform"), args.indexOf("--filter-platform") + 2)).toEqual(["--filter-platform", "aarch64-apple-darwin"]);
+    expect(args).toContain("--locked");
   });
 
   it("count every compiled package but this repository's and urx-device's own, and require a unit of each program", () => {

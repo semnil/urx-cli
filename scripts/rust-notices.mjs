@@ -229,6 +229,16 @@ export function hostTriple(source, environment) {
 }
 
 /**
+ * The arguments of the `cargo metadata` the notices read for programs built
+ * for `triple`: the packages of that platform only, so that it needs no
+ * package only another platform uses, which a build for `triple` does not
+ * fetch.
+ */
+export function metadataArguments(triple) {
+  return ["metadata", "--format-version", "1", "--locked", "--color", "never", "--filter-platform", triple];
+}
+
+/**
  * The notices of the Rust crates in the programs of the export at `source`,
  * built for `triple` and reported in `reports` (`compiledPackages`), their
  * recorded texts read from the export. `environment` is the cargo builds'
@@ -236,7 +246,7 @@ export function hostTriple(source, environment) {
  */
 export function rustNotices(source, environment, triple, reports, platform = process.platform) {
   const metadata = JSON.parse(
-    execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--color", "never"], {
+    execFileSync("cargo", metadataArguments(triple), {
       cwd: source,
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
