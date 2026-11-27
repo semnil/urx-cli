@@ -240,14 +240,16 @@ export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
  * Builds `tools/output` in the checkout at `root` and returns its executable,
  * which publishes a build's output (see its main.rs). It is
  * build tooling, built from the working tree; nothing of it is in an output.
+ * Cargo runs in `env`: the caller's environment, or one that names a build's
+ * own Cargo folder (`cargoEnvironment`).
  */
-export function outputTool(root) {
+export function outputTool(root, env = environment) {
   const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "inherit"],
-    env: environment,
+    env,
   });
   return cargoArtifact(messages, "urx-output");
 }
@@ -322,19 +324,21 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const output = join(root, "dist-release");
   // Checked before building anything; the rename that publishes the output checks again.
   requireNoOutput(output);
-  const tool = outputTool(root);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
+  // A Cargo folder of this run's own for every cargo it runs, the output tool's
+  // included: a shared one would let a concurrent release build overwrite this
+  // run's addon, and the caller's Cargo folders take no part in the build.
+  const cargoBuild = cargoEnvironment(environment, join(scratch, "target"));
   try {
+    const tool = outputTool(root, cargoBuild);
     const { appCommit, commonCommit } = exportRelease(root, source);
     process.stderr.write(`release build of urx-cli ${appCommit} with urx-device ${commonCommit}\n`);
     const run = (args) =>
       execFileSync(process.execPath, args, {
         cwd: source,
         stdio: "inherit",
-        // A Cargo folder of this run's own: a shared one would let a
-        // concurrent release build overwrite this run's addon.
-        env: cargoEnvironment(environment, join(scratch, "target")),
+        env: cargoBuild,
       });
     // `pnpm build:release` runs this script; pnpm names its own JavaScript entry.
     const pnpm = process.env.npm_execpath;
@@ -354,7 +358,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "inherit"],
-      env: cargoEnvironment(environment, join(scratch, "target")),
+      env: cargoBuild,
     });
     // Laid out in this run's scratch, then published, its record last.
     const staging = join(scratch, "output");
@@ -370,7 +374,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         encoding: "utf8",
         maxBuffer: 256 * 1024 * 1024,
         stdio: ["ignore", "pipe", "inherit"],
-        env: cargoEnvironment(environment, join(scratch, "target")),
+        env: cargoBuild,
       });
       cpSync(cargoArtifact(built, tool), join(staging, "maintenance", tool));
       reports.push(built);
@@ -379,7 +383,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     markModuleFormat(staging);
     // The licenses of the third-party Rust crates those builds compiled into the programs.
     mkdirSync(join(staging, "notices"), { recursive: true });
-    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, cargoEnvironment(environment, join(scratch, "target")), triple, reports));
+    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, cargoBuild, triple, reports));
     writeReleaseFiles(staging);
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);

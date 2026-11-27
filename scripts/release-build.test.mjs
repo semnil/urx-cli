@@ -303,6 +303,19 @@ describe("the cargo builds' environment", () => {
   });
 });
 
+describe("the output tool", () => {
+  it("is built in the Cargo folder a build gives it, not the caller's", () => {
+    const folder = mkdtempSync(join(tmpdir(), "urx-output-tool-"));
+    try {
+      const tool = outputTool(fileURLToPath(new URL("../", import.meta.url)), cargoEnvironment(withoutGitLocation(process.env), folder));
+      expect(tool.startsWith(`${folder}/`) || tool.startsWith(`${folder}\\`)).toBe(true);
+      expect(existsSync(tool)).toBe(true);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }, 300_000);
+});
+
 describe("the launcher's location", () => {
   const artifact = (name, kind, executable) => JSON.stringify({ reason: "compiler-artifact", target: { name, kind }, executable });
 
