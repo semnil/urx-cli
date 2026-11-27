@@ -24,11 +24,10 @@
 //        node scripts/build-bundle.mjs --archive-url   (prints where this platform's archive is published)
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, RUST_NOTICES, sha256 } from "./release-build.mjs";
+import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, RUST_NOTICES, scratchFolder, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -196,7 +195,7 @@ async function main(argv) {
   try {
     const recorded = inputs.node.archives[platform.key];
     const archive = verifiedArchive(argv[1], recorded.sha256);
-    scratch = mkdtempSync(join(tmpdir(), "urx-bundle-"));
+    scratch = scratchFolder("urx-bundle-");
     // The output tool is built in this build's own Cargo folder, not the caller's.
     const tool = outputTool(root, join(scratch, "target"));
     const snapshot = join(scratch, "release");

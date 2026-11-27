@@ -15,12 +15,11 @@
 // Usage: node scripts/build-macos-installer.mjs
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleProblems, normalizeModes, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, outputTool, publishOutput, removeExport, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, outputTool, publishOutput, removeExport, requireNoOutput, scratchFolder, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const MANIFEST = "release-manifest.json";
@@ -75,7 +74,7 @@ function main(argv) {
   let source;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
-    scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    scratch = scratchFolder("urx-installer-");
     // The output tool is built in this build's own Cargo folder, not the caller's.
     const tool = outputTool(root, join(scratch, "target"));
     // The tree is made from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.

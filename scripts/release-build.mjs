@@ -25,13 +25,23 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { hostTriple, rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+
+/**
+ * Makes a build's scratch folder under the system's temporary folder and
+ * returns its absolute path: Cargo and Git run in other folders than the
+ * build, where a path relative to a relative temporary folder (TMPDIR=tmp)
+ * would name another folder, which the build's clean-up does not remove.
+ */
+export function scratchFolder(prefix) {
+  return mkdtempSync(resolve(tmpdir(), prefix));
+}
 
 /**
  * The environment of the cargo builds and `cargo metadata` of a release build:
@@ -325,7 +335,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const output = join(root, "dist-release");
   // Checked before building anything; the rename that publishes the output checks again.
   requireNoOutput(output);
-  const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
+  const scratch = scratchFolder("urx-release-");
   const source = join(scratch, "source");
   // A Cargo folder of this run's own for every cargo it runs, the output tool's
   // included: a shared one would let a concurrent release build overwrite this

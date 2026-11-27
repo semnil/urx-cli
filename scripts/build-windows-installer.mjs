@@ -13,12 +13,11 @@
 // Usage: node scripts/build-windows-installer.mjs --iscc <path to ISCC.exe>
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleProblems, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { cleanUp, isRecordedPath, outputTool, publishOutput, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, isRecordedPath, outputTool, publishOutput, requireNoOutput, scratchFolder, sha256 } from "./release-build.mjs";
 
 const MANIFEST = "release-manifest.json";
 
@@ -99,7 +98,7 @@ function main(argv) {
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     const innoVersion = innoVersionNumber(inputs.innoSetup?.version);
-    scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    scratch = scratchFolder("urx-installer-");
     // The output tool is built in this build's own Cargo folder, not the caller's.
     const tool = outputTool(root, join(scratch, "target"));
     // The installer is compiled from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.

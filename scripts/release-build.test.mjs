@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, scratchFolder, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -300,6 +300,27 @@ describe("the cargo builds' environment", () => {
       CARGO_TARGET_DIR: "/scratch/target",
       CARGO_BUILD_BUILD_DIR: "/scratch/target",
     });
+  });
+});
+
+describe("a build's scratch folder", () => {
+  it("is made by its absolute path, also when the temporary folder is named relative to the working folder", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "urx-scratch-"));
+    const named = relative(process.cwd(), temporary);
+    const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+    try {
+      Object.assign(process.env, { TMPDIR: named, TMP: named, TEMP: named });
+      const made = scratchFolder("urx-build-");
+      expect(isAbsolute(made)).toBe(true);
+      expect(dirname(made)).toBe(resolve(named));
+      expect(statSync(made).isDirectory()).toBe(true);
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(temporary, { recursive: true, force: true });
+    }
   });
 });
 
