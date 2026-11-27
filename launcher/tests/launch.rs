@@ -14,10 +14,41 @@ use urx_launcher::{launch, Installation, Started};
 
 const CHILD: &str = "URX_LAUNCHER_TEST_CHILD";
 
-/// The stand-in runtime, a program of this package that Cargo builds for the
-/// tests and gives them the path of, wherever its settings put it.
+/// The stand-in runtime, this package's `fake-runtime` example: built once for
+/// these tests by the cargo that builds them, at the path that cargo reports,
+/// wherever its settings put the build's files.
 fn fake_runtime() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-runtime"))
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let output = Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "--locked",
+                    "--example",
+                    "fake-runtime",
+                    "--message-format=json",
+                    "--manifest-path",
+                ])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "cargo did not build the stand-in runtime: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|message| {
+                    message["reason"] == "compiler-artifact"
+                        && message["target"]["name"] == "fake-runtime"
+                })
+                .and_then(|message| message["executable"].as_str().map(PathBuf::from))
+                .expect("cargo reported no executable of the stand-in runtime")
+        })
+        .clone()
 }
 
 /// A complete installation in a scratch directory.

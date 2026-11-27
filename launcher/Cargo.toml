@@ -12,16 +12,6 @@ publish = false
 name = "urx"
 path = "src/main.rs"
 
-# A stand-in for the bundled Node in the launcher's tests, which run it by the
-# path Cargo gives them (`CARGO_BIN_EXE_fake-runtime`). The release build
-# builds `--bin urx` only, so no release holds it.
-[[bin]]
-name = "fake-runtime"
-path = "src/bin/fake-runtime.rs"
-test = false
-bench = false
-doc = false
-
 [dependencies]
 # The installation state names the release manifest by its SHA-256 (K38).
 sha2 = { version = "=0.11.1", default-features = false }
