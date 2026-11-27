@@ -5,10 +5,12 @@
 // dependencies that go into the program: not procedural macros, which run
 // only while it is compiled, nor build scripts' or tests' dependencies, nor
 // what only they use, and with the features that build enables, not those
-// another package of the workspace enables. Each is matched to its package
-// by its name, version and where Cargo took it from, and every crate that is
-// not one of this repository's or urx-device's own manifests (OWN_MANIFESTS,
-// whose licenses the bundle carries already) counts, wherever it lies. For
+// another package of the workspace enables. Each is identified by its
+// package ID in `cargo metadata`'s dependency graph, followed from the
+// program, which carries where Cargo took it from; cargo tree gives only the
+// names and versions the program's build takes. Every crate that is not one
+// of this repository's or urx-device's own manifests (OWN_MANIFESTS, whose
+// licenses the bundle carries already) counts, wherever it lies. For
 // each, the notices name the crate, its version, license expression and
 // repository, and hold the text of the license file its manifest names
 // (`license-file`) and of every license file at the top of its package, read
@@ -63,46 +65,56 @@ export function ownOf(source) {
 }
 
 /**
- * The packages `cargo tree --prefix none --format "{p}"` printed, each once:
- * its name, version and where Cargo took it from (`path` for a folder, `git`
- * for a repository, neither for a registry).
+ * The crates `cargo tree --prefix none --format "{p}" --color never`
+ * printed, each as `name@version`; what it says of where each was taken
+ * from is not read (packages are told apart by `cargo metadata`).
  */
-export function treePackages(output) {
-  const found = new Map();
+export function treeNames(output) {
+  const names = new Set();
   for (const line of output.split(/\r?\n/)) {
     if (line.trim() === "") continue;
-    const match = /^(\S+) v(\S+)((?: \([^)]*\))*)$/.exec(line.trimEnd());
+    const match = /^([A-Za-z0-9_-]+) v(\S+)/.exec(line);
     if (match === null) throw new Error(`cargo tree printed a line that names no package: ${JSON.stringify(line)}`);
-    const notes = [...match[3].matchAll(/ \(([^)]*)\)/g)].map((note) => note[1]).filter((note) => note !== "*");
-    if (notes.length > 1) throw new Error(`cargo tree printed a package from more than one place: ${JSON.stringify(line)}`);
-    const [note] = notes;
-    const origin = note === undefined ? {} : /^(https?|ssh|git):/.test(note) ? { git: note } : { path: note };
-    if (note !== undefined && note.startsWith("registry ")) throw new Error(`cargo tree printed a package of another registry: ${JSON.stringify(line)}`);
-    found.set(`${match[1]}@${match[2]}@${JSON.stringify(origin)}`, { name: match[1], version: match[2], ...origin });
+    names.add(`${match[1]}@${match[2]}`);
   }
-  return [...found.values()];
+  return names;
 }
 
 /**
- * The packages of `metadata` (`cargo metadata --format-version 1`) that
- * `linked` (`treePackages`) names, each matched by its name, version and
- * where it was taken from, without those `isOwn` takes for this
- * repository's or urx-device's own, sorted by name, version and source.
- * `samePath` tells whether two folders are one.
+ * The third-party packages of `metadata` (`cargo metadata --format-version
+ * 1`, for one platform) in the programs `programs` ([{ name, linked }]): from
+ * each program's workspace package, its dependency graph is followed along
+ * normal dependencies, not into procedural macros, and of the packages it
+ * reaches those whose name and version cargo tree gave for that program
+ * (`linked`, `treeNames`) are taken, by package ID, without those `isOwn`
+ * takes for this repository's or urx-device's own. Sorted by name, version
+ * and source. A crate cargo tree gives that the graph does not reach stops
+ * it.
  */
-export function programCrates(metadata, linked, isOwn, samePath = (a, b) => a === b) {
+export function programCrates(metadata, programs, isOwn) {
+  const packages = new Map(metadata.packages.map((item) => [item.id, item]));
+  const nodes = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+  const isMacro = (item) => item.targets.some((target) => target.kind.includes("proc-macro"));
   const crates = new Map();
-  for (const entry of linked) {
-    const matches = metadata.packages.filter((item) => {
-      if (item.name !== entry.name || item.version !== entry.version) return false;
-      if (entry.path !== undefined) return item.source === null && samePath(dirname(item.manifest_path), entry.path);
-      if (entry.git !== undefined) return typeof item.source === "string" && item.source.startsWith("git+") && item.source.slice(4).split("#")[0] === entry.git.split("#")[0];
-      return typeof item.source === "string" && /^(registry|sparse)\+/.test(item.source);
-    });
-    const where = entry.path ?? entry.git ?? "the registry";
-    if (matches.length !== 1) throw new Error(`cargo metadata has ${matches.length} packages ${entry.name} ${entry.version} from ${where}, which cargo tree names, not one`);
-    const [item] = matches;
-    if (!isOwn(item)) crates.set(item.id, item);
+  for (const { name, linked } of programs) {
+    const start = metadata.workspace_members.find((id) => packages.get(id).name === name);
+    if (start === undefined) throw new Error(`the workspace has no package ${name}`);
+    const reached = new Set();
+    const pending = [start];
+    while (pending.length > 0) {
+      const id = pending.pop();
+      if (reached.has(id)) continue;
+      reached.add(id);
+      for (const dep of nodes.get(id).deps) {
+        if (!dep.dep_kinds.some((kind) => kind.kind === null)) continue;
+        if (isMacro(packages.get(dep.pkg))) continue;
+        pending.push(dep.pkg);
+      }
+    }
+    const taken = [...reached].map((id) => packages.get(id)).filter((item) => linked.has(`${item.name}@${item.version}`));
+    const missing = [...linked].filter((key) => !taken.some((item) => `${item.name}@${item.version}` === key));
+    if (missing.length > 0) throw new Error(`cargo tree gives ${missing.join(", ")} for ${name}, which its dependency graph in cargo metadata does not reach`);
+    for (const item of taken) if (!isOwn(item)) crates.set(item.id, item);
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   return [...crates.values()].sort((a, b) => order(a.name, b.name) || order(a.version, b.version) || order(String(a.source), String(b.source)));
@@ -200,13 +212,12 @@ export function rustNotices(source, environment, platform = process.platform) {
     execFileSync(command, args, { cwd: source, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], env: environment });
   const host = /^host: (\S+)$/m.exec(run("rustc", ["-vV"]))?.[1];
   if (host === undefined) throw new Error("rustc names no host platform");
-  const linked = programPackages(platform).flatMap((program) =>
-    treePackages(run("cargo", ["tree", "--locked", "--target", host, "-p", program, "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}"])),
-  );
-  const metadata = JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked", "--filter-platform", host]));
-  const isOwn = ownOf(source);
-  const samePath = (a, b) => realpathSync(a) === realpathSync(b);
-  return crateNotices(programCrates(metadata, linked, isOwn, samePath), {
+  const programs = programPackages(platform).map((name) => ({
+    name,
+    linked: treeNames(run("cargo", ["tree", "--locked", "--color", "never", "--target", host, "-p", name, "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}"])),
+  }));
+  const metadata = JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked", "--color", "never", "--filter-platform", host]));
+  return crateNotices(programCrates(metadata, programs, ownOf(source)), {
     filesOf: licenseTexts,
     readRecorded: (path) => readFileSync(join(source, ...path.split("/")), "utf8"),
   });

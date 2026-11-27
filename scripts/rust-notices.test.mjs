@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS, treePackages } from "./rust-notices.mjs";
+import { crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS, treeNames } from "./rust-notices.mjs";
 
 const made = [];
 afterEach(() => {
@@ -34,64 +34,74 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     expect(programPackages("win32")).toEqual(["urx-launcher", "urx-cli-native"]);
   });
 
-  it("read the packages cargo tree names, with where each was taken from", () => {
+  it("read only the names and versions cargo tree gives, whatever it says of where each came from", () => {
     const output = [
-      "urx-launcher v0.0.0 (/repo/launcher)",
+      "urx-launcher v0.0.0 (/tmp/release (local)/launcher)",
       "libc v0.2.191",
-      "itoa v1.0.19",
       "futures-util v0.3.34 (*)",
-      "futures-util v0.3.34",
       "",
-      "transport v0.2.0 (/repo/vendor/urx-device/crates/transport) (*)",
-      "fork v1.0.0 (https://github.com/someone/fork?branch=main#0123abc)",
+      "nohash-hasher v0.2.0 (registry `review`)",
+      "fork v1.0.0 (file:///tmp/fork#0123abc)",
     ].join("\n");
-    expect(treePackages(output)).toEqual([
-      { name: "urx-launcher", version: "0.0.0", path: "/repo/launcher" },
-      { name: "libc", version: "0.2.191" },
-      { name: "itoa", version: "1.0.19" },
-      { name: "futures-util", version: "0.3.34" },
-      { name: "transport", version: "0.2.0", path: "/repo/vendor/urx-device/crates/transport" },
-      { name: "fork", version: "1.0.0", git: "https://github.com/someone/fork?branch=main#0123abc" },
-    ]);
-    expect(() => treePackages("[build-dependencies]\nlibc v0.2.191")).toThrow("cargo tree printed a line that names no package");
-    expect(() => treePackages("libc v0.2.191 (registry `other`)")).toThrow("cargo tree printed a package of another registry");
+    expect([...treeNames(output)]).toEqual(["urx-launcher@0.0.0", "libc@0.2.191", "futures-util@0.3.34", "nohash-hasher@0.2.0", "fork@1.0.0"]);
+    expect(() => treeNames("[build-dependencies]\nlibc v0.2.191")).toThrow("cargo tree printed a line that names no package");
+    expect(() => treeNames("\u001b[1mlibc\u001b[0m v0.2.191")).toThrow("cargo tree printed a line that names no package");
   });
 
-  it("count each crate the programs link by where it was taken from, and all but this repository's and urx-device's own manifests", () => {
+  it("count by package ID the crates each program's graph reaches and cargo tree gives, all but this repository's and urx-device's own", () => {
     const registry = "registry+https://github.com/rust-lang/crates.io-index";
+    const review = "sparse+https://review.example/index/";
+    const node = (item, deps = []) => ({ id: item.id, deps: deps.map(([to, kind = null]) => ({ pkg: to.id, dep_kinds: [{ kind, target: null }] })) });
+    const launcher = pkg("urx-launcher", { source: null, manifest: "/repo/launcher/Cargo.toml" });
+    const native = pkg("urx-cli-native", { source: null, manifest: "/repo/native/Cargo.toml" });
+    const output = pkg("urx-output", { source: null, manifest: "/repo/tools/output/Cargo.toml" });
+    const transport = pkg("transport", { source: null, manifest: "/repo/vendor/urx-device/crates/transport/Cargo.toml" });
+    const libc = pkg("libc", { source: registry });
+    const libcTestOnly = pkg("libc", { source: review });
+    const itoa = pkg("itoa", { source: null, manifest: "/patched/itoa/Cargo.toml" });
+    const fork = pkg("fork", { source: "git+file:///tmp/fork#0123abc" });
+    const ctor = pkg("ctor", { source: registry });
+    const section = pkg("link-section", { source: registry });
+    const derive = { ...pkg("derive", { source: registry }), targets: [{ kind: ["proc-macro"] }] };
+    const macroOnly = pkg("macro-only", { source: registry });
+    const shared = pkg("shared", { source: registry });
+    const sharedReview = pkg("shared", { source: review });
+    const all = [launcher, native, output, transport, libc, libcTestOnly, itoa, fork, ctor, section, derive, macroOnly, shared, sharedReview];
+    for (const item of all) item.targets ??= [{ kind: ["lib"] }];
     const metadata = {
-      packages: [
-        pkg("urx-launcher", { source: null, manifest: "/repo/launcher/Cargo.toml" }),
-        pkg("transport", { source: null, manifest: "/repo/vendor/urx-device/crates/transport/Cargo.toml" }),
-        pkg("libc", { source: registry }),
-        // The same name and version from a folder, used only by a test: not the program's.
-        pkg("libc", { source: null, manifest: "/elsewhere/libc/Cargo.toml" }),
-        pkg("itoa", { source: null, manifest: "/patched/itoa/Cargo.toml" }),
-        pkg("copied", { source: null, manifest: "/repo/vendor/urx-device/third/copied/Cargo.toml" }),
-        pkg("fork", { source: "git+https://github.com/someone/fork?branch=main#0123abcdef" }),
-      ],
+      packages: all,
+      workspace_members: [launcher.id, native.id, output.id],
+      resolve: {
+        nodes: [
+          node(launcher, [[libc], [libcTestOnly, "dev"], [itoa], [fork], [derive], [shared], [sharedReview]]),
+          node(native, [[transport], [ctor], [libcTestOnly, "build"]]),
+          node(output, [[macroOnly]]),
+          node(transport, [[libc]]),
+          // A feature only urx-output enables gives ctor this edge in the workspace's unified graph.
+          node(ctor, [[section]]),
+          node(derive, [[macroOnly]]),
+          ...[libc, libcTestOnly, itoa, fork, section, macroOnly, shared, sharedReview].map((item) => node(item)),
+        ],
+      },
     };
-    const own = new Set(["/repo/launcher/Cargo.toml", "/repo/vendor/urx-device/crates/transport/Cargo.toml"]);
+    const own = new Set(["/repo/launcher/Cargo.toml", "/repo/native/Cargo.toml", "/repo/tools/output/Cargo.toml", "/repo/vendor/urx-device/crates/transport/Cargo.toml"]);
     const isOwn = (item) => item.source === null && own.has(item.manifest_path);
-    const linked = [
-      { name: "urx-launcher", version: "1.0.0", path: "/repo/launcher" },
-      { name: "transport", version: "1.0.0", path: "/repo/vendor/urx-device/crates/transport" },
-      { name: "libc", version: "1.0.0" },
-      { name: "itoa", version: "1.0.0", path: "/patched/itoa" },
-      { name: "copied", version: "1.0.0", path: "/repo/vendor/urx-device/third/copied" },
-      { name: "fork", version: "1.0.0", git: "https://github.com/someone/fork?branch=main#0123abc" },
+    const programs = [
+      { name: "urx-launcher", linked: new Set(["urx-launcher@1.0.0", "libc@1.0.0", "itoa@1.0.0", "fork@1.0.0", "shared@1.0.0"]) },
+      { name: "urx-cli-native", linked: new Set(["urx-cli-native@1.0.0", "transport@1.0.0", "libc@1.0.0", "ctor@1.0.0"]) },
     ];
-    const crates = programCrates(metadata, linked, isOwn);
-    expect(crates.map((item) => `${item.name} ${item.source ?? item.manifest_path}`)).toEqual([
-      "copied /repo/vendor/urx-device/third/copied/Cargo.toml",
-      `fork git+https://github.com/someone/fork?branch=main#0123abcdef`,
+    expect(programCrates(metadata, programs, isOwn).map((item) => `${item.name} ${item.source ?? item.manifest_path}`)).toEqual([
+      `ctor ${registry}`,
+      "fork git+file:///tmp/fork#0123abc",
       "itoa /patched/itoa/Cargo.toml",
       `libc ${registry}`,
+      `shared ${registry}`,
+      `shared ${review}`,
     ]);
-    // Both copies, when the programs link both.
-    expect(programCrates(metadata, [...linked, { name: "libc", version: "1.0.0", path: "/elsewhere/libc" }], isOwn).filter((item) => item.name === "libc")).toHaveLength(2);
-    expect(() => programCrates(metadata, [{ name: "gone", version: "1.0.0" }], isOwn)).toThrow("cargo metadata has 0 packages gone 1.0.0 from the registry, which cargo tree names, not one");
-    expect(() => programCrates(metadata, [{ name: "libc", version: "1.0.0", path: "/nowhere/libc" }], isOwn)).toThrow("cargo metadata has 0 packages libc 1.0.0 from /nowhere/libc");
+    expect(() => programCrates(metadata, [{ name: "urx-launcher", linked: new Set(["gone@1.0.0"]) }], isOwn)).toThrow(
+      "cargo tree gives gone@1.0.0 for urx-launcher, which its dependency graph in cargo metadata does not reach",
+    );
+    expect(() => programCrates(metadata, [{ name: "urx-maintenance", linked: new Set() }], isOwn)).toThrow("the workspace has no package urx-maintenance");
   });
 
   it("name as this repository's and urx-device's own only manifests that are there", () => {
