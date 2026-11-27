@@ -25,13 +25,23 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
 import { hostTriple, rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+
+/**
+ * Makes a build's scratch folder under the system's temporary folder and
+ * returns its absolute path: Cargo and Git run in other folders than the
+ * build, where a path relative to a relative temporary folder (TMPDIR=tmp)
+ * would name another folder, which the build's clean-up does not remove.
+ */
+export function scratchFolder(prefix) {
+  return mkdtempSync(resolve(tmpdir(), prefix));
+}
 
 /**
  * The environment of the cargo builds and `cargo metadata` of a release build:
@@ -240,16 +250,17 @@ export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
  * Builds `tools/output` in the checkout at `root` and returns its executable,
  * which publishes a build's output (see its main.rs). It is
  * build tooling, built from the working tree; nothing of it is in an output.
- * Cargo runs in `env`: the caller's environment, or one that names a build's
- * own Cargo folder (`cargoEnvironment`).
+ * Cargo builds it in `folder`, the build's own Cargo folder
+ * (`cargoEnvironment`), so the caller's Cargo folders take no part in the
+ * build; without one (the tests), where the caller's settings say.
  */
-export function outputTool(root, env = environment) {
+export function outputTool(root, folder) {
   const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "inherit"],
-    env,
+    env: folder === undefined ? environment : cargoEnvironment(environment, folder),
   });
   return cargoArtifact(messages, "urx-output");
 }
@@ -324,14 +335,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const output = join(root, "dist-release");
   // Checked before building anything; the rename that publishes the output checks again.
   requireNoOutput(output);
-  const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
+  const scratch = scratchFolder("urx-release-");
   const source = join(scratch, "source");
   // A Cargo folder of this run's own for every cargo it runs, the output tool's
   // included: a shared one would let a concurrent release build overwrite this
   // run's addon, and the caller's Cargo folders take no part in the build.
   const cargoBuild = cargoEnvironment(environment, join(scratch, "target"));
   try {
-    const tool = outputTool(root, cargoBuild);
+    const tool = outputTool(root, join(scratch, "target"));
     const { appCommit, commonCommit } = exportRelease(root, source);
     process.stderr.write(`release build of urx-cli ${appCommit} with urx-device ${commonCommit}\n`);
     const run = (args) =>

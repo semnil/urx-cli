@@ -26,13 +26,12 @@
 // Usage: node scripts/build-macos-distribution.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleProblems, normalizeModes, platformOf, snapshotRelease } from "./build-bundle.mjs";
 import { EXECUTABLES, INSTALLER_RECORD, macosBundleProblems } from "./build-macos-installer.mjs";
-import { cleanUp, outputTool, publishOutput, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, outputTool, publishOutput, requireNoOutput, scratchFolder, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const MANIFEST = "release-manifest.json";
@@ -144,13 +143,14 @@ function main(argv) {
   const output = join(root, "dist-macos");
   // Checked before reading anything; the rename that publishes the files checks again.
   requireNoOutput(output, "distribution build");
-  const tool = outputTool(root);
   let scratch;
   let mounted;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     const head = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", env: withoutGitLocation(process.env) }).trim();
-    scratch = mkdtempSync(join(tmpdir(), "urx-distribution-"));
+    scratch = scratchFolder("urx-distribution-");
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     // Both files are made from this copy, the one checked, whatever happens to dist-installer/ meanwhile.
     const tree = join(scratch, "tree");
     snapshotRelease(installer, tree);
