@@ -6,6 +6,7 @@ dist
 dist-release*
 dist-bundle*
 dist-installer*
+dist-macos*
 target
 coverage
 # The maintainer's private design record and the local agent notes that point to
