@@ -12,7 +12,7 @@ const actual = () => ({
 });
 
 describe("build inputs", () => {
-  it("agree across build-inputs.json, .node-version and package.json", () => {
+  it("agree across build-inputs.json, .node-version and package.json, and name the published Inno Setup installer", () => {
     expect(checkBuildInputs(actual())).toEqual([]);
   });
 
@@ -47,6 +47,8 @@ describe("build inputs", () => {
       [(f) => (f.manifest.node.archives["win-x64"].sha256 = "ABC"), "win-x64.sha256"],
       [(f) => (f.rustToolchainFile = f.rustToolchainFile.replace(/channel = "[^"]*"/, 'channel = "1.0.0"')), "rust-toolchain.toml"],
       [(f) => (f.rustToolchainFile = "[other]\nchannel = \"1.96.0\"\n"), "rust-toolchain.toml"],
+      [(f) => (f.manifest.innoSetup.installer = "innosetup-7.1.1.exe"), "innoSetup.installer"],
+      [(f) => (f.manifest.innoSetup.url = f.manifest.innoSetup.url.replace("jrsoftware", "someone")), "innoSetup.url"],
     ];
     for (const [mutate, fragment] of cases) {
       const files = actual();
@@ -63,10 +65,23 @@ describe("build inputs", () => {
       (f) => (f.manifest.pnpm.version = "latest"),
       (f) => (f.manifest.pnpm.sha512 = "00"),
       (f) => (f.manifest.rust.channel = "stable"),
+      (f) => (f.manifest.innoSetup.version = "7"),
+      (f) => (f.manifest.innoSetup.sha256 = "ABC"),
     ]) {
       const files = actual();
       mutate(files);
       expect(checkBuildInputs(files)).toHaveLength(1);
     }
+  });
+
+  it("name the Inno Setup installer of the recorded version", () => {
+    const files = actual();
+    files.manifest.innoSetup.version = "7.1.0";
+    expect(checkBuildInputs(files)).toEqual([
+      "innoSetup.installer is not innosetup-7.1.0-x64.exe",
+      "innoSetup.url is not https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe",
+    ]);
+    delete files.manifest.innoSetup;
+    expect(checkBuildInputs(files)).toEqual(["innoSetup.version is not an exact x.y.z version", "innoSetup.sha256 is not 64 lowercase hex digits"]);
   });
 });

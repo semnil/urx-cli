@@ -71,6 +71,31 @@ jobs:
         shell: bash
       # The installed bundle matches its manifest and runs on its own.
       - run: node scripts/check-bundle.mjs dist-bundle
+      # The Windows installer is compiled with the Inno Setup build-inputs.json
+      # records, installed into a new folder from an installer refused unless
+      # its SHA-256 is the recorded one.
+      - name: Download and install Inno Setup
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          url=$(node scripts/inno-setup.mjs --url)
+          installer="$RUNNER_TEMP/inno-setup-download/${url##*/}"
+          mkdir -p "$RUNNER_TEMP/inno-setup-download"
+          curl --fail --silent --show-error --location --retry 3 --output "$installer" "$url"
+          iscc=$(node scripts/inno-setup.mjs --install "$installer" "$RUNNER_TEMP/inno-setup")
+          echo "URX_ISCC=$iscc" >> "$GITHUB_ENV"
+      - run: node scripts/build-windows-installer.mjs --iscc "$URX_ISCC"
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 10
+      # The runner is a throwaway machine, so the check installs, reinstalls
+      # and removes urx-cli for the runner's user.
+      - run: node scripts/check-windows-installer.mjs
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        env:
+          URX_DISPOSABLE_MACHINE: "1"
 
   # The one context the main ruleset requires (.github/required-checks.json).
   # `if: always()` keeps it from being skipped when a job it needs fails: a
