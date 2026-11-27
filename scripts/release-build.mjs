@@ -240,16 +240,17 @@ export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
  * Builds `tools/output` in the checkout at `root` and returns its executable,
  * which publishes a build's output (see its main.rs). It is
  * build tooling, built from the working tree; nothing of it is in an output.
- * Cargo runs in `env`: the caller's environment, or one that names a build's
- * own Cargo folder (`cargoEnvironment`).
+ * Cargo builds it in `folder`, the build's own Cargo folder
+ * (`cargoEnvironment`), so the caller's Cargo folders take no part in the
+ * build; without one (the tests), where the caller's settings say.
  */
-export function outputTool(root, env = environment) {
+export function outputTool(root, folder) {
   const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "inherit"],
-    env,
+    env: folder === undefined ? environment : cargoEnvironment(environment, folder),
   });
   return cargoArtifact(messages, "urx-output");
 }
@@ -331,7 +332,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // run's addon, and the caller's Cargo folders take no part in the build.
   const cargoBuild = cargoEnvironment(environment, join(scratch, "target"));
   try {
-    const tool = outputTool(root, cargoBuild);
+    const tool = outputTool(root, join(scratch, "target"));
     const { appCommit, commonCommit } = exportRelease(root, source);
     process.stderr.write(`release build of urx-cli ${appCommit} with urx-device ${commonCommit}\n`);
     const run = (args) =>

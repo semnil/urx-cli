@@ -95,12 +95,13 @@ function main(argv) {
   const output = join(root, "dist-installer");
   // Checked before reading anything; the rename that publishes the setup program checks again.
   requireNoOutput(output, "installer build");
-  const tool = outputTool(root);
   let scratch;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     const innoVersion = innoVersionNumber(inputs.innoSetup?.version);
     scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     // The installer is compiled from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.
     const snapshot = join(scratch, "bundle");
     snapshotRelease(bundle, snapshot);

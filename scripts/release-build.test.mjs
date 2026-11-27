@@ -307,7 +307,7 @@ describe("the output tool", () => {
   it("is built in the Cargo folder a build gives it, not the caller's", () => {
     const folder = mkdtempSync(join(tmpdir(), "urx-output-tool-"));
     try {
-      const tool = outputTool(fileURLToPath(new URL("../", import.meta.url)), cargoEnvironment(withoutGitLocation(process.env), folder));
+      const tool = outputTool(fileURLToPath(new URL("../", import.meta.url)), folder);
       expect(tool.startsWith(`${folder}/`) || tool.startsWith(`${folder}\\`)).toBe(true);
       expect(existsSync(tool)).toBe(true);
     } finally {

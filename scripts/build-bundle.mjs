@@ -192,12 +192,13 @@ async function main(argv) {
   const output = join(root, "dist-bundle");
   // Checked before reading anything; the rename that publishes the bundle checks again.
   requireNoOutput(output, "bundle build");
-  const tool = outputTool(root);
   let scratch;
   try {
     const recorded = inputs.node.archives[platform.key];
     const archive = verifiedArchive(argv[1], recorded.sha256);
     scratch = mkdtempSync(join(tmpdir(), "urx-bundle-"));
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     const snapshot = join(scratch, "release");
     snapshotRelease(release, snapshot);
     // Only what the release build made goes into the bundle, each file as it was built.

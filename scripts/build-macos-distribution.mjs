@@ -144,13 +144,14 @@ function main(argv) {
   const output = join(root, "dist-macos");
   // Checked before reading anything; the rename that publishes the files checks again.
   requireNoOutput(output, "distribution build");
-  const tool = outputTool(root);
   let scratch;
   let mounted;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     const head = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", env: withoutGitLocation(process.env) }).trim();
     scratch = mkdtempSync(join(tmpdir(), "urx-distribution-"));
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     // Both files are made from this copy, the one checked, whatever happens to dist-installer/ meanwhile.
     const tree = join(scratch, "tree");
     snapshotRelease(installer, tree);

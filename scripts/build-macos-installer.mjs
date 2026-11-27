@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleProblems, normalizeModes, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { cargoArtifact, cleanUp, exportRelease, outputTool, publishOutput, removeExport, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, outputTool, publishOutput, removeExport, requireNoOutput, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const MANIFEST = "release-manifest.json";
@@ -70,13 +70,14 @@ function main(argv) {
   const output = join(root, "dist-installer");
   // Checked before reading anything; the rename that publishes the tree checks again.
   requireNoOutput(output, "installer build");
-  const tool = outputTool(root);
   const environment = withoutGitLocation(process.env);
   let scratch;
   let source;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     // The tree is made from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.
     const staging = join(scratch, "output");
     const copy = join(staging, "urx-cli");
@@ -97,7 +98,8 @@ function main(argv) {
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target"), URX_RELEASE_MANIFEST_SHA256: digest },
+      // This build's own Cargo folder, as both the target and the build directory: the caller's take no part.
+      env: { ...cargoEnvironment(environment, join(scratch, "target")), URX_RELEASE_MANIFEST_SHA256: digest },
     });
     cpSync(cargoArtifact(messages, "urx-install"), join(staging, "urx-install"));
     chmodSync(join(staging, "urx-install"), 0o755);
