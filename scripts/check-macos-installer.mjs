@@ -84,10 +84,13 @@ if (readlinkSync(link) !== join(app, "bin", "urx")) fail(`${link} points to ${re
 const version = expectRun("the installed urx --version", run(link, ["--version"]), 0);
 if (!version.stdout.startsWith(`urx ${manifest.app.version} (${manifest.app.commit})`)) fail(`the installed urx --version printed ${JSON.stringify(version.stdout)}`);
 
-// 3. A running urx (a shared hold on the gate) stops a second apply at once.
-const holder = spawn("/usr/bin/perl", ["-e", 'use Fcntl ":flock"; open(my $g, "<", $ARGV[0]) or die; flock($g, LOCK_SH|LOCK_NB) or die; print "held\\n"; sleep 60', gatePath], {
-  stdio: ["ignore", "pipe", "inherit"],
-});
+// 3. A running urx (a shared hold on the gate) stops a second apply at once. The holder says
+// "held" as soon as it holds the gate, unbuffered, and holds it until its input is closed.
+const holder = spawn(
+  "/usr/bin/perl",
+  ["-e", 'use Fcntl ":flock"; $| = 1; open(my $g, "<", $ARGV[0]) or die; flock($g, LOCK_SH|LOCK_NB) or die; print "held\\n"; my $end = <STDIN>;', gatePath],
+  { stdio: ["pipe", "pipe", "inherit"] },
+);
 try {
   await new Promise((resolve, reject) => {
     holder.stdout.once("data", resolve);
@@ -101,7 +104,7 @@ try {
   // The hold ends with the holder, before anything else runs.
   if (holder.exitCode === null && holder.signalCode === null) {
     const ended = new Promise((resolve) => holder.once("exit", resolve));
-    holder.kill();
+    holder.stdin.end();
     await ended;
   }
 }
