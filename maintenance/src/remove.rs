@@ -10,7 +10,7 @@
 //! (K21).
 
 use crate::place::{self, Access, Layout, LinkState};
-use crate::records::{pending_tag, Phase, State, Work, MANIFEST};
+use crate::records::{pending_tag, Manifest, Phase, State, Work, MANIFEST};
 use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
@@ -128,8 +128,9 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         return Ok(report);
     };
     let link = place::link_state(layout)?;
-    // The files of the tree at the root, as the record names them (K41 as revised).
-    let files = state.root_files().to_vec();
+    // The files of the tree at the root, and the work folder beside it, from the record and the
+    // objects' identities (K41 as revised).
+    let (files, work) = trees(layout, parent.as_ref(), root.as_ref(), &state)?;
     if !apply {
         let mut report = Report::default();
         report.line(format!(
@@ -164,7 +165,8 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         phase: Phase::Removing,
         owned: files.clone(),
         base: None,
-        placed: None,
+        previous: None,
+        work: work.clone(),
         ..state.clone()
     })?;
     let mut report = Report::default();
@@ -192,13 +194,15 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
             layout.link.display()
         ));
     }
-    // The work folder an interrupted installation recorded, by its identity and files.
-    if let Some(parent) = &parent {
-        let staging_path = place::staging(layout, &tag);
-        if !clear_work(layout, parent, &staging_path, state.work.as_ref()).map_err(&unfinished)? {
+    // The work folder an interrupted installation left, by its identity and files.
+    if let (Some(parent), Some(work)) = (&parent, &work) {
+        if let Some(kept) =
+            clear_work(layout, parent, work, &state.manifest).map_err(&unfinished)?
+        {
             report.line(format!(
-                "Kept {}: it is not, or no longer only, the installation's work folder.",
-                staging_path.display()
+                "Kept {}: it holds files the installation did not make ({}).",
+                layout.root.with_file_name(&work.name).display(),
+                kept.join(", ")
             ));
         }
     }
@@ -242,37 +246,124 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
     Ok(report)
 }
 
-/// Removes the work folder at `path` beside the root when it is the one
-/// `work` records, by its recorded files; true when it is gone or was never
-/// there.
+/// The files of the tree at the root, and the work folder beside it with
+/// what it holds. Once complete or removing, as the record names them. While
+/// installing, by which recorded object each is: the release's (assembled in
+/// `work`) or the previous tree's (`previous`); a root that is neither stops
+/// the removal, and a folder at the work folder's name that is neither is
+/// left as it is.
+fn trees(
+    layout: &Layout,
+    parent: Option<&Fd>,
+    root: Option<&Fd>,
+    state: &State,
+) -> Result<(Vec<String>, Option<Work>), Problem> {
+    if state.phase != Phase::Installing {
+        return Ok((state.owned.clone(), state.work.clone()));
+    }
+    let id_of = |folder: &Fd, path: &Path| {
+        sys::entry(folder.raw())
+            .map(|entry| entry.id)
+            .map_err(|_| Problem::Conflict(path.to_path_buf()))
+    };
+    let base = state.base.clone().unwrap_or_default();
+    let assembled = state
+        .work
+        .as_ref()
+        .filter(|work| work.check)
+        .map(|work| work.id);
+    let files = match root {
+        None => Vec::new(),
+        Some(root) => {
+            let id = id_of(root, &layout.root)?;
+            if Some(id) == assembled {
+                state.owned.clone()
+            } else if Some(id) == state.previous {
+                base.clone()
+            } else {
+                return Err(Problem::Conflict(layout.root.clone()));
+            }
+        }
+    };
+    let work = match (parent, &state.work) {
+        (Some(parent), Some(work)) => {
+            let path = layout.root.with_file_name(&work.name);
+            let name = std::ffi::CString::new(work.name.as_bytes()).unwrap_or_default();
+            match place::open_ours(parent, &name, &path, layout.owner) {
+                Ok(Some(folder)) => {
+                    let id = id_of(&folder, &path)?;
+                    if Some(id) == state.previous {
+                        Some(Work {
+                            name: work.name.clone(),
+                            id,
+                            files: base,
+                            check: false,
+                        })
+                    } else if id == work.id {
+                        Some(Work {
+                            name: work.name.clone(),
+                            id,
+                            files: if work.check {
+                                state.owned.clone()
+                            } else {
+                                work.files.clone()
+                            },
+                            check: work.check,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Ok(None) | Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+    Ok((files, work))
+}
+
+/// Removes the work folder `work` names, while it is that object, by its
+/// files: with `check`, only those holding what the folder's own release
+/// manifest lists, when that manifest is the one the record names (`digest`;
+/// it is written first, so with none there no other file is the
+/// installation's). A manifest there that is another, or a folder of the
+/// installation's the removal cannot look into, stops it with that path.
+/// None when the folder is gone; the entries kept otherwise.
 fn clear_work(
     layout: &Layout,
     parent: &Fd,
-    path: &Path,
-    work: Option<&Work>,
-) -> Result<bool, Problem> {
-    let name = sys::c_name(std::os::unix::ffi::OsStrExt::as_bytes(
-        path.file_name().unwrap_or_default(),
-    ))
-    .map_err(|_| Problem::Write(path.to_path_buf()))?;
-    let Some(staging) = place::open_ours(parent, &name, path, layout.owner)? else {
-        return Ok(true);
+    work: &Work,
+    digest: &str,
+) -> Result<Option<Vec<String>>, Problem> {
+    let path = layout.root.with_file_name(&work.name);
+    let name = std::ffi::CString::new(work.name.as_bytes()).unwrap_or_default();
+    let Some(folder) = place::open_ours(parent, &name, &path, layout.owner)? else {
+        return Ok(None);
     };
-    let failed = |_| Problem::Write(path.to_path_buf());
-    let Some(work) =
-        work.filter(|work| sys::entry(staging.raw()).is_ok_and(|entry| entry.id == work.id))
-    else {
-        return Ok(false);
+    let failed = |_| Problem::Write(path.clone());
+    if sys::entry(folder.raw()).map_err(failed)?.id != work.id {
+        return Ok(Some(vec![".".to_owned()]));
+    }
+    let hashes = if work.check {
+        Some(listed_in(&folder, &path, digest)?)
+    } else {
+        None
     };
     let files: BTreeSet<String> = work.files.iter().cloned().collect();
-    if !tree::clear_listed(&staging, "", &files, layout.owner).map_err(failed)? {
-        return Ok(false);
+    let left = match tree::remove_listed(&folder, "", &files, hashes.as_ref(), layout.owner)
+        .map_err(failed)?
+    {
+        Ok(left) => left,
+        Err(at) => return Err(Problem::Conflict(path.join(at))),
+    };
+    if !left.empty {
+        return Ok(Some(left.kept));
     }
-    drop(staging);
+    drop(folder);
     match sys::remove_at(parent, &name, true) {
         Ok(_) => {
             sys::flush(parent.raw()).map_err(failed)?;
-            Ok(true)
+            Ok(None)
         }
         Err(error)
             if matches!(
@@ -280,10 +371,40 @@ fn clear_work(
                 Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
             ) =>
         {
-            Ok(false)
+            Ok(Some(Vec::new()))
         }
         Err(error) => Err(failed(error)),
     }
+}
+
+/// What the release manifest in the open work folder lists, when it is the
+/// one the record names; nothing when there is none.
+fn listed_in(folder: &Fd, path: &Path, digest: &str) -> Result<tree::Listed, Problem> {
+    use std::io::Read;
+    let manifest = path.join(MANIFEST);
+    let name = std::ffi::CString::new(MANIFEST).unwrap_or_default();
+    match tree::spelled(folder, &name).map_err(|_| Problem::Conflict(manifest.clone()))? {
+        Spelled::Missing => return Ok(tree::Listed::new()),
+        Spelled::Exact(entry) if entry.kind == Kind::File => {}
+        _ => return Err(Problem::Conflict(manifest)),
+    }
+    let (file, _) =
+        sys::open_file_at(folder, &name).map_err(|_| Problem::Conflict(manifest.clone()))?;
+    let mut bytes = Vec::new();
+    file.take(8 << 20)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Problem::Conflict(manifest.clone()))?;
+    if crate::records::digest(&bytes) != digest {
+        return Err(Problem::Conflict(manifest));
+    }
+    let parsed = Manifest::parse(&bytes).ok_or_else(|| Problem::Conflict(manifest.clone()))?;
+    let mut listed: tree::Listed = parsed
+        .files
+        .into_iter()
+        .map(|file| (file.path, (file.sha256, file.size)))
+        .collect();
+    listed.insert(MANIFEST.to_owned(), (digest.to_owned(), bytes.len() as u64));
+    Ok(listed)
 }
 
 /// Removes the root once it is empty; true when it is kept, holding something.

@@ -196,24 +196,28 @@ impl Phase {
     }
 }
 
-/// The work folder beside the root (K41 as revised): which object it is,
-/// and the files it may hold.
+/// A work folder beside the root (K41 as revised): its name, which object
+/// it is, the files it may hold, and whether each must be checked against
+/// the release manifest before it is removed (a release being assembled) or
+/// is removed by the list (the previous tree, swapped out of the root).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
+    pub name: String,
     pub id: (u64, u64),
     pub files: Vec<String>,
+    pub check: bool,
 }
 
 /// The state record on macOS: the phase, the target release and the SHA-256
 /// of its manifest, and the files the installation may own.
 /// - `complete`: `owned` is the release's files, at the root.
 /// - `installing`: `owned` is the release's files and `base` those of the
-///   complete installation the run started from; `placed` says which of the
-///   two the root holds; `work`, once the work folder is made, names it and
-///   the files it may hold.
+///   tree at the root the run started from, whose object is `previous`
+///   (none for a first installation); `work`, once made, is the work folder
+///   the release is assembled in. Which object is at the root, and which at
+///   the work folder's name, is read from the objects themselves.
 /// - `removing`: `owned` is the files of the tree at the root when the
-///   removal began, and `work` the work folder an interrupted installation
-///   left, if any.
+///   removal began, and `work` the work folder left beside it, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
@@ -222,8 +226,8 @@ pub struct State {
     pub owned: Vec<String>,
     /// Present exactly while installing.
     pub base: Option<Vec<String>>,
-    /// Present exactly while installing.
-    pub placed: Option<bool>,
+    /// Only while installing.
+    pub previous: Option<(u64, u64)>,
     /// Absent once complete.
     pub work: Option<Work>,
 }
@@ -250,16 +254,27 @@ fn sorted(paths: &[String]) -> Vec<String> {
     paths
 }
 
-impl State {
-    /// The files of the tree at the root, as the record names them.
-    pub fn root_files(&self) -> &[String] {
-        match (self.placed, &self.base) {
-            (Some(false), Some(base)) => base,
-            _ => &self.owned,
-        }
-    }
+fn object_id(value: &Value) -> Option<(u64, u64)> {
+    let value = value.as_object()?;
+    Some((
+        value.get("device")?.as_u64()?,
+        value.get("inode")?.as_u64()?,
+    ))
+}
 
-    /// Every file the installation may own, at the root or in the work folder.
+/// A work folder's name: one name, of printable ASCII.
+fn is_folder_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b'/')
+}
+
+impl State {
+    /// Every file the installation may own, at the root or in a work folder.
     pub fn all_files(&self) -> Vec<String> {
         let mut all = self.owned.clone();
         all.extend(self.base.iter().flatten().cloned());
@@ -268,7 +283,8 @@ impl State {
     }
 
     /// Reads a state record in exactly the form `to_bytes` writes for its
-    /// phase, its paths sorted, unique, and `owned` including the manifest.
+    /// phase, its paths sorted, unique, and `owned` including the manifest
+    /// unless removing.
     pub fn parse(bytes: &[u8]) -> Option<State> {
         let value: Value = serde_json::from_slice(bytes).ok()?;
         let object = value.as_object()?;
@@ -284,7 +300,10 @@ impl State {
         };
         let mut keys = vec!["product", "format", "phase", "release", "manifest", "owned"];
         if phase == Phase::Installing {
-            keys.extend(["base", "placed"]);
+            keys.push("base");
+            if object.contains_key("previous") {
+                keys.push("previous");
+            }
         }
         if phase != Phase::Complete && object.contains_key("work") {
             keys.push("work");
@@ -305,19 +324,30 @@ impl State {
             Some(base) => Some(sorted_paths(base)?),
             None => None,
         };
-        let placed = match object.get("placed") {
-            Some(placed) => Some(placed.as_bool()?),
+        let previous = match object.get("previous") {
+            Some(previous) => {
+                if !exact_keys(previous.as_object()?, &["device", "inode"]) {
+                    return None;
+                }
+                Some(object_id(previous)?)
+            }
             None => None,
         };
         let work = match object.get("work") {
             Some(work) => {
-                let work = work.as_object()?;
-                if !exact_keys(work, &["device", "inode", "files"]) {
+                let fields = work.as_object()?;
+                if !exact_keys(fields, &["name", "device", "inode", "files", "check"]) {
+                    return None;
+                }
+                let name = fields.get("name")?.as_str()?;
+                if !is_folder_name(name) {
                     return None;
                 }
                 Some(Work {
-                    id: (work.get("device")?.as_u64()?, work.get("inode")?.as_u64()?),
-                    files: sorted_paths(work.get("files")?)?,
+                    name: name.to_owned(),
+                    id: object_id(work)?,
+                    files: sorted_paths(fields.get("files")?)?,
+                    check: fields.get("check")?.as_bool()?,
                 })
             }
             None => None,
@@ -328,7 +358,7 @@ impl State {
             manifest: manifest.to_owned(),
             owned,
             base,
-            placed,
+            previous,
             work,
         })
     }
@@ -347,11 +377,17 @@ impl State {
         if let Some(base) = &self.base {
             value["base"] = serde_json::json!(sorted(base));
         }
-        if let Some(placed) = self.placed {
-            value["placed"] = serde_json::json!(placed);
+        if let Some(previous) = self.previous {
+            value["previous"] = serde_json::json!({ "device": previous.0, "inode": previous.1 });
         }
         if let Some(work) = &self.work {
-            value["work"] = serde_json::json!({ "device": work.id.0, "inode": work.id.1, "files": sorted(&work.files) });
+            value["work"] = serde_json::json!({
+                "name": work.name,
+                "device": work.id.0,
+                "inode": work.id.1,
+                "files": sorted(&work.files),
+                "check": work.check,
+            });
         }
         let mut bytes = serde_json::to_vec_pretty(&value).expect("a JSON value serializes");
         bytes.push(b'\n');
@@ -451,10 +487,12 @@ mod tests {
             manifest: "a".repeat(64),
             owned: vec!["bin/urx".to_owned(), MANIFEST.to_owned()],
             base: (phase == Phase::Installing).then(|| vec!["bin/urx".to_owned()]),
-            placed: (phase == Phase::Installing).then_some(false),
+            previous: (phase == Phase::Installing).then_some((3, 4)),
             work: (phase != Phase::Complete).then(|| Work {
+                name: "urx-cli.install-0".to_owned(),
                 id: (1, 2),
                 files: vec!["bin/urx".to_owned()],
+                check: true,
             }),
         }
     }
@@ -477,7 +515,6 @@ mod tests {
         let installing = State {
             phase: Phase::Installing,
             base: Some(Vec::new()),
-            placed: Some(true),
             ..complete
         };
         assert!(urx_launcher::install::check(&installing.to_bytes(), manifest).is_err());
@@ -506,11 +543,12 @@ mod tests {
             changed("owned", serde_json::json!([MANIFEST, "bin/urx"])),
             changed("owned", serde_json::json!(["bin/urx", "bin/urx", MANIFEST])),
             changed("owned", serde_json::json!(["../x", MANIFEST])),
-            // `base` and `placed` only while installing, `work` only while not complete.
+            // `base` and `previous` only while installing, `work` only while not complete.
             changed("base", serde_json::json!([])),
+            changed("previous", serde_json::json!({ "device": 1, "inode": 2 })),
             changed(
                 "work",
-                serde_json::json!({ "device": 1, "inode": 2, "files": [] }),
+                serde_json::json!({ "name": "w", "device": 1, "inode": 2, "files": [], "check": true }),
             ),
             {
                 let mut record = base.clone();
@@ -526,7 +564,7 @@ mod tests {
             {
                 let mut record = base.clone();
                 record["phase"] = Value::from("removing");
-                record["work"] = serde_json::json!({ "device": 1, "inode": 2 });
+                record["work"] = serde_json::json!({ "name": "a/b", "device": 1, "inode": 2, "files": [], "check": true });
                 serde_json::to_vec(&record).unwrap()
             },
             serde_json::to_vec(&extra).unwrap(),

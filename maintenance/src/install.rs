@@ -1,26 +1,28 @@
 //! Installation, update and repair under K41 as revised (assembled beside
 //! the root): one process, under the exclusive gate, admits and inspects,
-//! records `installing`, assembles the complete release in a work folder
-//! beside the root, verifies it, and puts it in place with one rename (a swap
-//! with the previous tree, or a rename where no root is). It then removes the
-//! previous tree, left at the work folder's name, by its recorded paths,
-//! makes the command link, verifies everything and makes it durable, and
-//! only then records `complete`. An interruption therefore leaves at the root
-//! either the previous tree or the complete release, never a partly written
-//! tree; the `installing` record keeps the CLI from starting until the same
-//! release is installed again.
+//! records `installing` (this release's files, the tree's at the root and
+//! its object), makes a work folder beside the root and records it, assembles
+//! the complete release in it, verifies it, and puts it in place with one
+//! rename (a swap with the previous tree, or a rename where no root is). It
+//! then removes the previous tree, left at the work folder's name, by its
+//! recorded paths, makes the command link, verifies everything and makes it
+//! durable, and only then records `complete`. Which tree is at the root, and
+//! which at the work folder's name, is read from the objects' identities, so
+//! an interruption at any point, a failed record update included, leaves
+//! nothing the next run or a removal mistakes; the `installing` record keeps
+//! the CLI from starting until the same release is installed again.
 
 use crate::place::{self, Access, Layout, LinkState};
 use crate::records::{pending_tag, Phase, State, Work, MANIFEST};
 use crate::source::{self, Source};
 use crate::sys::{self, Fd, Kind};
-use crate::tree::{self, How, Spelled, WalkError};
+use crate::tree::{self, How, Listed, Spelled, WalkError};
 use crate::{Problem, Report};
 use std::collections::BTreeSet;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What an apply would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,24 +40,36 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
     Absent,
-    /// The installation's recorded files of the complete installation the
-    /// run starts from (all or some of them), and nothing else.
+    /// A tree of the installation's recorded files (all or some of them),
+    /// and nothing else, to be replaced.
     Previous,
-    /// Exactly this release, put in place by a run interrupted after the swap.
+    /// Exactly this release, its folders' modes included, put in place by an
+    /// interrupted run of this release.
     Target,
 }
 
 struct Inspection {
     action: Action,
-    /// The files of the tree to replace: none, the tree at the root, or after
-    /// an interrupted swap the previous tree, then in the work folder.
+    /// The files of the tree at the root, to replace (none when absent; this
+    /// release's when it is `Target`).
     base: Vec<String>,
     root: Root,
     /// Which object the root is, when there is one.
     root_id: Option<(u64, u64)>,
-    /// The work folder an interrupted run recorded.
-    work: Option<Work>,
+    /// The work folder an interrupted run recorded, found at its name and
+    /// still the recorded object, with what it holds.
+    left: Option<LeftWork>,
     link: LinkState,
+}
+
+/// A work folder an interrupted run left, found under its recorded identity.
+struct LeftWork {
+    name: String,
+    id: (u64, u64),
+    /// It holds the previous tree (swapped out of the root): removed by its
+    /// list. Otherwise it holds this release, partly assembled: only files
+    /// holding exactly what the release lists are removed.
+    previous_tree: Option<Vec<String>>,
 }
 
 /// Installs from the release tree at `source_path`, whose manifest must have
@@ -127,59 +141,85 @@ pub fn install(
     if stop() {
         return Err(Problem::Interrupted);
     }
-    // Record before writing (K41 step 2): this release's files, the tree's at the root, which
-    // of the two the root holds, and the work folder an interrupted run recorded.
-    let record = |placed: bool, work: Option<Work>| State {
-        phase: Phase::Installing,
-        release: release.clone(),
-        manifest: digest.clone(),
-        owned: target.clone(),
-        base: Some(inspection.base.clone()),
-        placed: Some(placed),
-        work,
-    };
-    held.write_state(&record(
-        inspection.root == Root::Target,
-        inspection.work.clone(),
-    ))?;
     let parent = match parent_now {
         Some(parent) => parent,
         None => place::root_parent(layout, true)?.expect("a made parent is open"),
     };
-    let staging_path = place::staging(layout, &tag);
-    let staging_name = c_last(&staging_path);
     let root_name = c_last(&layout.root);
     let mut report = Report::default();
-    // The work folder to clear after the swap: the previous tree, under its recorded identity.
-    let mut previous_work = inspection.work.clone();
-    let mut placed_id: Option<(u64, u64)> = None;
-    if inspection.root != Root::Target {
-        // A work folder an interrupted run recorded goes first; any other there stopped the preflight.
-        if !clear_work(
-            layout,
-            &parent,
-            &staging_name,
-            &staging_path,
-            inspection.work.as_ref(),
-        )? {
-            return Err(Problem::Conflict(staging_path));
+    // The record of this run: this release's files, the tree's at the root and its object, and
+    // the work folder once made.
+    let record = |previous: Option<(u64, u64)>, base: Vec<String>, work: Option<Work>| State {
+        phase: Phase::Installing,
+        release: release.clone(),
+        manifest: digest.clone(),
+        owned: target.clone(),
+        base: Some(base),
+        previous,
+        work,
+    };
+    // A work folder an interrupted run left: the previous tree goes by its list; this release
+    // partly assembled goes only as far as its files hold what the release lists.
+    let leftover_work = inspection.left.as_ref().map(|left| Work {
+        name: left.name.clone(),
+        id: left.id,
+        files: left.previous_tree.clone().unwrap_or_else(|| target.clone()),
+        check: left.previous_tree.is_none(),
+    });
+    if inspection.root == Root::Target {
+        // The interrupted run's record stands: it names the release's object, now at the root,
+        // and the previous tree's, at the work folder's name, which goes by its list.
+        if let Some(work) = &leftover_work {
+            if let Some(kept) = clear_work(layout, &parent, work, Some(&source))? {
+                report.line(format!(
+                    "Kept {}: the previous installation left files there that it did not make ({}).",
+                    layout.root.with_file_name(&work.name).display(),
+                    kept.join(", ")
+                ));
+            }
+        }
+    } else {
+        // Record before writing (K41 step 2).
+        held.write_state(&record(
+            inspection.root_id,
+            inspection.base.clone(),
+            leftover_work.clone(),
+        ))?;
+        if let Some(work) = &leftover_work {
+            if let Some(kept) = clear_work(layout, &parent, work, Some(&source))? {
+                report.line(format!(
+                    "Kept {}: it holds files the installation did not make ({}).",
+                    layout.root.with_file_name(&work.name).display(),
+                    kept.join(", ")
+                ));
+            }
         }
         if stop() {
             return Err(Problem::Interrupted);
         }
+        // A name nothing is at: a folder there the record does not name is left as it is.
+        let (staging_name, staging_path) = free_work_name(layout, &parent, &tag)?;
         let failed = |_| Problem::Write(staging_path.clone());
         // Root's alone while it is assembled.
         let staging = sys::make_folder_at(&parent, &staging_name, 0o700).map_err(failed)?;
         let staging_id = sys::entry(staging.raw()).map_err(failed)?.id;
+        let work = Work {
+            name: staging_name.to_string_lossy().into_owned(),
+            id: staging_id,
+            files: target.clone(),
+            check: true,
+        };
         held.write_state(&record(
-            false,
-            Some(Work {
-                id: staging_id,
-                files: target.clone(),
-            }),
+            inspection.root_id,
+            inspection.base.clone(),
+            Some(work),
         ))?;
-        // Assemble (step 3), every file in a folder of this run's own.
-        for path in &target {
+        // Assemble (step 3), the manifest first: what tells the release's files from others.
+        let order = target
+            .iter()
+            .filter(|path| *path == MANIFEST)
+            .chain(target.iter().filter(|path| *path != MANIFEST));
+        for path in order {
             if stop() {
                 return Err(Problem::Interrupted);
             }
@@ -196,7 +236,7 @@ pub fn install(
         }
         // The names are still the objects checked: the work folder made here, and the root
         // inspected (or nothing there).
-        let at_name = |name: &std::ffi::CStr| {
+        let at_name = |name: &CStr| {
             sys::entry_at(&parent, name)
                 .ok()
                 .flatten()
@@ -208,7 +248,8 @@ pub fn install(
         if at_name(&root_name) != inspection.root_id {
             return Err(Problem::Conflict(layout.root.clone()));
         }
-        // Put in place with one rename: the previous tree goes to the work folder's name.
+        // Put in place with one rename: the previous tree goes to the work folder's name. No
+        // record follows: the objects' identities, already recorded, say which is where.
         let placed = if inspection.root == Root::Absent {
             sys::rename_exclusive(&parent, &staging_name, &root_name)
         } else {
@@ -216,28 +257,25 @@ pub fn install(
         };
         placed.map_err(|_| Problem::Write(layout.root.clone()))?;
         sys::sync(parent.raw()).map_err(|_| Problem::Write(layout.root.clone()))?;
-        placed_id = Some(staging_id);
-        previous_work = inspection.root_id.map(|id| Work {
-            id,
-            files: inspection.base.clone(),
-        });
-        held.write_state(&record(true, previous_work.clone()))?;
-    }
-    // The previous tree, now at the work folder's name, under its recorded identity.
-    if stop() {
-        return Err(Problem::Interrupted);
-    }
-    if !clear_work(
-        layout,
-        &parent,
-        &staging_name,
-        &staging_path,
-        previous_work.as_ref(),
-    )? {
-        report.line(format!(
-            "Kept {}: the previous installation left files there that it did not make.",
-            staging_path.display()
-        ));
+        if let Some(previous) = inspection.root_id {
+            // The previous tree, now at the work folder's name, by its recorded paths.
+            if stop() {
+                return Err(Problem::Interrupted);
+            }
+            let swapped = Work {
+                name: staging_name.to_string_lossy().into_owned(),
+                id: previous,
+                files: inspection.base.clone(),
+                check: false,
+            };
+            if let Some(kept) = clear_work(layout, &parent, &swapped, None)? {
+                report.line(format!(
+                    "Kept {}: the previous installation left files there that it did not make ({}).",
+                    staging_path.display(),
+                    kept.join(", ")
+                ));
+            }
+        }
     }
     if stop() {
         return Err(Problem::Interrupted);
@@ -246,9 +284,6 @@ pub fn install(
     // Verify and make durable (step 4).
     let root = place::open_ours(&parent, &root_name, &layout.root, layout.owner)?
         .ok_or_else(|| Problem::Verify(layout.root.clone()))?;
-    if placed_id.is_some_and(|id| sys::entry(root.raw()).ok().map(|entry| entry.id) != Some(id)) {
-        return Err(Problem::Verify(layout.root.clone()));
-    }
     let target_set: BTreeSet<String> = target.iter().cloned().collect();
     if !is_release(layout, &root, &source, &target_set) {
         return Err(Problem::Verify(layout.root.clone()));
@@ -264,7 +299,7 @@ pub fn install(
         manifest: digest,
         owned: target,
         base: None,
-        placed: None,
+        previous: None,
         work: None,
     };
     // The record must be one the launcher starts from.
@@ -308,10 +343,35 @@ fn c_last(path: &Path) -> CString {
     .unwrap_or_default()
 }
 
+/// The first work folder name beside the root nothing is at: the root's
+/// name, `.install-`, the tag, and a counter after the first.
+fn free_work_name(layout: &Layout, parent: &Fd, tag: &str) -> Result<(CString, PathBuf), Problem> {
+    let first = place::staging(layout, tag);
+    for count in 1..=64u32 {
+        let path = if count == 1 {
+            first.clone()
+        } else {
+            first.with_file_name(format!(
+                "{}-{count}",
+                first.file_name().unwrap_or_default().to_string_lossy()
+            ))
+        };
+        let name = c_last(&path);
+        if sys::entry_at(parent, &name)
+            .map_err(|_| Problem::Write(path.clone()))?
+            .is_none()
+        {
+            return Ok((name, path));
+        }
+    }
+    Err(Problem::Conflict(first))
+}
+
 /// The preflight (K41 step 1): what is installed, whether this release may
-/// replace it, and that the root and the work folder are the installation's
-/// recorded ones, holding nothing but their recorded files. Anything else
-/// there stops it here, before the record changes, and is kept (K18).
+/// replace it, where each recorded tree is (read from the objects'
+/// identities), and that the root holds nothing but the files of the tree it
+/// is. Anything else there stops it here, before the record changes, and is
+/// kept (K18).
 fn inspect(
     layout: &Layout,
     parent: Option<&Fd>,
@@ -348,55 +408,6 @@ fn inspect(
             }
         }
     };
-    let work = state.and_then(|state| state.work.clone());
-    let conflict = |at: &Path, error: std::io::Result<Result<(), String>>| match error {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(entry)) => Err(Problem::Conflict(at.join(entry))),
-        Err(_) => Err(Problem::Conflict(at.to_path_buf())),
-    };
-    // Only the work folder a run recorded is the installation's, and it holds only its recorded files.
-    if let Some(parent) = parent {
-        let staging_path = place::staging(layout, pending_tag(&digest));
-        if let Some(staging) =
-            place::open_ours(parent, &c_last(&staging_path), &staging_path, layout.owner)?
-        {
-            let id = sys::entry(staging.raw())
-                .map_err(|_| Problem::Conflict(staging_path.clone()))?
-                .id;
-            let Some(recorded) = work.as_ref().filter(|work| work.id == id) else {
-                return Err(Problem::Conflict(staging_path));
-            };
-            let files: BTreeSet<String> = recorded.files.iter().cloned().collect();
-            conflict(
-                &staging_path,
-                tree::only_listed(&staging, "", &files, layout.owner),
-            )?;
-        }
-    }
-    let target: BTreeSet<String> = source.manifest.owned().into_iter().collect();
-    let recorded_root: Vec<String> = state
-        .map(|state| state.root_files().to_vec())
-        .unwrap_or_default();
-    let placed =
-        state.is_some_and(|state| state.phase == Phase::Installing && state.placed == Some(true));
-    let (root_state, base) = match &root {
-        None => (Root::Absent, Vec::new()),
-        // The release put in place by an interrupted run, folders' modes included.
-        Some(root) if placed && is_release(layout, root, source, &target) => (
-            Root::Target,
-            state
-                .and_then(|state| state.base.clone())
-                .unwrap_or_default(),
-        ),
-        Some(root) => {
-            let files: BTreeSet<String> = recorded_root.iter().cloned().collect();
-            conflict(
-                &layout.root,
-                tree::only_listed(root, "", &files, layout.owner),
-            )?;
-            (Root::Previous, recorded_root)
-        }
-    };
     let root_id = match &root {
         Some(root) => Some(
             sys::entry(root.raw())
@@ -405,12 +416,80 @@ fn inspect(
         ),
         None => None,
     };
+    let target: BTreeSet<String> = source.manifest.owned().into_iter().collect();
+    // Which tree is at the root, from the record and the root's identity.
+    let installing = state.filter(|state| state.phase == Phase::Installing);
+    let work = state.and_then(|state| state.work.as_ref());
+    let root_files: Vec<String> = match (state, root_id) {
+        (_, None) | (None, _) => Vec::new(),
+        (Some(state), Some(id)) => match installing {
+            Some(_) if work.is_some_and(|work| work.id == id && work.check) => state.owned.clone(),
+            Some(state) if state.previous == Some(id) => state.base.clone().unwrap_or_default(),
+            Some(_) => return Err(Problem::Conflict(layout.root.clone())),
+            None => state.owned.clone(),
+        },
+    };
+    let conflict = |at: &Path, error: std::io::Result<Result<(), String>>| match error {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(entry)) => Err(Problem::Conflict(at.join(entry))),
+        Err(_) => Err(Problem::Conflict(at.to_path_buf())),
+    };
+    let (root_state, base) = match &root {
+        None => (Root::Absent, Vec::new()),
+        Some(root)
+            if installing.is_some()
+                && root_files == state.map(|state| state.owned.clone()).unwrap_or_default()
+                && is_release(layout, root, source, &target) =>
+        {
+            (Root::Target, root_files.clone())
+        }
+        Some(root) => {
+            let files: BTreeSet<String> = root_files.iter().cloned().collect();
+            conflict(
+                &layout.root,
+                tree::only_listed(root, "", &files, layout.owner),
+            )?;
+            (Root::Previous, root_files.clone())
+        }
+    };
+    // The recorded work folder, when it is still the recorded object at its name: what it holds
+    // follows from which object it is.
+    let left = match (parent, work) {
+        (Some(parent), Some(work)) => {
+            let path = layout.root.with_file_name(&work.name);
+            match place::open_ours(
+                parent,
+                &CString::new(work.name.as_bytes()).unwrap_or_default(),
+                &path,
+                layout.owner,
+            ) {
+                Ok(Some(folder)) => {
+                    let id = sys::entry(folder.raw())
+                        .map_err(|_| Problem::Conflict(path.clone()))?
+                        .id;
+                    let previous_tree = installing
+                        .filter(|state| state.previous == Some(id))
+                        .map(|state| state.base.clone().unwrap_or_default());
+                    let previous_tree = previous_tree
+                        .or_else(|| (!work.check && work.id == id).then(|| work.files.clone()));
+                    (id == work.id || previous_tree.is_some()).then(|| LeftWork {
+                        name: work.name.clone(),
+                        id,
+                        previous_tree,
+                    })
+                }
+                // Something else at the name is not the installation's: it is left as it is.
+                Ok(None) | Err(_) => None,
+            }
+        }
+        _ => None,
+    };
     Ok(Inspection {
         action,
         base,
         root: root_state,
         root_id,
-        work,
+        left,
         link,
     })
 }
@@ -438,36 +517,60 @@ fn is_release(layout: &Layout, root: &Fd, source: &Source, target: &BTreeSet<Str
             .all(|path| check(layout, root, &layout.root, source, path).is_ok())
 }
 
-/// Removes the work folder `name` in `parent` when it is the one `work`
-/// records: each of its recorded files, each folder of the installation's
-/// left empty, then the folder itself. True when it is gone or was never
-/// there; false when it is another object, or something else keeps it: then
-/// it stays.
+/// What a release lists for each of its files, the manifest included.
+fn listed_by(source: &Source) -> Listed {
+    let mut listed: Listed = source
+        .manifest
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), (file.sha256.clone(), file.size)))
+        .collect();
+    listed.insert(
+        MANIFEST.to_owned(),
+        (source.digest(), source.manifest_bytes.len() as u64),
+    );
+    listed
+}
+
+/// Removes the work folder `work` names, while it is that object: its files
+/// by the list (with `check`, only those holding what `source` lists), each
+/// folder of the installation's left empty, then the folder itself. None when
+/// it is gone; the entries kept otherwise. A folder of the installation's it
+/// cannot look into stops it with that path.
 fn clear_work(
     layout: &Layout,
     parent: &Fd,
-    name: &std::ffi::CStr,
-    path: &Path,
-    work: Option<&Work>,
-) -> Result<bool, Problem> {
-    let Some(staging) = place::open_ours(parent, name, path, layout.owner)? else {
-        return Ok(true);
+    work: &Work,
+    source: Option<&Source>,
+) -> Result<Option<Vec<String>>, Problem> {
+    let path = layout.root.with_file_name(&work.name);
+    let name = CString::new(work.name.as_bytes()).unwrap_or_default();
+    let Some(folder) = place::open_ours(parent, &name, &path, layout.owner)? else {
+        return Ok(None);
     };
-    let failed = |_| Problem::Write(path.to_path_buf());
-    let Some(work) =
-        work.filter(|work| sys::entry(staging.raw()).is_ok_and(|entry| entry.id == work.id))
-    else {
-        return Ok(false);
-    };
-    let files: BTreeSet<String> = work.files.iter().cloned().collect();
-    if !tree::clear_listed(&staging, "", &files, layout.owner).map_err(failed)? {
-        return Ok(false);
+    let failed = |_| Problem::Write(path.clone());
+    if sys::entry(folder.raw()).map_err(failed)?.id != work.id {
+        return Ok(Some(vec![String::from(".")]));
     }
-    drop(staging);
-    match sys::remove_at(parent, name, true) {
+    let files: BTreeSet<String> = work.files.iter().cloned().collect();
+    let hashes = match (work.check, source) {
+        (true, Some(source)) => Some(listed_by(source)),
+        _ => None,
+    };
+    let left = match tree::remove_listed(&folder, "", &files, hashes.as_ref(), layout.owner)
+        .map_err(failed)?
+    {
+        Ok(left) => left,
+        Err(at) => return Err(Problem::Conflict(path.join(at))),
+    };
+    if !left.empty {
+        return Ok(Some(left.kept));
+    }
+    drop(folder);
+    match sys::remove_at(parent, &name, true) {
         Ok(_) => {
             sys::flush(parent.raw()).map_err(failed)?;
-            Ok(true)
+            Ok(None)
         }
         Err(error)
             if matches!(
@@ -475,7 +578,7 @@ fn clear_work(
                 Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
             ) =>
         {
-            Ok(false)
+            Ok(Some(Vec::new()))
         }
         Err(error) => Err(failed(error)),
     }

@@ -177,55 +177,95 @@ pub fn only_listed(
     Ok(Ok(()))
 }
 
+/// What a removal by list left under a folder.
+#[derive(Debug, Default)]
+pub struct Left {
+    /// Entries kept, by relative path: not listed, or listed but not holding
+    /// what the release lists.
+    pub kept: Vec<String>,
+    /// Whether the folder was left empty.
+    pub empty: bool,
+}
+
+/// The SHA-256 and size each listed file must hold to be removed.
+pub type Listed = std::collections::BTreeMap<String, (String, u64)>;
+
 /// Removes, under the open folder `folder` (at `prefix`), each regular file
-/// that is one of `files` under exactly that path, and each folder of the
-/// `owner`'s that is left empty; anything else stays. Whether `folder` is
-/// left empty.
-pub fn clear_listed(
+/// that is one of `files` under exactly that path (with `hashes`, only while
+/// it holds exactly what they list), and each folder of the installation's
+/// left empty. Anything else is kept. A folder on the way to a listed file
+/// that is not as the installation makes it (`is_ours`) cannot be looked
+/// into: its path is the error, and nothing more is removed.
+pub fn remove_listed(
     folder: &Fd,
     prefix: &str,
     files: &BTreeSet<String>,
+    hashes: Option<&Listed>,
     owner: u32,
-) -> io::Result<bool> {
-    let mut empty = true;
+) -> io::Result<Result<Left, String>> {
+    let mut left = Left {
+        kept: Vec::new(),
+        empty: true,
+    };
     for name in sys::names(folder)? {
         let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
-            empty = false;
+            left.kept.push(format!(
+                "{prefix}{}",
+                String::from_utf8_lossy(name.to_bytes())
+            ));
             continue;
         };
         let path = format!("{prefix}{text}");
         let Some(entry) = sys::entry_at(folder, &name)? else {
             continue;
         };
+        let inside = format!("{path}/");
         match entry.kind {
             Kind::File if files.contains(&path) => {
-                sys::remove_at(folder, &name, false)?;
-            }
-            Kind::Folder if is_ours(&entry, Kind::Folder, owner) => {
-                let inner = sys::open_folder_at(folder, &name)?;
-                if clear_listed(&inner, &format!("{path}/"), files, owner)? {
-                    drop(inner);
-                    match sys::remove_at(folder, &name, true) {
-                        Ok(_) => {}
-                        Err(error)
-                            if matches!(
-                                error.raw_os_error(),
-                                Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
-                            ) =>
-                        {
-                            empty = false
-                        }
-                        Err(error) => return Err(error),
+                let removable = match hashes {
+                    None => true,
+                    Some(hashes) => {
+                        let (mut file, _) = sys::open_file_at(folder, &name)?;
+                        let (sha256, size) = hash(&mut file)?;
+                        hashes.get(&path) == Some(&(sha256, size))
                     }
+                };
+                if removable {
+                    sys::remove_at(folder, &name, false)?;
                 } else {
-                    empty = false;
+                    left.kept.push(path);
                 }
             }
-            _ => empty = false,
+            Kind::Folder if files.iter().any(|file| file.starts_with(&inside)) => {
+                if !is_ours(&entry, Kind::Folder, owner) {
+                    return Ok(Err(path));
+                }
+                let inner = sys::open_folder_at(folder, &name)?;
+                match remove_listed(&inner, &inside, files, hashes, owner)? {
+                    Err(at) => return Ok(Err(at)),
+                    Ok(inner_left) => {
+                        left.kept.extend(inner_left.kept);
+                        drop(inner);
+                        if inner_left.empty {
+                            match sys::remove_at(folder, &name, true) {
+                                Ok(_) => {}
+                                Err(error)
+                                    if matches!(
+                                        error.raw_os_error(),
+                                        Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+                                    ) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                }
+            }
+            _ => left.kept.push(path),
         }
     }
     sys::flush(folder.raw())?;
-    Ok(empty)
+    left.empty = sys::names(folder)?.is_empty();
+    Ok(Ok(left))
 }
 
 /// Every file under `root`, by relative path, sorted. Anything there that is
