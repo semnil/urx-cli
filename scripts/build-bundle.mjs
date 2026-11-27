@@ -2,10 +2,11 @@
 // runtime assembled into the fixed layout, with a release manifest that lists
 // every file it owns by its SHA-256 and names the identities it was built
 // from. It reads dist-release/ and writes dist-bundle/, both at the
-// repository root. It claims dist-bundle/ before reading anything, with
-// tools/output, and stops when anything is already there rather than remove
-// or replace it; the bundle is written into the claimed folder through the
-// open folder, without replacing anything, its manifest last. The Node archive is given by path and read once: the bytes whose
+// repository root. It stops before reading anything when anything is at
+// dist-bundle/, and publishes the bundle with tools/output: complete,
+// manifest included, in a work folder beside it, then renamed to
+// dist-bundle/ only where nothing is. The Node archive is given by path and
+// read once: the bytes whose
 // hash matches the one build-inputs.json records for this platform are the
 // bytes extracted. Nothing is downloaded here, the bundle has no links, and
 // on macOS its directories and executables are 0755 and its other files 0644.
@@ -25,7 +26,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256, stillClaimed } from "./release-build.mjs";
+import { describeFiles, filesUnder, isModuleFormat, isRecordedPath, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -168,9 +169,9 @@ async function main(argv) {
   if (argv.length !== 2 || argv[0] !== "--node-archive") throw new Error(USAGE);
   const release = join(root, "dist-release");
   const output = join(root, "dist-bundle");
-  // Claimed before reading anything, so nothing at the output is ever replaced.
+  // Checked before reading anything; the rename that publishes the bundle checks again.
+  requireNoOutput(output, "bundle build");
   const tool = outputTool(root);
-  const claim = claimOutput(output, "bundle build", tool);
   let scratch;
   try {
     const recorded = inputs.node.archives[platform.key];
@@ -214,7 +215,7 @@ async function main(argv) {
     mkdirSync(notices);
     writeFileSync(join(notices, "urx-cli.txt"), recordedFile(root, BUILD_INFO.appCommit, "LICENSE"));
     writeFileSync(join(notices, "urx-device.txt"), recordedFile(join(root, "vendor", "urx-device"), BUILD_INFO.commonCommit, "LICENSE"));
-    // Laid out in this run's scratch, then written into the claimed output, its manifest last.
+    // Laid out in this run's scratch, then published, its manifest last.
     const staging = join(scratch, "bundle");
     mkdirSync(staging);
     assemble({
@@ -233,11 +234,8 @@ async function main(argv) {
     });
     writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`]);
-    publishOutput(staging, output, { claim, last: "release-manifest.json", label: "bundle build", tool });
+    publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
-  } catch (error) {
-    process.stderr.write(`${leftBehind(output, "bundle build", stillClaimed(output, claim, tool))}\n`);
-    throw error;
   } finally {
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
   }
