@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { filesUnder } from "./build-bundle.mjs";
-import { recordedProblems, RELEASE_FILES, releaseRecord } from "./release-build.mjs";
+import { recordedProblems, RELEASE_FILES, releaseRecord, RUST_NOTICES } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -27,6 +27,8 @@ const recorded = releaseRecord(output);
 if (recorded === null) fail("the output has no well-formed record of the files the release build made");
 const problems = recordedProblems(output, recorded);
 const unrecorded = filesUnder(output).filter((path) => path !== RELEASE_FILES && !recorded.some((file) => file.path === path));
+// The licenses of the Rust crates in its programs are one of its files.
+if (!recorded.some((file) => file.path === RUST_NOTICES)) problems.push(`${RUST_NOTICES} is not one of its files`);
 if (problems.length > 0 || unrecorded.length > 0) {
   fail(`the output is not as the release build made it: ${[...problems, ...unrecorded.map((path) => `${path} is not one of its files`)].join("; ")}`);
 }

@@ -37,7 +37,7 @@ for (const file of manifest.files) {
   if (sha256(bytes) !== file.sha256 || bytes.length !== file.size) fail(`${file.path} does not match the manifest`);
 }
 const tools = platform.maintenance.map((tool) => `maintenance/${tool}`);
-for (const path of [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, "app/main.js", "native/urx-native.node", ...tools]) {
+for (const path of [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, "app/main.js", "native/urx-native.node", "notices/rust-crates.txt", ...tools]) {
   if (!listed.includes(path)) fail(`the bundle has no ${path}`);
 }
 if (listed.some((path) => path.startsWith("maintenance/") && !tools.includes(path))) fail("the bundle has a maintenance file it is not built with");

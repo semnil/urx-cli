@@ -36,8 +36,8 @@ export function installerRecord(program, manifestBytes) {
   return { installer: { path: "urx-install", sha256: sha256(program), size: program.length }, releaseManifest: sha256(manifestBytes) };
 }
 
-/** The files a macOS bundle cannot be without (K18, K20). */
-const REQUIRED = ["bin/urx", "runtime/node", "native/urx-native.node", "app/main.js", "maintenance/urx-uninstall"];
+/** The files a macOS bundle cannot be without (K18, K20), the Rust crates' licenses among them. */
+const REQUIRED = ["bin/urx", "runtime/node", "native/urx-native.node", "app/main.js", "maintenance/urx-uninstall", "notices/rust-crates.txt"];
 
 /** The files of a macOS bundle run as programs; every other file is 0644. */
 export const EXECUTABLES = ["bin/urx", "runtime/node", "maintenance/urx-uninstall"];

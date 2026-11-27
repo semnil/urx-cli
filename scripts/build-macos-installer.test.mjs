@@ -13,7 +13,7 @@ const manifest = (overrides = {}) => ({
   release: "0.1.0",
   app: { version: "0.1.0", commit },
   runtime: { version: inputs.node.version, archive: archive.file, sha256: archive.sha256 },
-  files: ["bin/urx", "runtime/node", "native/urx-native.node", "app/main.js", "maintenance/urx-uninstall"].map((path) => ({ path, sha256: "0".repeat(64), size: 1 })),
+  files: ["bin/urx", "runtime/node", "native/urx-native.node", "app/main.js", "maintenance/urx-uninstall", "notices/rust-crates.txt"].map((path) => ({ path, sha256: "0".repeat(64), size: 1 })),
   ...overrides,
 });
 
@@ -31,6 +31,9 @@ describe("the macOS installer tree (K41)", () => {
     expect(macosBundleProblems(manifest({ release: "0.1.0 beta" }), inputs, commit)).toEqual(["the bundle names no release version the installer can record: 0.1.0 beta"]);
     expect(macosBundleProblems(manifest({ files: manifest().files.filter((file) => file.path !== "maintenance/urx-uninstall") }), inputs, commit)).toEqual([
       "the bundle lists no maintenance/urx-uninstall",
+    ]);
+    expect(macosBundleProblems(manifest({ files: manifest().files.filter((file) => file.path !== "notices/rust-crates.txt") }), inputs, commit)).toEqual([
+      "the bundle lists no notices/rust-crates.txt",
     ]);
     const unicode = [...manifest().files, { path: "app/caf\u00e9.js", sha256: "0".repeat(64), size: 1 }];
     expect(macosBundleProblems(manifest({ files: unicode }), inputs, commit)).toEqual([`the bundle lists a path the installer cannot take: "app/caf\u00e9.js"`]);
