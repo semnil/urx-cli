@@ -5,17 +5,19 @@
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
 // `--release` and a Cargo target directory of their own. The build claims
-// dist-release/ before building, by creating it where nothing is, so two
-// release builds never write into one output, and it stops when anything is
-// already there rather than remove or replace it. The result is written into
-// the claimed folder without replacing anything, its record last; a build
-// that stops after claiming it leaves it without that record. The launcher is
+// dist-release/ before building, with tools/output, so two release builds
+// never write into one output, and it stops when anything is already there
+// rather than remove or replace it. The result is written into the claimed
+// folder through the open folder, without replacing anything, its record
+// last; a build that stops after claiming it leaves it without that record,
+// and one whose output was swapped for another folder writes nothing there.
+// The launcher is
 // built from the same export into the same target directory and placed at
 // dist-release/launcher/ for the bundle (scripts/build-bundle.mjs).
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, constants, copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,20 +195,39 @@ export function recordedProblems(root, files) {
 }
 
 /**
- * The `urx` executable that `cargo build --message-format=json` reports
+ * The executable `name` that `cargo build --message-format=json` reports
  * building, wherever the target in use puts it.
  */
-export function launcherArtifact(messages) {
+export function cargoArtifact(messages, name) {
   let found;
   for (const line of messages.split("\n")) {
     if (!line.startsWith("{")) continue;
     const message = JSON.parse(line);
-    if (message.reason === "compiler-artifact" && message.target?.name === "urx" && message.target.kind?.includes("bin") && typeof message.executable === "string") {
+    if (message.reason === "compiler-artifact" && message.target?.name === name && message.target.kind?.includes("bin") && typeof message.executable === "string") {
       found = message.executable;
     }
   }
-  if (found === undefined) throw new Error("cargo reported building no urx executable");
+  if (found === undefined) throw new Error(`cargo reported building no ${name} executable`);
   return found;
+}
+
+/** The `urx` executable that `cargo build --message-format=json` reports building. */
+export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
+
+/**
+ * Builds `tools/output` in the checkout at `root` and returns its executable,
+ * which claims a build's output and writes into it (see its main.rs). It is
+ * build tooling, built from the working tree; nothing of it is in an output.
+ */
+export function outputTool(root) {
+  const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "inherit"],
+    env: environment,
+  });
+  return cargoArtifact(messages, "urx-output");
 }
 
 /**
@@ -224,21 +245,22 @@ export function removeExport(root, destination) {
 }
 
 /**
- * Claims `output` for one build by creating it, empty, where nothing is. A
- * build never removes or replaces a previous output: when anything is at
- * `output`, an empty folder or a link included, it is left as it is and the
- * build stops, before building anything; the user removes it before building
- * again. The claimed folder is not removed afterwards either: a build that
- * stops after claiming it leaves it, without the record that marks a finished
- * output, for the user to remove.
+ * Claims `output` for one build with `tool` (`outputTool`): an empty folder
+ * is made under a random name beside it and renamed to it only where nothing
+ * is. A build never removes, replaces or changes a previous output: when
+ * anything is at `output`, an empty folder or a link included, it is left as
+ * it is and the build stops, before building anything; the user removes it
+ * before building again. The claimed folder is not removed afterwards either:
+ * a build that stops after claiming it leaves it, without the record that
+ * marks a finished output, for the user to remove. Returns the claim, the
+ * folder's identity, for `publishOutput`.
  */
-export function claimOutput(output, label = "release build") {
-  try {
-    mkdirSync(output);
-  } catch (error) {
-    if (error?.code === "EEXIST") throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
-    throw new Error(`${output} could not be created`, { cause: error });
-  }
+export function claimOutput(output, label, tool) {
+  const result = spawnSync(tool, ["claim", output], { encoding: "utf8" });
+  if (result.error) throw result.error;
+  if (result.status === 3) throw new Error(`${output} already exists; the ${label} leaves it as it is, so remove it to build again`);
+  if (result.status !== 0) throw new Error(`${output} could not be claimed: ${result.stderr.trim()}`);
+  return result.stdout.trim();
 }
 
 /** Says, when a build stops after claiming `output`, that the folder stays and is the user's to remove. */
@@ -247,59 +269,28 @@ export function leftBehind(output, label = "release build") {
 }
 
 /**
- * Writes the files of `staging` into `output`, the empty folder `claimOutput`
- * made, without replacing anything: each folder is created where nothing is,
- * each file is copied where nothing is, and `last`, the record at the top of
- * the output that marks it finished, is copied after every other file and
- * after the modes are set. When anything is in the way, it is left as it is
- * and this throws, leaving `output` without that record; so does a file in
- * `output` that this did not write. Outside Windows, folders and files keep
- * the modes they have in `staging`.
+ * Writes the files of `staging` into `output`, the folder `claim` names, with
+ * `tool`: only when `output` is still that folder, through the open folder
+ * itself so that a path swapped meanwhile cannot redirect a write, each
+ * folder and file created where nothing is, folder modes kept outside
+ * Windows, and `last`, the record at the top of the output that marks it
+ * finished, written after everything else and only when the output holds
+ * exactly the files written beside it. Anything in the way is left as it is
+ * and this throws, leaving `output` without that record.
  */
-export function publishOutput(staging, output, { last, label = "release build", chmod = chmodSync } = {}) {
-  const keepMode = (from, to) => {
-    if (process.platform !== "win32") chmod(to, statSync(from).mode & 0o7777);
-  };
-  const copyTree = (from, to) => {
-    for (const entry of readdirSync(from, { withFileTypes: true })) {
-      const source = join(from, entry.name);
-      const target = join(to, entry.name);
-      if (from === staging && entry.name === last) continue;
-      if (entry.isDirectory()) {
-        mkdirSync(target);
-        copyTree(source, target);
-        keepMode(source, target);
-      } else if (entry.isFile()) {
-        copyFileSync(source, target, constants.COPYFILE_EXCL);
-      } else {
-        throw new Error(`${source} is neither a regular file nor a folder`);
-      }
-    }
-  };
-  try {
-    copyTree(staging, output);
-    keepMode(staging, output);
-  } catch (error) {
-    throw new Error(`the ${label} could not write ${output} without replacing what is in it`, { cause: error });
-  }
-  // The record goes in only when the output holds exactly the files written beside it.
-  const written = filesUnder(staging).filter((path) => path !== last);
-  const present = filesUnder(output);
-  const beside = present.filter((path) => !written.includes(path));
-  if (beside.length > 0) throw new Error(`${output} holds files the ${label} did not write, left as they are: ${beside.join(", ")}`);
-  if (last === undefined) return;
-  try {
-    copyFileSync(join(staging, last), join(output, last), constants.COPYFILE_EXCL);
-  } catch (error) {
-    throw new Error(`the ${label} could not write ${output} without replacing what is in it`, { cause: error });
-  }
+export function publishOutput(staging, output, { claim, last, label = "release build", tool }) {
+  const result = spawnSync(tool, ["publish", staging, output, claim, ...(last === undefined ? [] : ["--last", last])], { encoding: "utf8" });
+  if (result.error) throw result.error;
+  if (result.status === 4) throw new Error(`${output} is no longer the folder the ${label} claimed; it is left as it is`);
+  if (result.status !== 0) throw new Error(`the ${label} could not write ${output} without replacing what is in it: ${result.stderr.trim()}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const output = join(root, "dist-release");
   // Claimed before building anything, so nothing at the output is ever replaced.
-  claimOutput(output);
+  const tool = outputTool(root);
+  const claim = claimOutput(output, "release build", tool);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
   try {
@@ -337,7 +328,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
     writeReleaseFiles(staging);
-    publishOutput(staging, output, { last: RELEASE_FILES });
+    publishOutput(staging, output, { claim, last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);
   } catch (error) {
     process.stderr.write(`${leftBehind(output)}\n`);

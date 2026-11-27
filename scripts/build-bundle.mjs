@@ -2,10 +2,10 @@
 // runtime assembled into the fixed layout, with a release manifest that lists
 // every file it owns by its SHA-256 and names the identities it was built
 // from. It reads dist-release/ and writes dist-bundle/, both at the
-// repository root. It claims dist-bundle/ before reading anything, by
-// creating it where nothing is, and stops when anything is already there
-// rather than remove or replace it; the bundle is written into the claimed
-// folder without replacing anything, its manifest last. The Node archive is given by path and read once: the bytes whose
+// repository root. It claims dist-bundle/ before reading anything, with
+// tools/output, and stops when anything is already there rather than remove
+// or replace it; the bundle is written into the claimed folder through the
+// open folder, without replacing anything, its manifest last. The Node archive is given by path and read once: the bytes whose
 // hash matches the one build-inputs.json records for this platform are the
 // bytes extracted. Nothing is downloaded here, the bundle has no links, and
 // on macOS its directories and executables are 0755 and its other files 0644.
@@ -25,7 +25,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
+import { claimOutput, describeFiles, filesUnder, isModuleFormat, isRecordedPath, leftBehind, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -169,7 +169,8 @@ async function main(argv) {
   const release = join(root, "dist-release");
   const output = join(root, "dist-bundle");
   // Claimed before reading anything, so nothing at the output is ever replaced.
-  claimOutput(output, "bundle build");
+  const tool = outputTool(root);
+  const claim = claimOutput(output, "bundle build", tool);
   let scratch;
   try {
     const recorded = inputs.node.archives[platform.key];
@@ -232,7 +233,7 @@ async function main(argv) {
     });
     writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`]);
-    publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build" });
+    publishOutput(staging, output, { claim, last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } catch (error) {
     process.stderr.write(`${leftBehind(output, "bundle build")}\n`);
