@@ -1831,3 +1831,143 @@ fn an_entry_whose_mark_cannot_be_read_stops_both_tools_with_its_record() {
         assert!(no_work_folder(&scene), "{finish}");
     }
 }
+
+fn run(command: &str, args: &[&Path]) {
+    let status = std::process::Command::new(command)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{command} {args:?}");
+}
+
+#[test]
+fn a_copy_that_took_the_mark_with_it_is_kept_and_the_original_goes_under_any_name() {
+    for finish in ["installer", "removal"] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
+        // Stopped with the manifest and app/main.js written.
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &stop_at(5)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &expected);
+        // Copies made in the work folder with their extended attributes, then changed; the
+        // original renamed.
+        run(
+            "cp",
+            &[&work.join("app/main.js"), &work.join("app/main-copy.js")],
+        );
+        run(
+            "cp",
+            &[Path::new("-R"), &work.join("app"), &work.join("app-copy")],
+        );
+        fs::write(work.join("app/main-copy.js"), "edited").unwrap();
+        fs::write(work.join("app-copy/main.js"), "edited").unwrap();
+        fs::rename(work.join("app/main.js"), work.join("app/renamed.js")).unwrap();
+        let report = if finish == "installer" {
+            let report = install(&scene.layout, &source, &expected, true, &never).unwrap();
+            assert!(launcher_accepts(&scene));
+            report
+        } else {
+            let report = uninstall(&scene.layout, true, &never).unwrap();
+            assert!(state_of(&scene).is_none());
+            report
+        };
+        assert_eq!(
+            walk(&work),
+            vec![
+                "app-copy/main-copy.js".to_owned(),
+                "app-copy/main.js".to_owned(),
+                "app/main-copy.js".to_owned(),
+            ],
+            "{finish}"
+        );
+        assert!(report.lines.iter().any(|line| line
+            == &format!(
+                "Kept {}: it holds files the installation did not make (app-copy/main-copy.js, app-copy/main.js, app/main-copy.js).",
+                work.display()
+            )), "{finish}: {:?}", report.lines);
+    }
+}
+
+#[test]
+fn the_run_s_files_under_a_folder_without_its_mark_are_still_cleared() {
+    let files = [("app/plugins/x.js", "x"), ("app/plugins/y.js", "y")];
+    let probe = scene();
+    let (source, expected) = release(&probe, "image", "0.1.0", &files);
+    let total =
+        questions(&|stop| install(&probe.layout, &source, &expected, true, stop).map(|_| ()));
+    for (change, finish) in [
+        ("app", "installer"),
+        ("app", "removal"),
+        ("app/plugins", "installer"),
+        ("app/plugins", "removal"),
+        ("remade", "installer"),
+        ("remade", "removal"),
+    ] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &files);
+        // Stopped with the release written, before it is put in place.
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &stop_at(total - 2)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &expected);
+        let plugins = work.join("app/plugins");
+        fs::write(plugins.join("note"), "someone's").unwrap();
+        if change == "remade" {
+            // Another folder in its place, the run's files moved into it.
+            let moved = work.join("app/moved");
+            fs::rename(&plugins, &moved).unwrap();
+            fs::create_dir(&plugins).unwrap();
+            for name in names_in(&moved) {
+                fs::rename(moved.join(&name), plugins.join(&name)).unwrap();
+            }
+            fs::remove_dir(&moved).unwrap();
+        } else {
+            set_mark(&work.join(change), None);
+        }
+        if finish == "installer" {
+            install(&scene.layout, &source, &expected, true, &never).unwrap();
+            assert!(launcher_accepts(&scene));
+        } else {
+            uninstall(&scene.layout, true, &never).unwrap();
+            assert!(state_of(&scene).is_none());
+        }
+        assert_eq!(
+            walk(&work),
+            vec!["app/plugins/note".to_owned()],
+            "{change} {finish}"
+        );
+    }
+}
+
+#[test]
+fn a_folder_in_the_work_folder_that_cannot_be_looked_into_safely_stops_both_tools() {
+    for finish in ["installer", "removal"] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &stop_at(5)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &expected);
+        let mine = work.join("mine");
+        fs::create_dir(&mine).unwrap();
+        fs::set_permissions(&mine, fs::Permissions::from_mode(0o777)).unwrap();
+        let stopped = if finish == "installer" {
+            install(&scene.layout, &source, &expected, true, &never).map(|_| ())
+        } else {
+            uninstall(&scene.layout, true, &never).map(|_| ())
+        };
+        assert_eq!(stopped, Err(Problem::Conflict(mine.clone())), "{finish}");
+        assert!(state_of(&scene).is_some(), "{finish}");
+        fs::set_permissions(&mine, fs::Permissions::from_mode(0o755)).unwrap();
+        if finish == "installer" {
+            install(&scene.layout, &source, &expected, true, &never).unwrap();
+        } else {
+            uninstall(&scene.layout, true, &never).unwrap();
+        }
+        assert_eq!(names_in(&work), vec!["mine".to_owned()], "{finish}");
+    }
+}

@@ -1,12 +1,14 @@
 //! The marks on what the installer makes in a work folder (K41 as revised).
 //! Every file and folder it makes there is made first under a reserved name,
-//! given the extended attribute `MARK` holding the work folder's inode, and
-//! written through to the disk, and only then moved to its path. What
-//! carries the mark of the work folder it is in, and what is at a reserved
-//! name, is the installation's, whatever it holds, a file cut short
-//! included; nothing else is, whatever it holds. Each object carries its own
-//! mark, so no list of them can be cut short or lost. Installed files keep
-//! the mark; nothing reads it outside a work folder.
+//! given the extended attribute `MARK` holding the work folder's inode and
+//! its own, and written through to the disk, and only then moved to its
+//! path. What carries the mark of the work folder it is in under its own
+//! inode, and what is at a reserved name, is the installation's, whatever it
+//! holds, a file cut short included; nothing else is, whatever it holds, a
+//! copy that took the mark with it included. Each object carries its own
+//! mark, so no list of them can be cut short or lost, and each is told by
+//! its own wherever it is in the work folder. Installed files keep the mark;
+//! nothing reads it outside a work folder.
 
 use crate::place::is_ours;
 use crate::records::{MANIFEST, RESERVED_PREFIX};
@@ -21,7 +23,7 @@ use std::os::unix::io::AsRawFd;
 pub const MARK: &str = "urx-cli.made";
 
 /// The longest mark read.
-const MARK_LIMIT: usize = 32;
+const MARK_LIMIT: usize = 64;
 
 /// The most reserved names one run tries.
 const TRIES: u64 = 1 << 20;
@@ -68,10 +70,11 @@ impl Maker {
     }
 
     fn mark(&self, fd: libc::c_int) -> io::Result<()> {
-        if sys::entry(fd)?.id.0 != self.volume {
+        let entry = sys::entry(fd)?;
+        if entry.id.0 != self.volume {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        sys::set_mark(fd, &c(MARK), self.work.to_string().as_bytes())
+        sys::set_mark(fd, &c(MARK), mark_value(self.work, &entry).as_bytes())
     }
 
     /// A new file in the open folder `parent`, for writing, under a reserved
@@ -118,21 +121,28 @@ impl Maker {
     }
 }
 
-/// Whether the open object `fd` carries the mark of the work folder `work`.
-fn carries(fd: libc::c_int, work: u64) -> io::Result<bool> {
+/// The mark of the object `entry` made in the work folder `work`: both
+/// inodes.
+fn mark_value(work: u64, entry: &Entry) -> String {
+    format!("{work}:{}", entry.id.1)
+}
+
+/// Whether the open object `fd` (`entry`) carries the mark the installer
+/// gave it in the work folder `work`.
+fn carries(fd: libc::c_int, entry: &Entry, work: u64) -> io::Result<bool> {
     Ok(sys::mark_of(fd, &c(MARK), MARK_LIMIT)?
-        .is_some_and(|value| value == work.to_string().as_bytes()))
+        .is_some_and(|value| value == mark_value(work, entry).as_bytes()))
 }
 
 /// Removes, under the open folder `folder` of the work folder `work` (at
 /// `prefix`, empty or ending with `/`), each entry that is the
-/// installation's: at a reserved name, or carrying the work folder's mark.
-/// Each such folder must be as maintenance makes it; it is cleared first and
-/// removed once empty. Anything else is kept, whatever it holds. An entry
-/// whose mark cannot be read cannot be told from the installation's: its
-/// path is the error, as is that of a folder of the installation's not as
-/// maintenance makes it. The release manifest at the top goes after
-/// everything else.
+/// installation's: at a reserved name, or carrying its mark. Every folder is
+/// looked into, marked or not, and must be as maintenance makes it; one of
+/// the installation's is removed once empty, any other kept. Anything else
+/// is kept, whatever it holds. An entry whose mark cannot be read, or a
+/// folder that cannot be looked into safely, cannot be told from the
+/// installation's or may hold some of it: its path is the error. The release
+/// manifest at the top goes after everything else.
 pub fn clear(folder: &Fd, prefix: &str, work: u64, owner: u32) -> io::Result<Result<Left, String>> {
     let top = prefix.is_empty();
     let mut left = Left::default();
@@ -150,26 +160,25 @@ pub fn clear(folder: &Fd, prefix: &str, work: u64, owner: u32) -> io::Result<Res
                     return Ok(Err(path));
                 };
                 let opened = sys::entry(inner.raw())?;
-                if opened.id != entry.id {
+                if opened.id != entry.id || !is_ours(&opened, Kind::Folder, owner) {
                     return Ok(Err(path));
                 }
-                let Ok(marked) = carries(inner.raw(), work) else {
+                let Ok(marked) = carries(inner.raw(), &opened, work) else {
                     return Ok(Err(path));
                 };
-                if !reserved && !marked {
-                    left.kept.push(path);
-                    continue;
-                }
-                if !is_ours(&opened, Kind::Folder, owner) {
-                    return Ok(Err(path));
-                }
                 match clear(&inner, &format!("{path}/"), work, owner)? {
                     Err(at) => return Ok(Err(at)),
                     Ok(inner_left) => {
+                        let reported = !inner_left.kept.is_empty();
                         left.kept.extend(inner_left.kept);
                         drop(inner);
-                        if inner_left.empty {
-                            remove_folder(folder, &name)?;
+                        if reserved || marked {
+                            if inner_left.empty {
+                                remove_folder(folder, &name)?;
+                            }
+                        } else if !reported {
+                            // Someone's folder, holding nothing of theirs to name.
+                            left.kept.push(path);
                         }
                     }
                 }
@@ -177,7 +186,7 @@ pub fn clear(folder: &Fd, prefix: &str, work: u64, owner: u32) -> io::Result<Res
             Kind::File => {
                 let marked = match sys::open_file_at(folder, &name) {
                     Ok((file, opened)) if opened.id == entry.id => {
-                        match carries(file.as_raw_fd(), work) {
+                        match carries(file.as_raw_fd(), &opened, work) {
                             Ok(marked) => marked,
                             Err(_) => return Ok(Err(path)),
                         }
