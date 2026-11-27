@@ -14,19 +14,10 @@ use urx_launcher::{launch, Installation, Started};
 
 const CHILD: &str = "URX_LAUNCHER_TEST_CHILD";
 
-/// The stand-in runtime `cargo test` builds as an example.
+/// The stand-in runtime, a program of this package that Cargo builds for the
+/// tests and gives them the path of, wherever its settings put it.
 fn fake_runtime() -> PathBuf {
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let name = if cfg!(windows) {
-        "fake-runtime.exe"
-    } else {
-        "fake-runtime"
-    };
-    deps.parent().unwrap().join("examples").join(name)
+    PathBuf::from(env!("CARGO_BIN_EXE_fake-runtime"))
 }
 
 /// A complete installation in a scratch directory.

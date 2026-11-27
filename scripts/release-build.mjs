@@ -352,8 +352,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const triple = hostTriple(source, environment);
     const nativeUnits = join(scratch, "native-units.jsonl");
     run(["scripts/build-native.mjs", "--release", "--units", nativeUnits]);
-    // The installed command, from the same export and target directory (K22).
-    const messages = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
+    // The installed command, from the same export and target directory (K22): the `urx` program only, not the
+    // stand-in runtime the launcher's tests run.
+    const messages = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-launcher", "--bin", "urx", "--message-format=json-render-diagnostics"], {
       cwd: source,
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
