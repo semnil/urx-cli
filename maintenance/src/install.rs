@@ -14,6 +14,7 @@ use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
 use std::collections::BTreeSet;
+use std::ffi::CStr;
 use std::io::Write;
 use std::path::Path;
 
@@ -63,6 +64,9 @@ struct Inspection {
     action: Action,
     /// Every path the installation may own now.
     previous: Vec<String>,
+    /// The paths of the complete installation the run starts from, or started
+    /// from when it was interrupted.
+    base: Vec<String>,
     link: LinkState,
 }
 
@@ -78,7 +82,7 @@ pub fn install(
     stop: &dyn Fn() -> bool,
 ) -> Result<Report, Problem> {
     let source = source::verify(source_path, expected)?;
-    place::check_reachable(layout)?;
+    place::check_reachable(layout, false)?;
     let held = place::hold(
         layout,
         if apply {
@@ -126,7 +130,8 @@ pub fn install(
     if stop() {
         return Err(Problem::Interrupted);
     }
-    // Record before writing (K41 step 2): every path that may be owned.
+    // Record before writing (K41 step 2): every path that may be owned, and
+    // which of them the complete installation owned.
     let mut owned = inspection.previous.clone();
     owned.extend(changes.target.iter().cloned());
     owned.sort_unstable();
@@ -136,27 +141,35 @@ pub fn install(
         release: release.clone(),
         manifest: digest.clone(),
         owned,
+        base: Some(inspection.base.clone()),
     })?;
+    let tag = crate::records::pending_tag(&digest).to_owned();
     let root = place::open_root(layout, true)?.expect("a created root is open");
     // Mutate (step 3): what goes, then what comes, then the old spellings.
     for path in &changes.gone {
         if stop() {
             return Err(Problem::Interrupted);
         }
-        crate::remove::remove_owned(layout, &root, path, true)?;
+        crate::remove::remove_owned(layout, &root, path, &tag, None)?;
         crate::remove::prune(layout, &root, path)?;
     }
-    for path in &changes.target {
+    // The manifest first: it is what tells the installation's new files from others afterwards.
+    let order = changes
+        .target
+        .iter()
+        .filter(|path| *path == MANIFEST)
+        .chain(changes.target.iter().filter(|path| *path != MANIFEST));
+    for path in order {
         if stop() {
             return Err(Problem::Interrupted);
         }
-        put(layout, &root, &source, path)?;
+        put(layout, &root, &source, path, &tag)?;
     }
     for path in &changes.respelled {
         if stop() {
             return Err(Problem::Interrupted);
         }
-        crate::remove::remove_owned(layout, &root, path, true)?;
+        crate::remove::remove_owned(layout, &root, path, &tag, None)?;
         crate::remove::prune(layout, &root, path)?;
     }
     if stop() {
@@ -164,20 +177,21 @@ pub fn install(
     }
     place::make_link(layout)?;
     // Verify and make durable (step 4).
-    settle_folders(layout, &root)?;
+    settle_folders(layout, &root, &changes.target)?;
     for path in &changes.target {
         check(layout, &root, &source, path)?;
     }
     if place::link_state(layout)? != LinkState::Owned {
         return Err(Problem::Verify(layout.link.clone()));
     }
-    place::check_reachable(layout)?;
+    place::check_reachable(layout, true)?;
     sys::sync(root.raw()).map_err(|_| Problem::Write(layout.root.clone()))?;
     let complete = State {
         phase: Phase::Complete,
         release: release.clone(),
         manifest: digest,
         owned: changes.target,
+        base: None,
     };
     // The record must be one the launcher starts from.
     if urx_launcher::install::check(&complete.to_bytes(), &source.manifest_bytes).is_err() {
@@ -220,12 +234,12 @@ fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<In
         return Err(Problem::Conflict(layout.link.clone()));
     }
     let digest = source.digest();
-    let (action, previous) = match state {
+    let (action, previous, base) = match state {
         None => {
             if root.is_some() {
                 return Err(Problem::Unrecorded(layout.root.clone()));
             }
-            (Action::Install, Vec::new())
+            (Action::Install, Vec::new(), Vec::new())
         }
         Some(state) => {
             let same = state.manifest == digest;
@@ -241,104 +255,204 @@ fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<In
                     })
                 }
             };
-            (action, state.owned.clone())
+            (action, state.owned.clone(), state.base_paths().to_vec())
         }
     };
     let Some(root) = root else {
         return Ok(Inspection {
             action,
             previous,
+            base,
             link,
         });
     };
     let changes = Changes::of(&previous, source.manifest.owned());
-    let owned_keys: BTreeSet<String> = previous.iter().map(|path| key(path)).collect();
-    let gone_keys: BTreeSet<String> = changes.gone.iter().map(|path| key(path)).collect();
-    // A pending file maintenance left is its own only while a run of its own is unfinished.
-    let pending_ours = matches!(
-        state.map(|state| state.phase),
-        Some(Phase::Installing | Phase::Removing)
-    );
-    let conflict = |path: &str| Problem::Conflict(layout.root.join(path));
+    let plan = Plan::new(&previous, &base, &changes);
     for path in &changes.target {
-        clear_for(layout, &root, path, &owned_keys, &gone_keys).map_err(|at| conflict(&at))?;
-    }
-    for path in changes.target.iter().chain(&previous) {
-        let pending = format!("{path}{}", crate::records::PENDING_SUFFIX);
-        let found = match tree::parent_of(&root, path, Some(layout.owner), How::Lookup) {
-            Ok(Some((parent, name))) => {
-                sys::entry_at(&parent, &place::pending(&name)).map_err(|_| conflict(&pending))?
-            }
-            Ok(None) | Err(WalkError::Conflict(_)) => None,
-            Err(WalkError::Io(_)) => return Err(conflict(&pending)),
-        };
-        if found.is_some() && !(pending_ours && found.is_some_and(|entry| entry.kind == Kind::File))
-        {
-            return Err(conflict(&pending));
-        }
+        plan.clear_for(layout, &root, source, path)
+            .map_err(|at| Problem::Conflict(layout.root.join(at)))?;
     }
     Ok(Inspection {
         action,
         previous,
+        base,
         link,
     })
 }
 
-/// Whether this release's file `path` has its place: each folder on the way
-/// is the installation's or missing, or a file of the installation's that
-/// goes first; the file's own place is empty, holds the installation's file
-/// under any spelling, or is a folder of the installation's that going files
-/// leave empty. The path of the first thing in the way otherwise.
-fn clear_for(
-    layout: &Layout,
-    root: &Fd,
-    path: &str,
-    owned_keys: &BTreeSet<String>,
-    gone_keys: &BTreeSet<String>,
-) -> Result<(), String> {
-    let names: Vec<&str> = path.split('/').collect();
-    let mut folder: Option<Fd> = None;
-    let mut walked = String::new();
-    for (index, name) in names.iter().enumerate() {
-        if !walked.is_empty() {
-            walked.push('/');
-        }
-        walked.push_str(name);
-        let c_name = sys::c_name(name.as_bytes()).map_err(|_| walked.clone())?;
-        let parent = folder.as_ref().unwrap_or(root);
-        let entry = match sys::entry_at(parent, &c_name).map_err(|_| walked.clone())? {
-            None => return Ok(()),
-            Some(entry) => entry,
-        };
-        let last = index + 1 == names.len();
-        match entry.kind {
-            Kind::Folder if !place::is_ours(&entry, Kind::Folder, layout.owner) => {
-                return Err(walked)
-            }
-            Kind::Folder if !last => {
-                folder = Some(sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?);
-            }
-            Kind::Folder => {
-                let inner = sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?;
-                return match tree::holds_only(&inner, &format!("{walked}/"), gone_keys) {
-                    Ok(true) => Ok(()),
-                    _ => Err(walked),
-                };
-            }
-            // A file of the installation's where a folder goes is removed first.
-            Kind::File if !last && gone_keys.contains(&key(&walked)) => return Ok(()),
-            Kind::File | Kind::Link if last && owned_keys.contains(&key(&walked)) => return Ok(()),
-            _ => return Err(walked),
+/// What the preflight knows of the installation's own entries.
+struct Plan {
+    /// Folders the installation owns: the folders of every path it may own, by `key`.
+    folders: BTreeSet<String>,
+    /// Paths whose files are the installation's whatever they hold, by `key`.
+    base: BTreeSet<String>,
+    /// Paths the installation may own whose files are its own only as this
+    /// release lists them, by `key`.
+    added: BTreeSet<String>,
+    /// The files that go before this release's are written, exactly as
+    /// spelled, and their folders.
+    gone_files: BTreeSet<String>,
+    gone_folders: BTreeSet<String>,
+}
+
+fn folders_of(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(move |(at, _)| &path[..at])
+}
+
+impl Plan {
+    fn new(previous: &[String], base: &[String], changes: &Changes) -> Plan {
+        let base_keys: BTreeSet<String> = base.iter().map(|path| key(path)).collect();
+        Plan {
+            folders: previous
+                .iter()
+                .flat_map(|path| folders_of(path))
+                .map(key)
+                .collect(),
+            added: previous
+                .iter()
+                .map(|path| key(path))
+                .filter(|path| !base_keys.contains(path))
+                .collect(),
+            base: base_keys,
+            gone_files: changes.gone.iter().cloned().collect(),
+            gone_folders: changes
+                .gone
+                .iter()
+                .flat_map(|path| folders_of(path))
+                .map(str::to_owned)
+                .collect(),
         }
     }
-    Ok(())
+
+    /// Whether this release's file `path` has its place: each folder on the
+    /// way is one the installation owns, or missing, or a file that goes
+    /// first; the file's own place is empty, holds the installation's file
+    /// (a file of the complete installation, or one as this release lists
+    /// it), or is a folder of the installation's that the files going leave
+    /// empty. The path of the first thing in the way otherwise.
+    fn clear_for(
+        &self,
+        layout: &Layout,
+        root: &Fd,
+        source: &Source,
+        path: &str,
+    ) -> Result<(), String> {
+        let names: Vec<&str> = path.split('/').collect();
+        let mut folder: Option<Fd> = None;
+        let mut walked = String::new();
+        for (index, name) in names.iter().enumerate() {
+            let prefix = walked.clone();
+            if !walked.is_empty() {
+                walked.push('/');
+            }
+            walked.push_str(name);
+            let c_name = sys::c_name(name.as_bytes()).map_err(|_| walked.clone())?;
+            let parent = folder.as_ref().unwrap_or(root);
+            let found = tree::spelled(parent, &c_name).map_err(|_| walked.clone())?;
+            // The entry, and its path as the folder spells it.
+            let (entry, actual) = match &found {
+                Spelled::Missing => return Ok(()),
+                Spelled::Exact(entry) => (*entry, walked.clone()),
+                Spelled::Other { entry, actual } => {
+                    let Some(actual) = actual.as_ref().and_then(|actual| actual.to_str().ok())
+                    else {
+                        return Err(walked);
+                    };
+                    let spelled = if prefix.is_empty() {
+                        actual.to_owned()
+                    } else {
+                        format!("{prefix}/{actual}")
+                    };
+                    (*entry, spelled)
+                }
+            };
+            let last = index + 1 == names.len();
+            let ours_folder = place::is_ours(&entry, Kind::Folder, layout.owner)
+                && self.folders.contains(&key(&walked));
+            match entry.kind {
+                Kind::Folder if !ours_folder => return Err(walked),
+                Kind::Folder if !last => {
+                    folder =
+                        Some(sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?);
+                }
+                Kind::Folder => {
+                    // A folder that becomes a file: only one the files going leave empty.
+                    let inner = sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?;
+                    return match self.holds_only_gone(&inner, &format!("{actual}/")) {
+                        Ok(true) if self.gone_folders.contains(&actual) => Ok(()),
+                        _ => Err(walked),
+                    };
+                }
+                // A file that becomes a folder: only one that goes first, under that spelling.
+                Kind::File if !last && self.gone_files.contains(&actual) => return Ok(()),
+                Kind::File | Kind::Link if last && self.base.contains(&key(&walked)) => {
+                    return Ok(())
+                }
+                // A file a run of this release wrote before it was interrupted: only as the release lists it.
+                Kind::File if last && self.added.contains(&key(&walked)) => {
+                    return if listed_file(source, path, parent, &c_name) {
+                        Ok(())
+                    } else {
+                        Err(walked)
+                    };
+                }
+                _ => return Err(walked),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether everything under the open folder `folder` (at `prefix`, ending
+    /// with `/`, as spelled) is a file that goes or a folder of one, under
+    /// exactly that spelling.
+    fn holds_only_gone(&self, folder: &Fd, prefix: &str) -> std::io::Result<bool> {
+        for name in sys::names(folder)? {
+            let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
+                return Ok(false);
+            };
+            let path = format!("{prefix}{text}");
+            match sys::entry_at(folder, &name)?.map(|entry| entry.kind) {
+                Some(Kind::File) if self.gone_files.contains(&path) => {}
+                Some(Kind::Folder) if self.gone_folders.contains(&path) => {
+                    if !self.holds_only_gone(
+                        &sys::open_folder_at(folder, &name)?,
+                        &format!("{path}/"),
+                    )? {
+                        return Ok(false);
+                    }
+                }
+                None => {}
+                Some(_) => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Whether the file `name` in `parent` holds exactly what this release lists for `path`.
+fn listed_file(source: &Source, path: &str, parent: &Fd, name: &CStr) -> bool {
+    let Ok((mut file, _)) = sys::open_file_at(parent, name) else {
+        return false;
+    };
+    let Ok((sha256, size)) = tree::hash(&mut file) else {
+        return false;
+    };
+    if path == MANIFEST {
+        sha256 == source.digest() && size == source.manifest_bytes.len() as u64
+    } else {
+        source
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path == path && file.sha256 == sha256 && file.size == size)
+    }
 }
 
 /// Writes the owned file `path` from the source: to a pending sibling,
 /// hashed as it is copied, given its mode and flushed, then renamed into
 /// place under exactly this path's spelling. A file that no longer matches
 /// the manifest stops the installation.
-fn put(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), Problem> {
+fn put(layout: &Layout, root: &Fd, source: &Source, path: &str, tag: &str) -> Result<(), Problem> {
     let at = layout.root.join(path);
     let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Make) {
         Ok(found) => found.expect("missing folders are made"),
@@ -348,8 +462,8 @@ fn put(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), Pr
         Err(WalkError::Io(_)) => return Err(Problem::Write(at)),
     };
     let failed = |_| Problem::Write(at.clone());
-    // The inspection found no pending file here but one a run of maintenance's left.
-    let pending = place::pending(&name);
+    // A pending file with this release's tag is one a run of this release left.
+    let pending = place::pending(&name, tag);
     sys::remove_at(&parent, &pending, false).map_err(failed)?;
     let mut file = sys::create_file_at(&parent, &pending).map_err(failed)?;
     if path == MANIFEST {
@@ -463,18 +577,22 @@ fn check(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), 
     }
 }
 
-/// Gives the root and every folder under it the mode 0755, whatever it had,
-/// so that any user reaches the installed files, and flushes each, so that
-/// each name made or removed in it is on the disk.
-fn settle_folders(layout: &Layout, root: &Fd) -> Result<(), Problem> {
-    fn walk(folder: &Fd) -> std::io::Result<()> {
-        for name in sys::names(folder)? {
-            if sys::entry_at(folder, &name)?.is_some_and(|entry| entry.kind == Kind::Folder) {
-                walk(&sys::open_folder_at(folder, &name)?)?;
-            }
-        }
-        sys::set_folder_mode(folder, 0o755)?;
-        sys::flush(folder.raw())
+/// Gives the root and every folder of this release's files the mode 0755,
+/// whatever it had, so that any user reaches the installed files, and
+/// flushes each, so that each name made or removed in it is on the disk.
+/// Folders the installation does not use are left as they are.
+fn settle_folders(layout: &Layout, root: &Fd, target: &[String]) -> Result<(), Problem> {
+    let failed = |_| Problem::Write(layout.root.clone());
+    let folders: BTreeSet<&str> = target.iter().flat_map(|path| folders_of(path)).collect();
+    for folder in folders {
+        let (parent, name) = match tree::parent_of(root, folder, Some(layout.owner), How::Exact) {
+            Ok(Some(found)) => found,
+            _ => return Err(Problem::Verify(layout.root.join(folder))),
+        };
+        let opened = sys::open_folder_at(&parent, &name).map_err(failed)?;
+        sys::set_folder_mode(&opened, 0o755).map_err(failed)?;
+        sys::flush(opened.raw()).map_err(failed)?;
     }
-    walk(root).map_err(|_| Problem::Write(layout.root.clone()))
+    sys::set_folder_mode(root, 0o755).map_err(failed)?;
+    sys::flush(root.raw()).map_err(failed)
 }

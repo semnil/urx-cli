@@ -23,6 +23,14 @@ pub const REQUIRED: [&str; 5] = [
 /// no owned path ends with it.
 pub const PENDING_SUFFIX: &str = ".urx-pending";
 
+/// The pending sibling's tag: the start of the manifest digest of the
+/// release it is written for. A pending name is maintenance's only with the
+/// tag of the release maintenance is installing or removing, never by its
+/// place alone.
+pub fn pending_tag(manifest_digest: &str) -> &str {
+    &manifest_digest[..16.min(manifest_digest.len())]
+}
+
 /// The SHA-256 of `bytes`, in lowercase hexadecimal.
 pub fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -52,7 +60,7 @@ pub fn is_owned_path(path: &str) -> bool {
                 && name != "."
                 && name != ".."
                 && name.len() <= 255
-                && !name.ends_with(PENDING_SUFFIX)
+                && !name.contains(PENDING_SUFFIX)
         })
 }
 
@@ -190,26 +198,54 @@ impl Phase {
 
 /// The state record on macOS: the phase, the target release and the SHA-256
 /// of its manifest, and every path the installation may own. While
-/// installing, `owned` also holds the previous release's paths, so that an
-/// interrupted update still removes the files only that release had.
+/// installing or removing, `owned` also holds the previous release's paths,
+/// so that an interrupted update still removes the files only that release
+/// had, and `base` the paths of the complete installation the run started
+/// from (none for a first installation): a path in `owned` and not in `base`
+/// holds the installation's file only when that file is as the target
+/// release lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
     pub release: String,
     pub manifest: String,
     pub owned: Vec<String>,
+    /// Present exactly when the phase is not `complete`.
+    pub base: Option<Vec<String>>,
+}
+
+fn sorted_paths(value: &Value) -> Option<Vec<String>> {
+    let mut paths = Vec::new();
+    for path in value.as_array()? {
+        let path = path.as_str()?;
+        if !is_owned_path(path) {
+            return None;
+        }
+        paths.push(path.to_owned());
+    }
+    paths
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+        .then_some(paths)
 }
 
 impl State {
+    /// The paths whose files are the installation's whatever they hold: all
+    /// of `owned` once complete, `base` otherwise.
+    pub fn base_paths(&self) -> &[String] {
+        self.base.as_deref().unwrap_or(&self.owned)
+    }
+
     /// Reads a state record in exactly the form `to_bytes` writes, its owned
-    /// paths sorted, unique and including the manifest.
+    /// paths sorted, unique and including the manifest, and `base` among
+    /// them exactly when the phase is not `complete`.
     pub fn parse(bytes: &[u8]) -> Option<State> {
         let value: Value = serde_json::from_slice(bytes).ok()?;
         let object = value.as_object()?;
-        if !exact_keys(
-            object,
-            &["product", "format", "phase", "release", "manifest", "owned"],
-        ) {
+        let keys = [
+            "product", "format", "phase", "release", "manifest", "owned", "base",
+        ];
+        if !exact_keys(object, &keys[..6]) && !exact_keys(object, &keys) {
             return None;
         }
         if object.get("product")?.as_str()? != PRODUCT || object.get("format")?.as_u64()? != FORMAT
@@ -227,40 +263,50 @@ impl State {
         if !is_release(release) || !is_digest(manifest) {
             return None;
         }
-        let mut owned = Vec::new();
-        for path in object.get("owned")?.as_array()? {
-            let path = path.as_str()?;
-            if !is_owned_path(path) {
-                return None;
-            }
-            owned.push(path.to_owned());
-        }
-        let sorted_unique = owned.windows(2).all(|pair| pair[0] < pair[1]);
-        if !sorted_unique || owned.binary_search(&MANIFEST.to_owned()).is_err() {
+        let owned = sorted_paths(object.get("owned")?)?;
+        if owned.binary_search(&MANIFEST.to_owned()).is_err() {
             return None;
         }
+        let base = match object.get("base") {
+            None if phase == Phase::Complete => None,
+            Some(base) if phase != Phase::Complete => {
+                let base = sorted_paths(base)?;
+                if !base.iter().all(|path| owned.binary_search(path).is_ok()) {
+                    return None;
+                }
+                Some(base)
+            }
+            _ => return None,
+        };
         Some(State {
             phase,
             release: release.to_owned(),
             manifest: manifest.to_owned(),
             owned,
+            base,
         })
     }
 
     /// The record's bytes: the fields the launcher reads (K38) and the owned
     /// paths, sorted.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut owned = self.owned.clone();
-        owned.sort_unstable();
-        owned.dedup();
-        let value = serde_json::json!({
+        let sorted = |paths: &Vec<String>| {
+            let mut paths = paths.clone();
+            paths.sort_unstable();
+            paths.dedup();
+            paths
+        };
+        let mut value = serde_json::json!({
             "product": PRODUCT,
             "format": FORMAT,
             "phase": self.phase.name(),
             "release": self.release,
             "manifest": self.manifest,
-            "owned": owned,
+            "owned": sorted(&self.owned),
         });
+        if let Some(base) = &self.base {
+            value["base"] = serde_json::json!(sorted(base));
+        }
         let mut bytes = serde_json::to_vec_pretty(&value).expect("a JSON value serializes");
         bytes.push(b'\n');
         bytes
@@ -358,6 +404,7 @@ mod tests {
             release: "0.1.0".to_owned(),
             manifest: "a".repeat(64),
             owned: vec!["bin/urx".to_owned(), MANIFEST.to_owned()],
+            base: (phase != Phase::Complete).then(|| vec!["bin/urx".to_owned()]),
         }
     }
 
@@ -378,6 +425,7 @@ mod tests {
         );
         let installing = State {
             phase: Phase::Installing,
+            base: Some(Vec::new()),
             ..complete
         };
         assert!(urx_launcher::install::check(&installing.to_bytes(), manifest).is_err());
@@ -406,6 +454,19 @@ mod tests {
             changed("owned", serde_json::json!([MANIFEST, "bin/urx"])),
             changed("owned", serde_json::json!(["bin/urx", "bin/urx", MANIFEST])),
             changed("owned", serde_json::json!(["../x", MANIFEST])),
+            // `base` only while installing or removing, and only of owned paths.
+            changed("base", serde_json::json!([])),
+            {
+                let mut record = base.clone();
+                record["phase"] = Value::from("installing");
+                serde_json::to_vec(&record).unwrap()
+            },
+            {
+                let mut record = base.clone();
+                record["phase"] = Value::from("removing");
+                record["base"] = serde_json::json!(["notices/other"]);
+                serde_json::to_vec(&record).unwrap()
+            },
             serde_json::to_vec(&extra).unwrap(),
             b"{}".to_vec(),
             Vec::new(),

@@ -61,9 +61,13 @@ pub(crate) fn name(text: &str) -> CString {
     CString::new(text).unwrap_or_default()
 }
 
-pub(crate) fn pending(name: &CStr) -> CString {
+/// The pending sibling of `name` that maintenance writes for the release
+/// whose manifest digest starts with `tag` (`records::pending_tag`).
+pub(crate) fn pending(name: &CStr, tag: &str) -> CString {
     let mut bytes = name.to_bytes().to_vec();
     bytes.extend_from_slice(PENDING_SUFFIX.as_bytes());
+    bytes.push(b'-');
+    bytes.extend_from_slice(tag.as_bytes());
     CString::new(bytes).unwrap_or_default()
 }
 
@@ -123,10 +127,6 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
     ) {
         return Err(unusable());
     }
-    // Under a write hold, the folder is given the mode every user's CLI needs to reach the gate.
-    if access != Access::Read {
-        sys::set_folder_mode(&folder, 0o755).map_err(|_| unusable())?;
-    }
     let gate_name = name(GATE);
     let gate = match sys::entry_at(&folder, &gate_name).map_err(|_| unusable())? {
         None if create => {
@@ -141,10 +141,6 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
             let (gate, entry) = sys::open_file_at(&folder, &gate_name).map_err(|_| unusable())?;
             if !is_ours(&entry, Kind::File, layout.owner) || entry.size != 0 {
                 return Err(unusable());
-            }
-            // Every user's CLI opens it for reading (K21).
-            if access != Access::Read {
-                sys::set_mode(&gate, 0o644).map_err(|_| unusable())?;
             }
             gate
         }
@@ -163,6 +159,12 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
         } else {
             unusable()
         });
+    }
+    // Held exclusively, the folder and the gate are given the modes every user's CLI needs to
+    // reach and open the gate (K21); a refused hold changed nothing.
+    if access != Access::Read {
+        sys::set_folder_mode(&folder, 0o755).map_err(|_| unusable())?;
+        sys::set_mode(&gate, 0o644).map_err(|_| unusable())?;
     }
     Ok(Some(Held {
         folder,
@@ -208,9 +210,10 @@ impl Held {
     /// flushed, renamed over the record, and the folder flushed (K38).
     pub fn write_state(&self, state: &State) -> Result<(), Problem> {
         let state_name = name(STATE);
-        let pending_name = pending(&state_name);
+        let tag = crate::records::pending_tag(&state.manifest);
+        let pending_name = pending(&state_name, tag);
         let failed = |_| Problem::Write(self.path.join(STATE));
-        self.remove_pending_state()?;
+        self.remove_pending_state(tag)?;
         let mut file = sys::create_file_at(&self.folder, &pending_name).map_err(failed)?;
         file.write_all(&state.to_bytes()).map_err(failed)?;
         sys::set_mode(&file, 0o644).map_err(failed)?;
@@ -220,12 +223,12 @@ impl Held {
         sys::sync(self.folder.raw()).map_err(failed)
     }
 
-    /// Removes a pending state record an interrupted write left. The
-    /// maintenance folder is the installation's own (K21), so a regular file
-    /// of the owner under that name is maintenance's; anything else there
-    /// stops maintenance.
-    fn remove_pending_state(&self) -> Result<(), Problem> {
-        let pending_name = pending(&name(STATE));
+    /// Removes a pending state record that an interrupted write of a record
+    /// for the release tagged `tag` left: a regular file of the owner under
+    /// that tagged name. Anything else under it stops maintenance; any other
+    /// name is left as it is.
+    fn remove_pending_state(&self, tag: &str) -> Result<(), Problem> {
+        let pending_name = pending(&name(STATE), tag);
         match sys::entry_at(&self.folder, &pending_name).map_err(|_| self.unusable())? {
             None => Ok(()),
             Some(entry) if entry.kind == Kind::File && entry.owner == self.owner => {
@@ -237,10 +240,11 @@ impl Held {
         }
     }
 
-    /// Removes the state record, keeping the gate and its folder (K21).
-    pub fn remove_state(&self) -> Result<(), Problem> {
+    /// Removes the state record of the release tagged `tag`, keeping the
+    /// gate and its folder (K21).
+    pub fn remove_state(&self, tag: &str) -> Result<(), Problem> {
         let failed = |_| Problem::Write(self.path.join(STATE));
-        self.remove_pending_state()?;
+        self.remove_pending_state(tag)?;
         sys::remove_at(&self.folder, &name(STATE), false).map_err(failed)?;
         sys::sync(self.folder.raw()).map_err(failed)
     }
@@ -374,24 +378,79 @@ fn make_system_folders(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Checks that every user passes through each folder above the root, the
-/// command link and the maintenance folder, up to the layout's top: a folder
-/// without search permission for others keeps every other user from the
-/// command, the installed files or the gate. Folders not there yet are made
-/// 0755 when they are needed.
-pub fn check_reachable(layout: &Layout) -> Result<(), Problem> {
-    use std::os::unix::fs::PermissionsExt;
-    for place in [&layout.root, &layout.link, &layout.maintenance] {
-        for folder in place.parent().into_iter().flat_map(Path::ancestors) {
-            if !folder.starts_with(&layout.top) {
-                break;
-            }
-            if let Ok(found) = std::fs::metadata(folder) {
-                if found.permissions().mode() & 0o001 == 0 {
-                    return Err(Problem::Unreachable(folder.to_path_buf()));
-                }
-            }
-        }
+/// Checks that every user passes through each folder the system goes through
+/// to reach the root, the command link and the maintenance folder, links
+/// followed to their targets, up to the layout's top: a folder other users
+/// cannot search keeps them from the command, the installed files or the
+/// gate. With `places`, the root and the maintenance folder themselves are
+/// checked too. A folder not there yet is made 0755 when it is needed.
+pub fn check_reachable(layout: &Layout, places: bool) -> Result<(), Problem> {
+    let top = std::fs::canonicalize(&layout.top).unwrap_or_else(|_| layout.top.clone());
+    let mut paths: Vec<&Path> = [&layout.root, &layout.link, &layout.maintenance]
+        .iter()
+        .filter_map(|place| place.parent())
+        .collect();
+    if places {
+        paths.extend([layout.root.as_path(), layout.maintenance.as_path()]);
+    }
+    for path in paths {
+        traverse(path, &top, 0).map_err(Problem::Unreachable)?;
     }
     Ok(())
+}
+
+/// Walks `path` one name at a time as the system resolves it, following each
+/// link to its target, and checks every folder it passes through.
+fn traverse(path: &Path, top: &Path, depth: usize) -> Result<(), PathBuf> {
+    use std::path::Component;
+    if depth > 40 {
+        return Err(path.to_path_buf());
+    }
+    let mut current = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                searchable(&current, top)?;
+                let next = current.join(name);
+                match std::fs::symlink_metadata(&next) {
+                    // Not there yet: made 0755 when it is needed.
+                    Err(_) => return Ok(()),
+                    Ok(found) if found.file_type().is_symlink() => {
+                        let target = std::fs::read_link(&next).map_err(|_| next.clone())?;
+                        let resolved = if target.is_absolute() {
+                            target
+                        } else {
+                            current.join(target)
+                        };
+                        traverse(&resolved, top, depth + 1)?;
+                        current = std::fs::canonicalize(&resolved).map_err(|_| next.clone())?;
+                    }
+                    Ok(_) => current = next,
+                }
+            }
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    searchable(&current, top)
+}
+
+/// Whether other users may search the folder `folder`; folders outside the
+/// layout's top are not the installation's to check.
+fn searchable(folder: &Path, top: &Path) -> Result<(), PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(real) = std::fs::canonicalize(folder) else {
+        return Ok(());
+    };
+    if !real.starts_with(top) {
+        return Ok(());
+    }
+    match std::fs::metadata(&real) {
+        Ok(found) if found.is_dir() && found.permissions().mode() & 0o001 == 0 => {
+            Err(folder.to_path_buf())
+        }
+        _ => Ok(()),
+    }
 }

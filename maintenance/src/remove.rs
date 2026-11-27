@@ -7,10 +7,11 @@
 //! file is gone; the gate and its folder stay (K21).
 
 use crate::place::{self, Access, Layout, LinkState};
-use crate::records::{Phase, State};
+use crate::records::{digest, pending_tag, Manifest, Phase, State, MANIFEST};
 use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
+use std::collections::BTreeSet;
 
 /// The installed removal tool, removed after every other owned file.
 const TOOL: &str = "maintenance/urx-uninstall";
@@ -28,13 +29,16 @@ pub enum Removal {
 
 /// Removes the owned file `path` under `root` while it is a regular file
 /// listed under exactly that spelling: a file the file system finds only
-/// under another letter case is another path's, and is kept. With
-/// `pending_ours`, a pending file beside it is maintenance's and goes too.
+/// under another letter case is another path's, and is kept. With `listed`,
+/// the file goes only while it holds exactly that SHA-256 and size (a file a
+/// run of the release wrote); another one there is kept. The pending file
+/// beside it that maintenance writes for the release tagged `tag` goes too.
 pub(crate) fn remove_owned(
     layout: &Layout,
     root: &Fd,
     path: &str,
-    pending_ours: bool,
+    tag: &str,
+    listed: Option<(&str, u64)>,
 ) -> Result<Removal, Problem> {
     let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Exact) {
         Ok(Some(found)) => found,
@@ -43,16 +47,20 @@ pub(crate) fn remove_owned(
         Err(WalkError::Io(_)) => return Err(Problem::Write(layout.root.join(path))),
     };
     let failed = |_| Problem::Write(layout.root.join(path));
-    if pending_ours {
-        let pending = place::pending(&name);
-        if let Spelled::Exact(entry) = tree::spelled(&parent, &pending).map_err(failed)? {
-            if entry.kind == Kind::File {
-                sys::remove_at(&parent, &pending, false).map_err(failed)?;
-            }
+    let pending = place::pending(&name, tag);
+    if let Spelled::Exact(entry) = tree::spelled(&parent, &pending).map_err(failed)? {
+        if entry.kind == Kind::File {
+            sys::remove_at(&parent, &pending, false).map_err(failed)?;
         }
     }
     match tree::spelled(&parent, &name).map_err(failed)? {
         Spelled::Missing | Spelled::Other { .. } => Ok(Removal::Missing),
+        Spelled::Exact(entry)
+            if entry.kind == Kind::File
+                && listed.is_some_and(|listed| !holds(&parent, &name, listed)) =>
+        {
+            Ok(Removal::Kept(path.to_owned()))
+        }
         Spelled::Exact(entry) if entry.kind == Kind::File => {
             sys::remove_at(&parent, &name, false).map_err(failed)?;
             sys::flush(parent.raw()).map_err(failed)?;
@@ -60,6 +68,31 @@ pub(crate) fn remove_owned(
         }
         Spelled::Exact(_) => Ok(Removal::Kept(path.to_owned())),
     }
+}
+
+/// Whether the file `name` in `parent` holds exactly the SHA-256 and size `listed`.
+fn holds(parent: &Fd, name: &std::ffi::CStr, listed: (&str, u64)) -> bool {
+    let Ok((mut file, _)) = sys::open_file_at(parent, name) else {
+        return false;
+    };
+    matches!(tree::hash(&mut file), Ok((sha256, size)) if sha256 == listed.0 && size == listed.1)
+}
+
+/// The release manifest installed under `root` when it is the one the
+/// record names: what tells a file a run of that release wrote from another.
+fn installed_manifest(root: &Fd, state: &State) -> Option<(Vec<u8>, Manifest)> {
+    use std::io::Read;
+    let (parent, name) = tree::parent_of(root, MANIFEST, None, How::Exact).ok()??;
+    if !matches!(tree::spelled(&parent, &name), Ok(Spelled::Exact(_))) {
+        return None;
+    }
+    let (file, _) = sys::open_file_at(&parent, &name).ok()?;
+    let mut bytes = Vec::new();
+    file.take(8 << 20).read_to_end(&mut bytes).ok()?;
+    if digest(&bytes) != state.manifest {
+        return None;
+    }
+    Manifest::parse(&bytes).map(|manifest| (bytes, manifest))
 }
 
 /// Removes the folders of `path` under `root` that are empty, deepest
@@ -149,20 +182,36 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         return Ok(report);
     }
     let held = held.expect("an apply holds the gate");
-    // A pending file is maintenance's only while a run of its own is unfinished.
-    let pending_ours = state.phase != Phase::Complete;
+    let tag = pending_tag(&state.manifest).to_owned();
+    let base: BTreeSet<&String> = state.base_paths().iter().collect();
     if stop() {
         return Err(Problem::Interrupted);
     }
     held.write_state(&State {
         phase: Phase::Removing,
+        base: Some(state.base_paths().to_vec()),
         ..state.clone()
     })?;
     let mut report = Report::default();
+    // Once the installed tool is gone, a removal left unfinished is finished by another copy:
+    // whether it is there is read when the removal stops, whatever stopped it.
+    let unfinished = |problem: Problem| {
+        let tool_left = root.as_ref().is_some_and(|root| {
+            matches!(tree::parent_of(root, TOOL, None, How::Exact), Ok(Some((parent, name)))
+                if matches!(tree::spelled(&parent, &name), Ok(Spelled::Exact(entry)) if entry.kind == Kind::File))
+        });
+        if !tool_left && matches!(problem, Problem::Interrupted | Problem::Write(_)) {
+            Problem::RemovalUnfinished {
+                interrupted: problem == Problem::Interrupted,
+            }
+        } else {
+            problem
+        }
+    };
     if stop() {
-        return Err(Problem::Interrupted);
+        return Err(unfinished(Problem::Interrupted));
     }
-    if !place::remove_link(layout)? && link == LinkState::Foreign {
+    if !place::remove_link(layout).map_err(&unfinished)? && link == LinkState::Foreign {
         report.line(format!(
             "Kept {}: it does not point to the installation.",
             layout.link.display()
@@ -175,49 +224,54 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         .filter(|path| path.as_str() != TOOL)
         .collect();
     order.extend(state.owned.iter().filter(|path| path.as_str() == TOOL));
-    let mut tool_gone = false;
-    // Once the installed tool is gone, a removal left unfinished is finished by another copy.
-    let unfinished = |problem: Problem, tool_gone: bool| {
-        if tool_gone && matches!(problem, Problem::Interrupted | Problem::Write(_)) {
-            Problem::RemovalUnfinished {
-                interrupted: problem == Problem::Interrupted,
-            }
-        } else {
-            problem
-        }
-    };
     if let Some(root) = &root {
+        // The files a run of the release wrote, told apart from others by the installed manifest.
+        let installed = installed_manifest(root, &state);
         for path in order {
             if stop() {
-                return Err(unfinished(Problem::Interrupted, tool_gone));
+                return Err(unfinished(Problem::Interrupted));
             }
-            match remove_owned(layout, root, path, pending_ours)
-                .map_err(|problem| unfinished(problem, tool_gone))?
-            {
+            let listed = if base.contains(path) {
+                None
+            } else if path == MANIFEST {
+                Some(match &installed {
+                    Some((bytes, _)) => (state.manifest.as_str(), bytes.len() as u64),
+                    None => ("", u64::MAX),
+                })
+            } else {
+                // Not listed by a manifest the record names: nothing tells it is the installation's.
+                Some(
+                    installed
+                        .as_ref()
+                        .and_then(|(_, manifest)| {
+                            manifest.files.iter().find(|file| &file.path == path)
+                        })
+                        .map_or(("", u64::MAX), |file| (file.sha256.as_str(), file.size)),
+                )
+            };
+            match remove_owned(layout, root, path, &tag, listed).map_err(&unfinished)? {
                 Removal::Kept(at) => report.line(format!(
                     "Kept {}: it is not a file the installation made.",
                     layout.root.join(at).display()
                 )),
                 Removal::Removed | Removal::Missing => {}
             }
-            tool_gone |= path == TOOL;
         }
         for path in &state.owned {
-            prune(layout, root, path).map_err(|problem| unfinished(problem, true))?;
+            prune(layout, root, path).map_err(&unfinished)?;
         }
     }
     if stop() {
-        return Err(unfinished(Problem::Interrupted, true));
+        return Err(unfinished(Problem::Interrupted));
     }
-    let root_kept = remove_root(layout).map_err(|problem| unfinished(problem, true))?;
+    let root_kept = remove_root(layout).map_err(&unfinished)?;
     if root_kept {
         report.line(format!(
             "Kept {}: it holds files the installation did not make.",
             layout.root.display()
         ));
     }
-    held.remove_state()
-        .map_err(|problem| unfinished(problem, true))?;
+    held.remove_state(&tag).map_err(&unfinished)?;
     report.line(format!("Removed urx-cli {}.", state.release));
     Ok(report)
 }
