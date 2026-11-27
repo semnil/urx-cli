@@ -1,6 +1,8 @@
-// Checks that build-inputs.json is well formed and that the files repeating its
-// values for other tools (.node-version, package.json, rust-toolchain.toml)
-// agree with it. Reads only; a mismatch prints every problem and exits 1.
+// Checks that build-inputs.json is well formed, that the Inno Setup installer
+// it records is the one that release publishes, and that the files repeating
+// its values for other tools (.node-version, package.json,
+// rust-toolchain.toml) agree with it. Reads only; a mismatch prints every
+// problem and exits 1.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,11 +22,20 @@ export function checkBuildInputs({ manifest, nodeVersionFile, packageJson, rustT
   const node = manifest?.node;
   const pnpm = manifest?.pnpm;
   const rust = manifest?.rust;
+  const inno = manifest?.innoSetup;
   if (!SEMVER.test(node?.version ?? "")) problems.push("node.version is not an exact x.y.z version");
   if (!SEMVER.test(pnpm?.version ?? "")) problems.push("pnpm.version is not an exact x.y.z version");
   if (!SEMVER.test(rust?.channel ?? "")) problems.push("rust.channel is not an exact x.y.z version");
+  if (!SEMVER.test(inno?.version ?? "")) problems.push("innoSetup.version is not an exact x.y.z version");
   if (!HEX(128).test(pnpm?.sha512 ?? "")) problems.push("pnpm.sha512 is not 128 lowercase hex digits");
+  if (!HEX(64).test(inno?.sha256 ?? "")) problems.push("innoSetup.sha256 is not 64 lowercase hex digits");
   if (problems.length > 0) return problems;
+
+  // The x64 installer of that Inno Setup release, as its project publishes it.
+  const installer = innoSetupInstaller(inno.version);
+  if (inno.installer !== installer) problems.push(`innoSetup.installer is not ${installer}`);
+  const url = innoSetupUrl(inno.version);
+  if (inno.url !== url) problems.push(`innoSetup.url is not ${url}`);
 
   const { version } = node;
   if (node.checksums !== `https://nodejs.org/dist/v${version}/SHASUMS256.txt`) {
@@ -63,6 +74,16 @@ export function checkBuildInputs({ manifest, nodeVersionFile, packageJson, rustT
     problems.push(`rust-toolchain.toml channel is not "${rust.channel}"`);
   }
   return problems;
+}
+
+/** The file name of the x64 installer of Inno Setup `version`. */
+export function innoSetupInstaller(version) {
+  return `innosetup-${version}-x64.exe`;
+}
+
+/** Where the Inno Setup project publishes the x64 installer of `version`. */
+export function innoSetupUrl(version) {
+  return `https://github.com/jrsoftware/issrc/releases/download/is-${version.replaceAll(".", "_")}/${innoSetupInstaller(version)}`;
 }
 
 /** The `channel` of rust-toolchain.toml's [toolchain] table, or null. */

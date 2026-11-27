@@ -1,5 +1,5 @@
 {
-  "note": "The exact tool versions and archive hashes a build uses. .node-version, package.json and rust-toolchain.toml repeat some of them for the tools that read those files; `pnpm build-inputs:check` fails when they differ from this file. The urx-device commit is pinned by the vendor/urx-device gitlink alone, and the napi-rs crates and CLI by Cargo.lock and pnpm-lock.yaml, which carry their checksums.",
+  "note": "The exact tool versions and archive and installer hashes a build uses. .node-version, package.json and rust-toolchain.toml repeat some of them for the tools that read those files; `pnpm build-inputs:check` fails when they differ from this file. The urx-device commit is pinned by the vendor/urx-device gitlink alone, and the napi-rs crates and CLI by Cargo.lock and pnpm-lock.yaml, which carry their checksums.",
   "node": {
     "version": "26.13.0",
     "checksums": "https://nodejs.org/dist/v26.13.0/SHASUMS256.txt",
@@ -20,5 +20,11 @@
   },
   "rust": {
     "channel": "1.96.0"
+  },
+  "innoSetup": {
+    "version": "7.1.1",
+    "installer": "innosetup-7.1.1-x64.exe",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
+    "sha256": "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0"
   }
 }

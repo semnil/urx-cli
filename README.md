@@ -14,7 +14,7 @@ The `urx` command: operate a connected YAMAHA URX22, URX44 or URX44V and inspect
 | `native` | The Node-API addon over the urx-device transport (Rust, napi-rs) |
 | `vendor/urx-device` | The shared library, at the commit this repository adopts |
 | `scripts` | Repository tooling: `build-inputs.mjs` checks the build inputs, `build-info.mjs` embeds the versions and commits into the build, `build-native.mjs` builds the addon, `version.mjs` keeps the copies of the CLI version in step |
-| `build-inputs.json` | The exact Node, pnpm and Rust versions and the Node archive hashes a build uses |
+| `build-inputs.json` | The exact Node, pnpm, Rust and Inno Setup versions and the Node archive and Inno Setup installer hashes a build uses |
 
 ## Building and testing
 
@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`. `pnpm build:bundle --node-archive <path>` then assembles the installed bundle from `dist-release` and the official Node archive, into `dist-bundle`; it checks the archive against the hash in `build-inputs.json` and downloads nothing. Neither build removes or replaces a previous output, an empty folder included: remove `dist-release` or `dist-bundle` before building it again. A build that fails leaves nothing there; its files stay in a `dist-release.work-…` or `dist-bundle.work-…` folder beside it, which you remove.
+`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`. `pnpm build:bundle --node-archive <path>` then assembles the installed bundle from `dist-release` and the official Node archive, into `dist-bundle`; it checks the archive against the hash in `build-inputs.json` and downloads nothing. On Windows, `node scripts/build-windows-installer.mjs --iscc <path to ISCC.exe>` compiles the installer from `dist-bundle` into `dist-installer`, with the Inno Setup version that `build-inputs.json` records. No build removes or replaces a previous output, an empty folder included: remove `dist-release`, `dist-bundle` or `dist-installer` before building it again. A build that fails leaves nothing there; its files stay in a `dist-release.work-…`, `dist-bundle.work-…` or `dist-installer.work-…` folder beside it, which you remove.
 
 ## Versioning
 

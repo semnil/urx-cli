@@ -85,11 +85,45 @@ pub fn maintenance_directory() -> Option<PathBuf> {
     Some(PathBuf::from(folder).join("urx-cli-maintenance"))
 }
 
+/// `path` without the verbatim prefix (`\\?\`) that Windows' canonical paths
+/// carry: `\\?\C:\…` becomes `C:\…` and `\\?\UNC\server\share\…` becomes
+/// `\\server\share\…`. The runtime is given the ordinary form, since the CLI
+/// compares the script it was started with against its own module path,
+/// which Node gives in that form; any other path is kept as it is.
+#[cfg(windows)]
+pub fn without_verbatim_prefix(path: &std::path::Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut ordinary = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => PathBuf::from(format!("{}:\\", char::from(letter))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root.push(r"\");
+            PathBuf::from(root)
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        if component != Component::RootDir {
+            ordinary.push(component.as_os_str());
+        }
+    }
+    ordinary
+}
+
 /// The installed launcher's own installation.
 pub fn installed() -> Result<Installation, Failure> {
     let launcher = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|_| Failure::Location)?;
+    #[cfg(windows)]
+    let launcher = without_verbatim_prefix(&launcher);
     let bundle = Bundle::of_launcher(&launcher).ok_or(Failure::Location)?;
     let maintenance = maintenance_directory().ok_or(Failure::Location)?;
     Ok(Installation {
@@ -184,5 +218,45 @@ pub fn start() -> ! {
             report(failure);
             std::process::exit(1)
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::without_verbatim_prefix;
+    use std::path::Path;
+
+    #[test]
+    fn drops_the_verbatim_prefix_of_a_canonical_path() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(
+                r"\\?\C:\Users\me\AppData\Local\Programs\urx-cli\bin\urx.exe"
+            )),
+            Path::new(r"C:\Users\me\AppData\Local\Programs\urx-cli\bin\urx.exe")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\urx-cli\bin\urx.exe")),
+            Path::new(r"\\server\share\urx-cli\bin\urx.exe")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"C:\tools\urx.exe")),
+            Path::new(r"C:\tools\urx.exe")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\GLOBALROOT\Device\x")),
+            Path::new(r"\\?\GLOBALROOT\Device\x")
+        );
+    }
+
+    #[test]
+    fn keeps_a_canonical_path_canonical_once_the_prefix_is_gone() {
+        let current = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let ordinary = without_verbatim_prefix(&current);
+        assert!(
+            !ordinary.to_string_lossy().starts_with(r"\\?\"),
+            "{}",
+            ordinary.display()
+        );
+        assert_eq!(ordinary.canonicalize().unwrap(), current);
     }
 }
