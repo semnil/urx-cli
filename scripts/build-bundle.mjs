@@ -15,6 +15,7 @@
 //   runtime/node[.exe]           the bundled Node
 //   app/                         the compiled CLI and the real common package
 //   native/urx-native.node       the addon
+//   maintenance/urx-uninstall    the removal tool (macOS only, K20)
 //   notices/                     the licenses of the CLI, urx-device and Node
 //   release-manifest.json        relative paths, hashes and identities
 //
@@ -26,7 +27,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -35,8 +36,8 @@ const FORMAT = 1;
 
 /** This platform's key in build-inputs.json and its executable names. */
 export function platformOf(platform = process.platform, arch = process.arch) {
-  if (platform === "darwin" && arch === "arm64") return { key: "darwin-arm64", exe: "", runtimeInArchive: ["bin", "node"] };
-  if (platform === "win32" && arch === "x64") return { key: "win-x64", exe: ".exe", runtimeInArchive: ["node.exe"] };
+  if (platform === "darwin" && arch === "arm64") return { key: "darwin-arm64", exe: "", runtimeInArchive: ["bin", "node"], maintenance: maintenanceTools("darwin") };
+  if (platform === "win32" && arch === "x64") return { key: "win-x64", exe: ".exe", runtimeInArchive: ["node.exe"], maintenance: maintenanceTools("win32") };
   throw new Error(`no bundle is built for ${platform}-${arch} (K16)`);
 }
 
@@ -100,6 +101,14 @@ export function snapshotRelease(release, snapshot, copy = cpSync) {
 
 export { filesUnder };
 
+/** What keeps the bundle at `bundle` from being the one its manifest describes, by path. */
+export function bundleProblems(bundle, manifest) {
+  if (manifest?.product !== PRODUCT || manifest?.format !== FORMAT || !Array.isArray(manifest.files)) return ["the bundle has no urx-cli format 1 manifest"];
+  const listed = new Set(manifest.files.map((file) => file.path));
+  const unlisted = filesUnder(bundle).filter((path) => path !== "release-manifest.json" && !listed.has(path));
+  return [...recordedProblems(bundle, manifest.files), ...unlisted.map((path) => `${path} is not one of its files`)];
+}
+
 /**
  * Gives the bundle at `root` the modes it is distributed with, whatever the
  * umask or its sources gave it: 0755 for directories and for the
@@ -137,20 +146,23 @@ export function assemble({ release, releaseFiles, node, notices, staging, platfo
   };
   const launcher = `launcher/urx${platform.exe}`;
   const addon = "native/urx-native.node";
+  const tools = platform.maintenance.map((tool) => `maintenance/${tool}`);
   // Each named file is one file inside `release`, and lands in one place inside `staging`.
   const bad = releaseFiles.find((path) => !isRecordedPath(path));
   if (bad !== undefined) throw new Error(`the release output's record names a path outside it: ${JSON.stringify(bad)}`);
   if (new Set(releaseFiles.map((path) => path.toLowerCase())).size !== releaseFiles.length) throw new Error("the release output's record names a file twice");
-  for (const required of [launcher, addon, "main.js"]) {
+  for (const required of [launcher, addon, "main.js", ...tools]) {
     if (!releaseFiles.includes(required)) throw new Error(`the release output's record names no ${required}`);
   }
   copy(join(release, ...launcher.split("/")), "bin", `urx${platform.exe}`);
   copy(join(node, ...platform.runtimeInArchive), "runtime", `node${platform.exe}`);
   copy(join(release, ...addon.split("/")), "native", "urx-native.node");
-  // The compiled CLI and the common package; the addon and the launcher have places of their own.
+  for (const tool of tools) copy(join(release, ...tool.split("/")), ...tool.split("/"));
+  // The compiled CLI and the common package; the addon, the launcher and the maintenance tools have places of their own.
   for (const path of releaseFiles) {
-    if (path === launcher || path === addon) continue;
+    if (path === launcher || path === addon || tools.includes(path)) continue;
     if (path.startsWith("launcher/")) throw new Error(`the release output's record names an unknown launcher file ${path}`);
+    if (path.startsWith("maintenance/")) throw new Error(`the release output's record names an unknown maintenance file ${path}`);
     copy(join(release, ...path.split("/")), "app", ...path.split("/"));
   }
   for (const [name, path] of Object.entries(notices)) copy(path, "notices", name);
@@ -233,7 +245,7 @@ async function main(argv) {
       runtime: { version: inputs.node.version, archive: recorded.file, sha256: recorded.sha256 },
     });
     writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`]);
+    normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, ...platform.maintenance.map((tool) => `maintenance/${tool}`)]);
     publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {

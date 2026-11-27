@@ -22,8 +22,8 @@ const write = (root, path, text = path) => {
 
 describe("the installed bundle (K18, K38)", () => {
   it("is built for the two distributed platforms only (K16)", () => {
-    expect(platformOf("darwin", "arm64")).toMatchObject({ key: "darwin-arm64", exe: "" });
-    expect(platformOf("win32", "x64")).toMatchObject({ key: "win-x64", exe: ".exe" });
+    expect(platformOf("darwin", "arm64")).toMatchObject({ key: "darwin-arm64", exe: "", maintenance: ["urx-uninstall"] });
+    expect(platformOf("win32", "x64")).toMatchObject({ key: "win-x64", exe: ".exe", maintenance: [] });
     expect(() => platformOf("linux", "x64")).toThrow();
     expect(() => platformOf("darwin", "x64")).toThrow();
   });
@@ -74,10 +74,19 @@ describe("the installed bundle (K18, K38)", () => {
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    const releaseFiles = ["main.js", "build-info.js", "package.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"];
+    const releaseFiles = [
+      "main.js",
+      "build-info.js",
+      "package.json",
+      "native/addon.js",
+      "native/urx-native.node",
+      "launcher/urx",
+      "maintenance/urx-uninstall",
+      "node_modules/@urx/device-control/package.json",
+    ];
     for (const path of releaseFiles) write(release, path);
     // Beside the release, not made by it: never copied.
-    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt"]) write(release, path);
+    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt", "maintenance/notes.txt"]) write(release, path);
     const node = join(dir, "node-v26");
     write(node, "bin/node", "node");
     write(node, "LICENSE", "node license");
@@ -92,6 +101,7 @@ describe("the installed bundle (K18, K38)", () => {
       "app/node_modules/@urx/device-control/package.json",
       "app/package.json",
       "bin/urx",
+      "maintenance/urx-uninstall",
       "native/urx-native.node",
       "notices/node.txt",
       "notices/urx-cli.txt",
@@ -103,15 +113,24 @@ describe("the installed bundle (K18, K38)", () => {
   it("refuses a record path outside the release output, and a file named twice", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    for (const path of ["main.js", "native/urx-native.node", "launcher/urx"]) write(release, path);
+    const named = ["main.js", "native/urx-native.node", "launcher/urx", "maintenance/urx-uninstall"];
+    for (const path of named) write(release, path);
     write(dir, "outside.js");
+    write(dir, "bin/node");
+    write(release, "maintenance/other");
     const lay = (...extra) => {
       const staging = mkdtempSync(join(dir, "bundle-"));
-      assemble({ release, releaseFiles: ["main.js", "native/urx-native.node", "launcher/urx", ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
+      assemble({ release, releaseFiles: [...named, ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
     };
     expect(() => lay("../outside.js")).toThrow(/a path outside it/);
     expect(() => lay("/outside.js")).toThrow(/a path outside it/);
     expect(() => lay("Main.js")).toThrow(/a file twice/);
+    expect(() => lay("maintenance/other")).toThrow(/an unknown maintenance file/);
+    // A macOS bundle cannot be without its removal tool (K20); a Windows one has none from the release.
+    const without = mkdtempSync(join(dir, "bundle-"));
+    expect(() =>
+      assemble({ release, releaseFiles: named.filter((path) => !path.startsWith("maintenance/")), node: dir, staging: without, platform: platformOf("darwin", "arm64"), notices: {} }),
+    ).toThrow(/names no maintenance\/urx-uninstall/);
   });
 
   it("lists every file but the manifest itself, with its hash and size, after the identities", () => {

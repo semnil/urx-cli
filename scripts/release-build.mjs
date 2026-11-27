@@ -11,7 +11,8 @@
 // shows nothing or the whole output and nothing there is removed or
 // replaced. The launcher is built from the same export into the same target
 // directory and placed at dist-release/launcher/ for the bundle
-// (scripts/build-bundle.mjs).
+// (scripts/build-bundle.mjs), and on macOS the removal tool with it, at
+// dist-release/maintenance/urx-uninstall (K20).
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -209,6 +210,9 @@ export function cargoArtifact(messages, name) {
   return found;
 }
 
+/** The maintenance tools a release of this platform carries in its bundle: macOS's removal tool (K20). */
+export const maintenanceTools = (platform = process.platform) => (platform === "darwin" ? ["urx-uninstall"] : []);
+
 /** The `urx` executable that `cargo build --message-format=json` reports building. */
 export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
 
@@ -333,6 +337,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     cpSync(join(source, "dist"), staging, { recursive: true });
     const launcher = process.platform === "win32" ? "urx.exe" : "urx";
     cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
+    // The macOS removal tool, installed in the bundle's maintenance folder (K20);
+    // Windows' uninstaller is Inno Setup's.
+    for (const tool of maintenanceTools()) {
+      const built = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-maintenance", "--bin", tool, "--message-format=json-render-diagnostics"], {
+        cwd: source,
+        encoding: "utf8",
+        maxBuffer: 256 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "inherit"],
+        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+      });
+      cpSync(cargoArtifact(built, tool), join(staging, "maintenance", tool));
+    }
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
     writeReleaseFiles(staging);

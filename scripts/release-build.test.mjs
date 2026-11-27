@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { cargoArtifact, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -304,5 +304,13 @@ describe("the launcher's location", () => {
 
   it("is refused when cargo reports building no urx executable", () => {
     expect(() => launcherArtifact(artifact("urx_launcher", ["lib"], null))).toThrow(/no urx executable/);
+  });
+
+  it("names the maintenance tool by its own executable, built for macOS only", () => {
+    const executable = "/scratch/target/release/urx-uninstall";
+    expect(cargoArtifact(artifact("urx-uninstall", ["bin"], executable), "urx-uninstall")).toBe(executable);
+    expect(() => cargoArtifact(artifact("urx-install", ["bin"], "/x"), "urx-uninstall")).toThrow(/no urx-uninstall executable/);
+    expect(maintenanceTools("darwin")).toEqual(["urx-uninstall"]);
+    expect(maintenanceTools("win32")).toEqual([]);
   });
 });

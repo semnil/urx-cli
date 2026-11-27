@@ -17,8 +17,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { filesUnder, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { cleanUp, isRecordedPath, outputTool, publishOutput, recordedProblems, requireNoOutput, sha256 } from "./release-build.mjs";
+import { bundleProblems, platformOf, snapshotRelease } from "./build-bundle.mjs";
+import { cleanUp, isRecordedPath, outputTool, publishOutput, requireNoOutput, sha256 } from "./release-build.mjs";
 
 const MANIFEST = "release-manifest.json";
 
@@ -52,13 +52,7 @@ export function ownedFilesInclude(manifest, manifestDigest) {
   ].join("\r\n");
 }
 
-/** What keeps the bundle at `bundle` from being the one its manifest describes, by path. */
-export function bundleProblems(bundle, manifest) {
-  if (manifest?.product !== "urx-cli" || manifest?.format !== 1 || !Array.isArray(manifest.files)) return ["the bundle has no urx-cli format 1 manifest"];
-  const listed = new Set(manifest.files.map((file) => file.path));
-  const unlisted = filesUnder(bundle).filter((path) => path !== MANIFEST && !listed.has(path));
-  return [...recordedProblems(bundle, manifest.files), ...unlisted.map((path) => `${path} is not one of its files`)];
-}
+export { bundleProblems };
 
 /** The files a Windows bundle cannot be without: the launcher, the runtime, the addon and the CLI's entry. */
 const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"];
