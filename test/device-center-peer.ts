@@ -14,6 +14,8 @@ export interface PeerUnit {
   readonly status?: string;
   /** The System firmware version, or null for a `firm_list` without one. */
   readonly firmware?: string | null;
+  /** The whole `/vd/device` `firm_list` to answer with, in place of the one `firmware` makes. */
+  readonly firmList?: unknown;
   /** The identity reported after the first `/vd/synchronize` (the discovery's). */
   readonly laterId?: string;
   /** Parameter values by `paramId:x:y`; a write replaces the value it accepts. */
@@ -189,7 +191,12 @@ function unitServer(unit: PeerUnit, requests: string[], held: (() => void)[], ..
       const id = synchronizations > 1 && unit.laterId !== undefined ? unit.laterId : unit.id;
       socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { sync_status: unit.status ?? "online", usb_id: id } } }));
     } else if (vdp.uri === "/vd/device") {
-      const firmList = unit.firmware === null ? [{ firm_name: "Boot", firm_version: "1.0" }] : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
+      const firmList =
+        unit.firmList !== undefined
+          ? unit.firmList
+          : unit.firmware === null
+            ? [{ firm_name: "Boot", firm_version: "1.0" }]
+            : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
       socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { firm_list: firmList } } }));
     }
   }, ...trackers);

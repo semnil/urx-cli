@@ -254,6 +254,20 @@ describe("set of a basic channel control", () => {
 });
 
 describe("device selection for a setting command (D13)", () => {
+  it("refuse a unit whose firm_list the version cannot be read from, sending no lock or setting request (D15-B)", async () => {
+    const at = await unit({ firmList: [{ firm_name: "System", firm_version: "" }] });
+    for (const args of [
+      ["channel", "on", "get", "--channel", "1", "--json"],
+      ["channel", "on", "set", "--channel", "1", "--value", "on", "--json"],
+      ["channel", "on", "set", "--channel", "1", "--value", "on", "--dry-run", "--json"],
+    ]) {
+      const result = await urx(args, at.listPort);
+      expect(result.exit, args.join(" ")).toBe(1);
+      expect(JSON.parse(result.stdout), args.join(" ")).toMatchObject({ error: { code: "invalid_response" } });
+    }
+    expect(at.requests.filter((line) => line.includes("/vd/parameters/"))).toEqual([]);
+  });
+
   it("refuse to choose among several online units, and an ID that is not online", async () => {
     peer = await startPeer([UNIT, { ...UNIT, id: "<id-b>" }]);
     const several = await urx(["channel", "on", "get", "--channel", "1", "--json"], peer.listPort);

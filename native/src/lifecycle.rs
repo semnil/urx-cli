@@ -203,10 +203,8 @@ impl Connection {
 #[napi]
 impl Connection {
     /// The System firmware version the opening read, or null when the unit
-    /// reports none (D15) or a `firm_list` the version cannot be read from
-    /// (urx-device 0.2.0's `SystemFirmware::Unreadable`). No command shows a
-    /// connection's firmware yet; the one that does decides how to tell the
-    /// two apart.
+    /// reports none (D15). An unreadable one refuses the opening, so no
+    /// connection carries it.
     #[napi(getter)]
     pub fn firmware(&self) -> Either<String, Null> {
         match self.inner.firmware() {
@@ -281,6 +279,19 @@ impl Task for OpenTask {
                 // A failed open owns nothing afterwards (K37).
                 Err(link) => return Ok(Err((link.failure, Cleanup::COMPLETE))),
             };
+        // A firm_list the version cannot be read from refuses the connection
+        // with invalid_response (D15-B under R1-F-A); it is closed here, so
+        // the failed open owns nothing, and its cleanup is what that close
+        // established.
+        if matches!(opened.firmware(), SystemFirmware::Unreadable) {
+            return Ok(Err((
+                Failure::Cause {
+                    code: Cause::InvalidResponse,
+                    phase: Phase::Connect,
+                },
+                closed_cleanup(opened.close(TEARDOWN_DEADLINE)),
+            )));
+        }
         match start_fatal_thread(Arc::clone(&opened)) {
             Ok(fatal) => {
                 *lock(&self.fatal) = Some(fatal);
