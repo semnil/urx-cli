@@ -9,9 +9,11 @@
 //    bin folder is on the user's PATH, and the installed `urx --version` runs.
 // 2. While something holds the gate, as a running urx does, a second
 //    installation stops before changing anything.
-// 3. Running the same installer again completes again.
-// 4. A silent removal leaves the gate and its folder, removes the state
-//    record, the installed files and the PATH entry, and keeps a file the
+// 3. An installation told to go elsewhere (/DIR) stops before changing
+//    anything and writes nothing there.
+// 4. Running the same installer again completes again.
+// 5. A silent removal leaves the gate and its folder, removes the state
+//    record, every installed file and the PATH entry, and keeps a file the
 //    user put in the installation folder.
 //
 // Usage: URX_DISPOSABLE_MACHINE=1 node scripts/check-windows-installer.mjs
@@ -44,9 +46,9 @@ if (setupName === undefined || others.length > 0 || !setupName.endsWith("-setup.
 const setup = join(root, "dist-installer", setupName);
 const logs = mkdtempSync(join(tmpdir(), "urx-installer-check-"));
 let runs = 0;
-const runSetup = () => {
+const runSetup = (...extra) => {
   const log = join(logs, `setup-${++runs}.log`);
-  const result = spawnSync(setup, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `/LOG=${log}`], { encoding: "utf8" });
+  const result = spawnSync(setup, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `/LOG=${log}`, ...extra], { encoding: "utf8" });
   return { status: result.status, log: existsSync(log) ? readFileSync(log, "utf8") : "" };
 };
 const state = () => JSON.parse(readFileSync(statePath, "utf8"));
@@ -84,11 +86,19 @@ try {
   if (busy.status === 0) fail("an installation went ahead while the gate was held");
   if (JSON.stringify(state()) !== JSON.stringify(installed)) fail(`a stopped installation changed the state record to ${JSON.stringify(state())}`);
 
-  // 3. The same installer completes again.
+  // 3. An installation told to go elsewhere stops and writes nothing there.
+  const elsewhere = join(logs, "elsewhere");
+  const moved = runSetup(`/DIR=${elsewhere}`);
+  if (moved.status === 0) fail("an installation went ahead into a folder other than the fixed one");
+  if (existsSync(elsewhere) && readdirSync(elsewhere).length > 0) fail(`an installation told to go elsewhere wrote into ${elsewhere}`);
+  if (JSON.stringify(state()) !== JSON.stringify(installed)) fail(`an installation told to go elsewhere changed the state record to ${JSON.stringify(state())}`);
+
+  // 4. The same installer completes again.
   const again = runSetup();
   if (again.status !== 0 || state().phase !== "complete") fail(`running the installer again exited ${again.status}\n${again.log}`);
 
-  // 4. A silent removal keeps the gate and the user's file.
+  // 5. A silent removal removes every installed file and keeps the gate and the user's file.
+  const owned = [...JSON.parse(readFileSync(join(app, "release-manifest.json"), "utf8")).files.map((file) => file.path), "release-manifest.json"];
   writeFileSync(join(app, "notes.txt"), "the user's");
   const removed = spawnSync(join(app, "maintenance", "unins000.exe"), ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { encoding: "utf8" });
   if (removed.status !== 0) fail(`the removal exited ${removed.status}`);
@@ -98,7 +108,8 @@ try {
   while (existsSync(statePath) && Date.now() < until) Atomics.wait(pause, 0, 0, 500);
   if (existsSync(statePath)) fail(`the removal left the state record ${readFileSync(statePath, "utf8")}`);
   if (!existsSync(gatePath) || statSync(gatePath).size !== 0) fail("the removal did not keep the empty gate");
-  if (existsSync(join(bin, "urx.exe")) || existsSync(join(app, "release-manifest.json"))) fail("the removal left installed files");
+  const left = owned.filter((path) => existsSync(join(app, ...path.split("/"))));
+  if (left.length > 0) fail(`the removal left installed files: ${left.join(", ")}`);
   if (readFileSync(join(app, "notes.txt"), "utf8") !== "the user's") fail("the removal did not keep the user's file");
   if (onPath()) fail(`the removal left ${bin} on the user's PATH`);
   process.stdout.write("the installer installs, stops while urx runs, reinstalls and removes as designed\n");
