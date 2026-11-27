@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { EXECUTABLES, macosBundleProblems } from "./build-macos-installer.mjs";
+import { EXECUTABLES, installerRecord, macosBundleProblems } from "./build-macos-installer.mjs";
+import { sha256 } from "./release-build.mjs";
 import { maintenanceTools } from "./release-build.mjs";
 
 const inputs = JSON.parse(readFileSync(new URL("../build-inputs.json", import.meta.url), "utf8"));
@@ -37,5 +38,14 @@ describe("the macOS installer tree (K41)", () => {
 
   it("runs the launcher, the runtime and the bundle's maintenance tools as programs", () => {
     expect(EXECUTABLES).toEqual(["bin/urx", "runtime/node", ...maintenanceTools("darwin").map((tool) => `maintenance/${tool}`)]);
+  });
+
+  it("records urx-install, by its SHA-256 and size, with the release manifest it is built for", () => {
+    const program = Buffer.from("program");
+    const manifestBytes = Buffer.from("{}");
+    expect(installerRecord(program, manifestBytes)).toEqual({
+      installer: { path: "urx-install", sha256: sha256(program), size: 7 },
+      releaseManifest: sha256(manifestBytes),
+    });
   });
 });

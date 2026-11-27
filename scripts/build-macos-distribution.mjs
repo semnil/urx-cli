@@ -9,10 +9,13 @@
 //                                                an installation whose own copy
 //                                                is gone
 //
-// The tree is copied first, and the copy checked: it holds exactly urx-install
-// and urx-cli/, the bundle holds exactly the files its release manifest lists
-// with their modes and is a macOS arm64 bundle of the commit HEAD names, and
-// urx-install is built for that manifest (its SHA-256 is in the program). Both
+// The tree is copied first, and the copy checked: it holds exactly urx-install,
+// urx-cli/ and the record installer.json; urx-install is the file the record
+// names, built for the release manifest the record names (whose SHA-256 is in
+// the program), which is the bundle's; and the bundle holds exactly the files
+// its release manifest lists with their modes and is a macOS arm64 bundle of
+// the commit HEAD names. Every entry is a directory or a regular file before
+// any mode is set. The record is left out of what is published. Both
 // files are made from that copy and checked against it afterwards: the image
 // is mounted read-only and the ZIP extracted, and each must hold exactly the
 // copy's files with their contents and modes. Like the other builds, it stops
@@ -23,12 +26,12 @@
 // Usage: node scripts/build-macos-distribution.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleProblems, normalizeModes, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { EXECUTABLES, macosBundleProblems } from "./build-macos-installer.mjs";
+import { EXECUTABLES, INSTALLER_RECORD, macosBundleProblems } from "./build-macos-installer.mjs";
 import { cleanUp, outputTool, publishOutput, requireNoOutput, sha256 } from "./release-build.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -88,16 +91,43 @@ export function treeDifference(actual, expected) {
   return null;
 }
 
+/** The executables of an installer tree, by path from its top. */
+export const TREE_EXECUTABLES = ["urx-install", ...EXECUTABLES.map((path) => `urx-cli/${path}`)];
+
 /**
- * What keeps the installer tree at `tree` from being one urx-install of the
- * bundle beside it, its manifest bytes `manifestBytes`: only those two
- * entries, and the manifest's SHA-256 in the program.
+ * Gives the copy of an installer tree at `tree` the modes it is distributed
+ * with, once every entry in it is checked to be a directory or a regular
+ * file: no mode is set through a link on anything outside the copy.
+ */
+export function prepareTree(tree) {
+  normalizeModes(tree, TREE_EXECUTABLES);
+}
+
+/**
+ * What keeps the installer tree at `tree` from being the one its record
+ * describes, urx-install of the bundle beside it whose manifest bytes are
+ * `manifestBytes`: exactly urx-install, urx-cli and the record; urx-install
+ * the SHA-256 and size the record names; the release manifest the record
+ * names, the bundle's; and that manifest's SHA-256 in the program.
  */
 export function installerTreeProblems(tree, manifestBytes) {
-  const problems = [];
   const names = readdirSync(tree).sort();
-  if (JSON.stringify(names) !== JSON.stringify(["urx-cli", "urx-install"])) problems.push(`the installer tree holds ${JSON.stringify(names)}, not urx-install beside urx-cli`);
+  if (JSON.stringify(names) !== JSON.stringify([INSTALLER_RECORD, "urx-cli", "urx-install"])) {
+    return [`the installer tree holds ${JSON.stringify(names)}, not urx-install beside urx-cli with ${INSTALLER_RECORD}`];
+  }
+  let record;
+  try {
+    record = JSON.parse(readFileSync(join(tree, INSTALLER_RECORD), "utf8"));
+  } catch {
+    return [`${INSTALLER_RECORD} is not a record the installer build writes`];
+  }
+  const problems = [];
   const program = readFileSync(join(tree, "urx-install"));
+  const installer = record?.installer;
+  if (installer?.path !== "urx-install" || installer?.sha256 !== sha256(program) || installer?.size !== program.length) {
+    problems.push(`urx-install is not the file ${INSTALLER_RECORD} names`);
+  }
+  if (record?.releaseManifest !== sha256(manifestBytes)) problems.push(`${INSTALLER_RECORD} names another release manifest than the bundle's`);
   if (!program.includes(Buffer.from(sha256(manifestBytes), "ascii"))) problems.push("urx-install is not built for the bundle beside it");
   return problems;
 }
@@ -125,14 +155,14 @@ function main(argv) {
     const tree = join(scratch, "tree");
     snapshotRelease(installer, tree);
     const bundle = join(tree, "urx-cli");
-    normalizeModes(bundle, EXECUTABLES);
-    chmodSync(join(tree, "urx-install"), 0o755);
-    chmodSync(tree, 0o755);
+    prepareTree(tree);
     const manifestBytes = readFileSync(join(bundle, MANIFEST));
     const manifest = JSON.parse(manifestBytes.toString("utf8"));
     const problems = bundleProblems(bundle, manifest);
     if (problems.length === 0) problems.push(...macosBundleProblems(manifest, inputs, head), ...installerTreeProblems(tree, manifestBytes));
     if (problems.length > 0) throw new Error(`${installer} is not the macOS installer tree of HEAD: ${problems.join("; ")}`);
+    // The record has done its work: the image holds urx-install beside urx-cli/ alone.
+    rmSync(join(tree, INSTALLER_RECORD));
     const names = distributionNames(manifest.release);
     process.stderr.write(`distribution build of urx-cli ${manifest.release} (${head})\n`);
     const files = join(scratch, "output");

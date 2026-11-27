@@ -6,7 +6,8 @@
 // to run unless URX_DISPOSABLE_MACHINE=1 says the machine is a throwaway one,
 // unless sudo needs no password, and unless nothing of urx-cli is there yet.
 //
-// 0. The image mounts read-only and holds urx-install beside urx-cli/.
+// 0. The image, mounted without forcing it read-only, cannot be written to and
+//    holds urx-install beside urx-cli/.
 // 1. A preview changes nothing, an apply without sudo stops before changing
 //    anything, and so does one while a folder above the installation is one
 //    other users cannot pass through (the installer asks the system, as the
@@ -73,9 +74,10 @@ const detach = () => {
 };
 /** Steps 0 to 6, with the image mounted. */
 async function check() {
-  // 0. The image mounts read-only, as a user mounts it, and holds urx-install beside urx-cli/.
+  // 0. The image, mounted as a user mounts it, is read-only and holds urx-install beside urx-cli/.
   mkdirSync(mount);
-  execFileSync("hdiutil", ["attach", "-quiet", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount, join(distribution, imageName)]);
+  // Not forced read-only: the image itself must be one nothing can be written to.
+  execFileSync("hdiutil", ["attach", "-quiet", "-nobrowse", "-noautoopen", "-mountpoint", mount, join(distribution, imageName)]);
   mounted = true;
   try {
     writeFileSync(join(mount, "written"), "");
