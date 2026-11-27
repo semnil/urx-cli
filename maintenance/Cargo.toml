@@ -1,0 +1,27 @@
+[package]
+name = "urx-maintenance"
+# Not published and not shown anywhere: the CLI's version is the root
+# package.json's, and this crate holds no copy of it.
+version = "0.0.0"
+description = "The macOS installer and removal tool of urx-cli: one native process that installs, repairs or removes the installation under its exclusive gate"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "urx-install"
+path = "src/bin/urx-install.rs"
+
+[[bin]]
+name = "urx-uninstall"
+path = "src/bin/urx-uninstall.rs"
+
+[dependencies]
+# The state record the launcher reads, and its check of a complete one (K38).
+urx-launcher = { path = "../launcher" }
+# The release manifest and its files are named by their SHA-256 (K38).
+sha2 = { version = "=0.11.1", default-features = false }
+serde_json = "=1.0.154"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"

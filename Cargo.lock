@@ -426,6 +426,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "urx-maintenance"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "sha2",
+ "urx-launcher",
+]
+
+[[package]]
 name = "urx-output"
 version = "0.0.0"
 dependencies = [

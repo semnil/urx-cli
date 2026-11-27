@@ -6,9 +6,9 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// The state record's product and format (K38).
-const PRODUCT: &str = "urx-cli";
-const FORMAT: u64 = 1;
+/// The state record's product and format (K38), which maintenance writes too.
+pub const PRODUCT: &str = "urx-cli";
+pub const FORMAT: u64 = 1;
 
 /// The files of one installed bundle, located from the launcher's own path.
 #[derive(Debug, Clone, PartialEq, Eq)]
