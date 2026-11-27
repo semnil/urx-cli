@@ -160,6 +160,72 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     expect(() => licenseTexts(item(linked))).toThrow("has LICENSE-APACHE, which leads to no file");
   });
 
+  it.skipIf(process.platform === "win32")("read nothing outside the package a license file leads out of", () => {
+    const outside = folder();
+    writeFileSync(join(outside, "LICENSE"), "someone else's\n");
+    mkdirSync(join(outside, "LICENSES"));
+    writeFileSync(join(outside, "LICENSES", "MIT.txt"), "someone else's\n");
+    const make = (setUp) => {
+      const directory = folder();
+      writeFileSync(join(directory, "Cargo.toml"), "");
+      writeFileSync(join(directory, "NOTICE"), "notice text\n");
+      setUp(directory);
+      return directory;
+    };
+    const item = (directory, licenseFile = null) => pkg("crate", { manifest: join(directory, "Cargo.toml"), licenseFile });
+    const fileLink = make((directory) => symlinkSync(join(outside, "LICENSE"), join(directory, "LICENSE")));
+    expect(() => licenseTexts(item(fileLink))).toThrow("has LICENSE, which leads outside its package");
+    const folderLink = make((directory) => symlinkSync(join(outside, "LICENSES"), join(directory, "LICENSES")));
+    expect(() => licenseTexts(item(folderLink))).toThrow("has LICENSES, which leads outside its package");
+    const named = make(() => {});
+    expect(() => licenseTexts(item(named, join(outside, "LICENSE")))).toThrow("which leads outside its package");
+    expect(() => licenseTexts(item(named, "../outside/LICENSE"))).toThrow();
+    const inFolder = make((directory) => {
+      mkdirSync(join(directory, "LICENSES"));
+      writeFileSync(join(directory, "LICENSES", "own.txt"), "own\n");
+      symlinkSync(join(outside, "LICENSE"), join(directory, "LICENSES", "theirs.txt"));
+    });
+    expect(() => licenseTexts(item(inFolder))).toThrow("has LICENSES/theirs.txt, which leads outside its package");
+    // A text the package shares within itself is taken.
+    const shared = make((directory) => {
+      mkdirSync(join(directory, "legal"));
+      writeFileSync(join(directory, "legal", "MIT.txt"), "mit\n");
+      symlinkSync(join("legal", "MIT.txt"), join(directory, "LICENSE-MIT"));
+      symlinkSync("legal", join(directory, "LICENSES"));
+    });
+    expect(licenseTexts(item(shared))).toEqual([
+      ["LICENSE-MIT", "mit\n"],
+      ["NOTICE", "notice text\n"],
+    ]);
+  });
+
+  it.skipIf(process.platform === "win32")("stop at a license file or folder that holds no text, a NOTICE beside it or not", () => {
+    const cases = {
+      "an empty file": (directory) => writeFileSync(join(directory, "LICENSE"), ""),
+      "a file of whitespace": (directory) => writeFileSync(join(directory, "LICENSE"), " \n\t\n"),
+      "an empty folder": (directory) => mkdirSync(join(directory, "LICENSES")),
+      "a folder of empty folders": (directory) => mkdirSync(join(directory, "LICENSES", "inner"), { recursive: true }),
+      "a link to an empty folder": (directory) => {
+        mkdirSync(join(directory, "empty"));
+        symlinkSync("empty", join(directory, "LICENSES"));
+      },
+      "a folder holding only a link to itself": (directory) => {
+        mkdirSync(join(directory, "LICENSES"));
+        symlinkSync(".", join(directory, "LICENSES", "again"));
+      },
+    };
+    for (const [what, setUp] of Object.entries(cases)) {
+      for (const licenseFile of [null, "LICENSES"]) {
+        const directory = folder();
+        writeFileSync(join(directory, "Cargo.toml"), "");
+        writeFileSync(join(directory, "NOTICE"), "notice text\n");
+        setUp(directory);
+        const named = licenseFile !== null && existsSync(join(directory, licenseFile)) ? licenseFile : null;
+        expect(() => licenseTexts(pkg("crate", { manifest: join(directory, "Cargo.toml"), licenseFile: named })), `${what} ${named}`).toThrow("which holds no license text");
+      }
+    }
+  });
+
   it("read a license folder by the files in it", () => {
     const directory = folder();
     writeFileSync(join(directory, "Cargo.toml"), "");

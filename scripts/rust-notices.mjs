@@ -113,35 +113,48 @@ export function programCrates(metadata, linked, isOwn, samePath = (a, b) => a ==
  * (code unit order, whatever the locale): every license file at the top of
  * its package folder and the file its manifest names (`license_file`), each
  * read through a link to where it is, a folder by the files in it, and each
- * file once. One that leads to no file stops the build with its path.
+ * file once. Each must lead to a file inside the package holding text
+ * (another than whitespace); one that leads to no file, outside the package,
+ * or to no text stops the build with its name.
  */
 export function licenseTexts(item) {
   const directory = dirname(item.manifest_path);
+  const root = realpathSync(directory);
+  const fail = (name, what) => new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which ${what}`);
   const texts = new Map();
-  const visited = new Set();
+  // Each folder once: whether it led to text, or null while it is being read (a cycle adds nothing).
+  const folders = new Map();
+  // Adds what `name` (at `path`) leads to; whether it led to text.
   const add = (name, path) => {
     let real;
     try {
       real = realpathSync(path);
     } catch {
-      throw new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which leads to no file`);
+      throw fail(name, "leads to no file");
     }
+    const inside = relative(root, real);
+    if (inside.startsWith("..") || isAbsolute(inside)) throw fail(name, "leads outside its package");
     const stat = statSync(real);
     if (stat.isDirectory()) {
-      if (visited.has(real)) return;
-      visited.add(real);
-      for (const entry of readdirSync(real).sort()) add(`${name}/${entry}`, join(real, entry));
-    } else if (stat.isFile()) {
-      if (!texts.has(real)) texts.set(real, [name, readFileSync(real, "utf8")]);
-    } else {
-      throw new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which is not a file`);
+      if (folders.has(real)) return folders.get(real) === true;
+      folders.set(real, null);
+      let found = false;
+      for (const entry of readdirSync(real).sort()) found = add(`${name}/${entry}`, join(real, entry)) || found;
+      folders.set(real, found);
+      return found;
     }
+    if (!stat.isFile()) throw fail(name, "is not a file");
+    if (!texts.has(real)) texts.set(real, [name, readFileSync(real, "utf8")]);
+    return texts.get(real)[1].trim() !== "";
   };
-  for (const name of readdirSync(directory).sort()) if (isLicenseFile(name)) add(name, join(directory, name));
+  const take = (name, path) => {
+    if (!add(name, path)) throw fail(name, "holds no license text");
+  };
+  for (const name of readdirSync(directory).sort()) if (isLicenseFile(name)) take(name, join(directory, name));
   if (item.license_file) {
     const path = isAbsolute(item.license_file) ? item.license_file : join(directory, item.license_file);
     if (!existsSync(path)) throw new Error(`the Rust crate ${item.name} ${item.version} names ${item.license_file} as its license file, which its package does not hold`);
-    add(relative(directory, path).split(sep).join("/"), path);
+    take(relative(directory, path).split(sep).join("/"), path);
   }
   return [...texts.values()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
