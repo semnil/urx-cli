@@ -37,24 +37,32 @@ fn is_digest(text: &str) -> bool {
 }
 
 /// A relative path of an owned file: `/`-separated names, none empty, `.`
-/// or `..`, with no NUL, no control character and no pending suffix.
+/// or `..`, with no NUL, no control character and no name ending with the
+/// pending suffix.
 pub fn is_owned_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 1024
-        && !path.ends_with(PENDING_SUFFIX)
         && !path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-        && path
-            .split('/')
-            .all(|name| !name.is_empty() && name != "." && name != ".." && name.len() <= 255)
+        && path.split('/').all(|name| {
+            !name.is_empty()
+                && name != "."
+                && name != ".."
+                && name.len() <= 255
+                && !name.ends_with(PENDING_SUFFIX)
+        })
 }
 
-/// No path is the folder of another: `a` and `a/b` cannot both be files.
-fn no_file_is_a_folder(paths: &[String]) -> bool {
-    let mut sorted: Vec<&str> = paths.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    sorted.windows(2).all(|pair| {
-        !(pair[1].starts_with(pair[0]) && pair[1].as_bytes().get(pair[0].len()) == Some(&b'/'))
-    })
+/// Each path names one file, whatever the letter case (macOS file systems
+/// usually ignore it), and no path is the folder of another: `a` and `a/b`
+/// cannot both be files.
+fn one_file_each(paths: &[String]) -> bool {
+    let folded: std::collections::BTreeSet<String> =
+        paths.iter().map(|path| path.to_lowercase()).collect();
+    folded.len() == paths.len()
+        && folded.iter().all(|path| {
+            path.match_indices('/')
+                .all(|(at, _)| !folded.contains(&path[..at]))
+        })
 }
 
 fn is_release(text: &str) -> bool {
@@ -117,11 +125,9 @@ impl Manifest {
                 size,
             });
         }
-        let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
-        let mut unique = paths.clone();
+        let mut unique: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
         unique.sort_unstable();
-        unique.dedup();
-        if unique.len() != paths.len() || !no_file_is_a_folder(&paths) {
+        if !one_file_each(&unique) {
             return None;
         }
         if !REQUIRED
@@ -297,6 +303,10 @@ mod tests {
             with(file("./a")),
             with(file(MANIFEST)),
             with(file("bin/urx/inside")),
+            with(file("app/main.js/inside")),
+            with(file("App/main.js")),
+            with(file("BIN/URX")),
+            with(file("a.urx-pending/b")),
             with(file("a.urx-pending")),
             with(file("line\nbreak")),
             with(serde_json::json!({ "path": "x", "sha256": "0".repeat(63), "size": 1 })),
@@ -316,6 +326,10 @@ mod tests {
                 String::from_utf8_lossy(&bytes)
             );
         }
+        // A file and a folder of the same name, with a name between them in sorted order.
+        let mut files = required();
+        files.extend([file("notices"), file("notices-x"), file("notices/y")]);
+        assert_eq!(Manifest::parse(&manifest_with(Value::Array(files))), None);
     }
 
     fn state(phase: Phase) -> State {
