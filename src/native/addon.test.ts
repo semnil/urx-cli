@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkIdentity, expectedIdentity, loadAddon, openAddon, type ExpectedIdentity } from "./addon.js";
+import { addonUrl, checkIdentity, expectedIdentity, loadAddon, openAddon, type ExpectedIdentity } from "./addon.js";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const expected: ExpectedIdentity = { bridgeRevision: 3, commonVersion: "0.1.0", commonCommit: commit };
@@ -103,5 +103,13 @@ describe("addon loading", () => {
         }),
       ),
     ).toEqual({ ok: false, problem: "malformed" });
+  });
+});
+
+describe("the addon's location (K18)", () => {
+  it("is the bundle's native directory where the bundle's release manifest is, and next to the module otherwise", () => {
+    const module = "file:///opt/urx/app/native/addon.js";
+    expect(addonUrl(module, (url) => url.href === "file:///opt/urx/release-manifest.json").href).toBe("file:///opt/urx/native/urx-native.node");
+    expect(addonUrl(module, () => false).href).toBe("file:///opt/urx/app/native/urx-native.node");
   });
 });

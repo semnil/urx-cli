@@ -1,5 +1,5 @@
 [workspace]
-members = ["launcher", "native"]
+members = ["launcher", "native", "tools/output"]
 # The transport crate is a path dependency inside this directory, which would
 # make it a member; its own checks run in urx-device.
 exclude = ["vendor/urx-device"]

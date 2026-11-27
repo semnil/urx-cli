@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exportRelease, publishOutput, removeExport } from "./release-build.mjs";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -120,6 +121,10 @@ describe("release export", () => {
 });
 
 describe("release output", () => {
+  let tool;
+  beforeAll(() => {
+    tool = outputTool(fileURLToPath(new URL("../", import.meta.url)));
+  }, 300_000);
   const directory = (name, content) => {
     const path = join(scratch, name);
     mkdirSync(join(path, "native"), { recursive: true });
@@ -128,119 +133,176 @@ describe("release output", () => {
     return path;
   };
   const contents = (path) => [readFileSync(join(path, "main.js"), "utf8"), readFileSync(join(path, "native", "urx-native.node"), "utf8")];
-  const asides = () => readdirSync(scratch).filter((name) => name.startsWith("dist-release-previous-"));
 
-  it("replace the output with one complete staging directory and remove the previous one", () => {
+  const workFolders = () => readdirSync(scratch).filter((name) => name.includes(".work-"));
+
+  it("publish the staged files, the record last, as an output where nothing was", () => {
     const output = join(scratch, "dist-release");
-    publishOutput(directory("staging-1", "first"), output);
-    expect(contents(output)).toEqual(["first", "first"]);
-    publishOutput(directory("staging-2", "second"), output);
-    expect(contents(output)).toEqual(["second", "second"]);
-    expect(asides()).toEqual([]);
-    expect(existsSync(join(scratch, "staging-2"))).toBe(false);
-  });
-
-  it("restore the previous output whole when the new one cannot be put in place", () => {
-    const output = directory("dist-release", "previous");
+    expect(() => requireNoOutput(output)).not.toThrow();
     const staging = directory("staging", "new");
-    const failing = (from, to) => {
-      if (from === staging) throw Object.assign(new Error("busy"), { code: "EBUSY" });
-      renameSync(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: failing })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["previous", "previous"]);
-    expect(existsSync(staging)).toBe(false);
-    expect(asides()).toEqual([]);
-  });
-
-  it("report the failed set-aside, not the cleanup, when the previous output cannot be set aside", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "new");
-    const warnings = [];
-    const failing = (from, to) => {
-      if (from === output) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      renameSync(from, to);
-    };
-    const stuck = (path) => {
-      if (path === staging) throw Object.assign(new Error("read-only"), { code: "EACCES" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    let thrown;
-    try {
-      publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message) });
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown?.message).toMatch(/could not be set aside/);
-    expect(thrown?.cause?.code).toBe("EPERM");
-    expect(contents(output)).toEqual(["previous", "previous"]);
-    expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
-  });
-
-  it("restore the previous output even when the new one can be neither put in place nor removed", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "new");
-    const warnings = [];
-    const failing = (from, to) => {
-      if (from === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      renameSync(from, to);
-    };
-    const stuck = (path) => {
-      if (path === staging) throw Object.assign(new Error("immutable"), { code: "EPERM" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    expect(() => publishOutput(staging, output, { rename: failing, remove: stuck, warn: (message) => warnings.push(message) })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["previous", "previous"]);
-    expect(asides()).toEqual([]);
-    expect(warnings).toEqual([`release build: the new output could not be removed from ${staging}`]);
-  });
-
-  it("leave the other release's output when it got there first, and keep this release's previous output aside", () => {
-    const output = directory("dist-release", "previous");
-    const staging = directory("staging", "this");
-    const warnings = [];
-    const raced = (from, to) => {
-      if (from === staging) {
-        // Another release finishes between this one's set-aside and rename.
-        directory("dist-release", "other");
-      }
-      renameSync(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: raced, warn: (message) => warnings.push(message) })).toThrow(/could not be replaced/);
-    expect(contents(output)).toEqual(["other", "other"]);
-    expect(asides()).toHaveLength(1);
-    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
-    expect(warnings).toHaveLength(1);
-  });
-
-  it("keep the new output and only warn when the previous one cannot be removed", () => {
-    const output = directory("dist-release", "previous");
-    const warnings = [];
-    const stuck = (path) => {
-      if (path.includes("-previous-")) throw Object.assign(new Error("read-only"), { code: "EACCES" });
-      rmSync(path, { recursive: true, force: true });
-    };
-    publishOutput(directory("staging", "new"), output, { remove: stuck, warn: (message) => warnings.push(message) });
+    writeFileSync(join(staging, "release-files.json"), "record");
+    publishOutput(staging, output, { last: "release-files.json", tool });
     expect(contents(output)).toEqual(["new", "new"]);
-    expect(asides()).toHaveLength(1);
+    expect(readFileSync(join(output, "release-files.json"), "utf8")).toBe("record");
+    expect(workFolders()).toEqual([]);
+  });
+
+  it("leave whatever is at the output as it is and stop, an empty folder included", () => {
+    const previous = directory("dist-release", "previous");
+    writeFileSync(join(previous, "keep.txt"), "the user's");
+    expect(() => requireNoOutput(previous)).toThrow(/already exists; the release build leaves it as it is, so remove it to build again/);
+    // Put there after the build started, so the error names it as another's and asks nothing about it.
+    expect(() => publishOutput(directory("staging", "new"), previous, { tool })).toThrow(/was put in place by another build or program while the release build ran; it is left as it is/);
+    expect(() => publishOutput(directory("staging", "new"), previous, { tool })).not.toThrow(/remove it to build again/);
+    expect(contents(previous)).toEqual(["previous", "previous"]);
+    expect(readFileSync(join(previous, "keep.txt"), "utf8")).toBe("the user's");
+
+    const empty = join(scratch, "dist-bundle");
+    mkdirSync(empty);
+    const before = statSync(empty).ino;
+    expect(() => requireNoOutput(empty, "bundle build")).toThrow(/already exists; the bundle build leaves it as it is/);
+    expect(() => publishOutput(directory("staging", "new"), empty, { label: "bundle build", tool })).toThrow(/while the bundle build ran; it is left as it is/);
+    expect(statSync(empty).ino).toBe(before);
+    expect(readdirSync(empty)).toEqual([]);
+
+    const file = join(scratch, "dist-installer");
+    writeFileSync(file, "the user's");
+    expect(() => publishOutput(directory("staging", "new"), file, { label: "installer build", tool })).toThrow(/while the installer build ran; it is left as it is/);
+    expect(readFileSync(file, "utf8")).toBe("the user's");
+    expect(workFolders()).toEqual([]);
+  });
+
+  it("leave a link at the output as it is, a dangling one included", () => {
+    const target = directory("elsewhere", "the user's");
+    const output = join(scratch, "dist-release");
+    const dangling = join(scratch, "dist-bundle");
+    try {
+      symlinkSync(target, output, "dir");
+      symlinkSync(join(scratch, "nowhere"), dangling, "dir");
+    } catch {
+      return; // Creating a link needs a privilege this Windows account may lack.
+    }
+    expect(() => requireNoOutput(output)).toThrow(/already exists/);
+    expect(() => publishOutput(directory("staging", "new"), output, { tool })).toThrow(/it is left as it is/);
+    expect(contents(output)).toEqual(["the user's", "the user's"]);
+    expect(() => publishOutput(directory("staging", "new"), dangling, { label: "bundle build", tool })).toThrow(/it is left as it is/);
+    expect(existsSync(join(scratch, "nowhere"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("keep the staged folders' and files' modes in the output", () => {
+    const output = join(scratch, "dist-bundle");
+    const staging = directory("staging", "new");
+    chmodSync(staging, 0o755);
+    chmodSync(join(staging, "native"), 0o700);
+    chmodSync(join(staging, "main.js"), 0o755);
+    chmodSync(join(staging, "native", "urx-native.node"), 0o600);
+    publishOutput(staging, output, { label: "bundle build", tool });
+    const mode = (...path) => (statSync(join(output, ...path)).mode & 0o7777).toString(8);
+    expect([mode(), mode("native"), mode("main.js"), mode("native", "urx-native.node")]).toEqual(["755", "700", "755", "600"]);
+  });
+
+  it("turn a failed removal of the build's own scratch into a warning, so it changes neither the result nor the error", () => {
+    const warnings = [];
+    expect(() =>
+      cleanUp("bundle build", "/tmp/urx-bundle-x", () => {
+        throw Object.assign(new Error("ENOTEMPTY: directory not empty"), { code: "ENOTEMPTY" });
+      }, (message) => warnings.push(message)),
+    ).not.toThrow();
+    expect(warnings).toEqual(["bundle build: /tmp/urx-bundle-x could not be removed and is left there: ENOTEMPTY: directory not empty"]);
+    let ran = false;
+    cleanUp("release build", "/tmp/urx-release-x", () => (ran = true), (message) => warnings.push(message));
+    expect(ran).toBe(true);
     expect(warnings).toHaveLength(1);
   });
 
-  it("leave the previous output complete under its set-aside name when interrupted between the renames", () => {
+  it("tell the package.json that says the output's modules are ES modules", () => {
+    expect(isModuleFormat(Buffer.from('{"type":"module"}\n'))).toBe(true);
+    expect(isModuleFormat(Buffer.from('{\r\n  "type": "module"\r\n}\r\n'))).toBe(true);
+    expect(isModuleFormat(Buffer.from('{"type":"commonjs"}'))).toBe(false);
+    expect(isModuleFormat(Buffer.from('{"type":"module","main":"x.js"}'))).toBe(false);
+    expect(isModuleFormat(Buffer.from("not json"))).toBe(false);
+  });
+
+  it("record the files a release build made, with their hashes and sizes, and read them back", () => {
     const output = directory("dist-release", "previous");
-    const staging = directory("staging", "new");
-    const interrupted = (from, to) => {
-      if (from === staging) throw new Error("interrupted");
-      renameSync(from, to);
+    expect(releaseRecord(output)).toBe(null);
+    writeReleaseFiles(output);
+    const hash = sha256(Buffer.from("previous"));
+    expect(releaseRecord(output)).toEqual([
+      { path: "main.js", sha256: hash, size: 8 },
+      { path: "native/urx-native.node", sha256: hash, size: 8 },
+    ]);
+  });
+
+  it("tell a recorded file that is missing or not as it was built", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    expect(recordedProblems(output, files)).toEqual([]);
+    writeFileSync(join(output, "main.js"), "");
+    rmSync(join(output, "native", "urx-native.node"));
+    expect(recordedProblems(output, files)).toEqual(["main.js is not as it was built", "native/urx-native.node is missing"]);
+  });
+
+  it("read no record whose entries lack a hash", () => {
+    const output = directory("dist-release", "previous");
+    writeFileSync(join(output, "release-files.json"), JSON.stringify({ product: "urx-cli", output: "release", files: ["main.js"] }));
+    expect(releaseRecord(output)).toBe(null);
+  });
+
+  it("read no record with a path that is not one file inside the output, or with one file named twice", () => {
+    const entry = (path) => ({ path, sha256: sha256(Buffer.from("previous")), size: 8 });
+    const record = (...paths) => {
+      const output = directory("dist-release", "previous");
+      writeFileSync(join(output, "release-files.json"), JSON.stringify({ product: "urx-cli", output: "release", files: paths.map(entry) }));
+      return releaseRecord(output);
     };
-    // Restoring is part of the same failure path; without it, the set-aside copy is complete.
-    const noRestore = (from, to) => {
-      if (from.includes("-previous-")) throw new Error("interrupted again");
-      interrupted(from, to);
-    };
-    expect(() => publishOutput(staging, output, { rename: noRestore, warn: () => {} })).toThrow();
-    expect(existsSync(output)).toBe(false);
-    expect(asides()).toHaveLength(1);
-    expect(contents(join(scratch, asides()[0]))).toEqual(["previous", "previous"]);
+    expect(record("main.js", "native/urx-native.node")).toEqual([entry("main.js"), entry("native/urx-native.node")]);
+    for (const path of ["", "/main.js", "../main.js", "native/../main.js", "./main.js", "native//urx-native.node", "native/", "native\\urx-native.node", "C:/main.js", "main.js\u0000"]) {
+      expect(isRecordedPath(path), JSON.stringify(path)).toBe(false);
+      expect(record(path), JSON.stringify(path)).toBe(null);
+    }
+    expect(record("main.js", "main.js")).toBe(null);
+    expect(record("main.js", "MAIN.js")).toBe(null);
+    expect(record("main.js", "release-files.json")).toBe(null);
+  });
+
+  it("read a recorded path only as a regular file under the output, reached through no link", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    // A directory where the record names a file is missing.
+    rmSync(join(output, "main.js"));
+    mkdirSync(join(output, "main.js"));
+    expect(recordedProblems(output, files)).toEqual(["main.js is missing"]);
+    // A path the record could not have named, outside the output, is never read.
+    writeFileSync(join(scratch, "outside.js"), "previous");
+    expect(recordedProblems(output, [{ path: "../outside.js", sha256: sha256(Buffer.from("previous")), size: 8 }])).toEqual(["../outside.js is missing"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuse an output that holds a link, where a recorded file could be read through it", () => {
+    const output = directory("dist-release", "previous");
+    writeReleaseFiles(output);
+    const files = releaseRecord(output);
+    rmSync(join(output, "native"), { recursive: true });
+    mkdirSync(join(scratch, "elsewhere"));
+    writeFileSync(join(scratch, "elsewhere", "urx-native.node"), "previous");
+    symlinkSync(join(scratch, "elsewhere"), join(output, "native"));
+    expect(() => recordedProblems(output, files)).toThrow(/may hold no link/);
+  });
+
+});
+
+describe("the launcher's location", () => {
+  const artifact = (name, kind, executable) => JSON.stringify({ reason: "compiler-artifact", target: { name, kind }, executable });
+
+  it("is the urx executable cargo reports building, wherever the target in use puts it", () => {
+    const executable = "/scratch/target/aarch64-apple-darwin/release/urx";
+    const messages = [artifact("sha2", ["lib"], null), "not json", artifact("urx", ["bin"], executable), JSON.stringify({ reason: "build-finished", success: true })].join("\n");
+    expect(launcherArtifact(messages)).toBe(executable);
+  });
+
+  it("is refused when cargo reports building no urx executable", () => {
+    expect(() => launcherArtifact(artifact("urx_launcher", ["lib"], null))).toThrow(/no urx executable/);
   });
 });
