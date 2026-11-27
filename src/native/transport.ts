@@ -106,11 +106,17 @@ function phaseOf(failure: LifecycleFailure): OperationPhase {
 
 /**
  * The structured failure of a subscription call's failure record. A
- * cancellation reports internal_error: the adapter does not know the owner's
- * stopping cause, and K34 invents none.
+ * cancellation reports the stopping cause its operation was cancelled for
+ * (`AddonTransport.cancelAll`), and internal_error without one: K34 invents
+ * none.
  */
-function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup): OperationFailureError<SubscriptionProgress> {
-  const code: OperationCause = failure.kind === "cause" && REQUEST_CAUSES.includes(failure.code) ? (failure.code as OperationCause) : "internal_error";
+function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup, stopping: OperationCause | undefined): OperationFailureError<SubscriptionProgress> {
+  const code: OperationCause =
+    failure.kind === "cancelled"
+      ? (stopping ?? "internal_error")
+      : REQUEST_CAUSES.includes(failure.code)
+        ? (failure.code as OperationCause)
+        : "internal_error";
   return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup } });
 }
 
@@ -118,7 +124,7 @@ function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup): Opera
 const untrusted = (phase: OperationPhase) => new OperationFailureError({ code: "internal_error", phase, progress: null });
 
 /** Validates a subscription call's unit record; throws its failure. */
-async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase): Promise<void> {
+async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase, stopping: () => OperationCause | undefined): Promise<void> {
   let record: unknown;
   try {
     record = await call();
@@ -127,7 +133,7 @@ async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase): 
   }
   const outcome = validateLifecycle(record, (value) => (value === null ? null : undefined));
   if (outcome === undefined) throw untrusted(phase);
-  if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup);
+  if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup, stopping());
 }
 
 const isNativeSubscription = (value: unknown): value is NativeSubscription => {
@@ -149,11 +155,11 @@ const isNativeSubscription = (value: unknown): value is NativeSubscription => {
  */
 class AdapterSubscription implements TransportSubscription {
   readonly #native: NativeSubscription;
-  readonly #operation: NativeOperation;
+  readonly #operation: AdapterOperation;
   readonly #route: Route;
   #released: Promise<void> | undefined;
 
-  constructor(native: NativeSubscription, operation: NativeOperation, route: Route) {
+  constructor(native: NativeSubscription, operation: AdapterOperation, route: Route) {
     this.#native = native;
     this.#operation = operation;
     this.#route = route;
@@ -161,13 +167,14 @@ class AdapterSubscription implements TransportSubscription {
 
   activate(): Promise<void> {
     this.#route.start();
-    return settleUnit(() => this.#native.activate(this.#operation), "send");
+    return settleUnit(() => this.#native.activate(this.#operation.native), "send", () => this.#operation.stopping);
   }
 
   release(): Promise<void> {
     this.#released ??= (() => {
       this.#route.stop();
-      return settleUnit(() => this.#native.release(), "send");
+      // Releasing is not the operation's, so no cancellation of it is expected.
+      return settleUnit(() => this.#native.release(), "send", () => undefined);
     })();
     return this.#released;
   }
@@ -176,13 +183,23 @@ class AdapterSubscription implements TransportSubscription {
 /** The TransportOperation the adapter hands out, keeping its native owner. */
 class AdapterOperation implements TransportOperation {
   readonly #finished: (operation: AdapterOperation) => void;
+  #stopping: OperationCause | undefined;
   constructor(
     readonly native: NativeOperation,
     finished: (operation: AdapterOperation) => void,
   ) {
     this.#finished = finished;
   }
+  /** The cause `cancelFor` recorded; the first stays. */
+  get stopping(): OperationCause | undefined {
+    return this.#stopping;
+  }
   cancel(): void {
+    this.native.cancel();
+  }
+  /** Cancels for `cause`, recorded before the native cancellation (K34). */
+  cancelFor(cause: OperationCause): void {
+    this.#stopping ??= cause;
     this.native.cancel();
   }
   finish(): void {
@@ -214,13 +231,14 @@ export class AddonTransport implements Transport {
 
   /**
    * Cancels every operation this transport created and has not finished,
-   * those that operations of its own create (a write guard's) included: a
-   * request still waiting is completed unsent, one already sent settles as
-   * it would. Releasing what was registered is not an operation's and is
-   * not stopped.
+   * those that operations of its own create (a write guard's) included, for
+   * `cause`: a request still waiting is completed unsent, one already sent
+   * settles as it would, and a subscription call cancelled this way reports
+   * `cause`. Releasing what was registered is not an operation's and is not
+   * stopped.
    */
-  cancelAll(): void {
-    for (const operation of [...this.#open]) operation.cancel();
+  cancelAll(cause: OperationCause): void {
+    for (const operation of [...this.#open]) operation.cancelFor(cause);
   }
 
   /** Issued by the connection, so two adapters over one connection never share a ticket. */
@@ -268,7 +286,7 @@ export class AddonTransport implements Transport {
     }
     const outcome = validateLifecycle(record, (value) => (isNativeSubscription(value) ? value : undefined));
     if (outcome === undefined) throw untrusted("admission");
-    if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup);
+    if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup, operation.stopping);
     const native = outcome.value;
     let route: Route;
     try {
@@ -282,7 +300,7 @@ export class AddonTransport implements Transport {
       }
       throw untrusted("admission");
     }
-    return new AdapterSubscription(native, operation.native, route);
+    return new AdapterSubscription(native, operation, route);
   }
 
   async adoptResult(requestTicket: string): Promise<void> {

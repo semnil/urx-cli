@@ -104,7 +104,7 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
         // A Ctrl+C reaches every operation on the connection, the lock guard's registration included (U5).
         run.interruption.onInterrupt(() => {
           context.cancel("interrupted");
-          transport.cancelAll();
+          transport.cancelAll("interrupted");
         });
         await run.note("execution", "started");
         const executing = run.mark();

@@ -219,10 +219,10 @@ describe("set of a basic channel control", () => {
     }
   });
 
-  it("report a Ctrl+C once, as the first stop, when the operation it cancels ends", async () => {
+  it.each([[[]], [["--dry-run"]]])("report a Ctrl+C once, as the first stop, when the operation it cancels ends (%j)", async (extra: string[]) => {
     const at = await unit({ holdRegistrations: true });
     const interrupt = interrupts();
-    const pending = urx(["channel", "on", "set", "--channel", "1", "--value", "on", "--json"], at.listPort, { interrupts: interrupt });
+    const pending = urx(["channel", "on", "set", "--channel", "1", "--value", "on", ...extra, "--json"], at.listPort, { interrupts: interrupt });
     await vi.waitFor(() => expect(at.requests).toContain(`<id-a> post ${LOCK}?operation=regist`));
     interrupt.send();
     // The held registration reply, and any later held reply, are answered from here on.
@@ -231,7 +231,8 @@ describe("set of a basic channel control", () => {
     clearInterval(timer);
     expect(result.exit).toBe(130);
     expect(JSON.parse(result.stdout)).toMatchObject({ data: { outcome: "not_sent" }, error: { code: "interrupted" } });
-    expect(result.stderr).not.toContain("also: interrupted");
+    // The cancelled registration is that Ctrl+C too, not another failure.
+    expect(result.stderr).not.toContain("also:");
     expect(at.requests.filter((line) => line.endsWith("operation=value"))).toEqual([]);
   });
 
