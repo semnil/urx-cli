@@ -121,17 +121,34 @@ export function programCrates(metadata, programs, isOwn) {
 }
 
 /**
+ * The folder a crate's license texts must lie in: its package for a crate
+ * from a registry (as Cargo extracted it); for one taken from a folder or a
+ * repository, the repository or the checkout that holds its package (the
+ * nearest folder above it with `.git` or Cargo's `.cargo-ok`), else its
+ * package. Files elsewhere on the build machine are no part of what Cargo
+ * took.
+ */
+export function sourceRoot(item) {
+  const directory = realpathSync(dirname(item.manifest_path));
+  if (typeof item.source === "string" && /^(registry|sparse)\+/.test(item.source)) return directory;
+  for (let at = directory; ; at = dirname(at)) {
+    if (existsSync(join(at, ".git")) || existsSync(join(at, ".cargo-ok"))) return at;
+    if (dirname(at) === at) return directory;
+  }
+}
+
+/**
  * The license texts of the package `item` as [name, text], sorted by name
  * (code unit order, whatever the locale): every license file at the top of
  * its package folder and the file its manifest names (`license_file`), each
  * read through a link to where it is, a folder by the files in it, and each
- * file once. Each must lead to a file inside the package holding text
- * (another than whitespace); one that leads to no file, outside the package,
- * or to no text stops the build with its name.
+ * file once. Each must lead to a file inside what Cargo took (`sourceRoot`)
+ * holding text (another than whitespace); one that leads to no file, outside
+ * it, or to no text stops the build with its name.
  */
 export function licenseTexts(item) {
   const directory = dirname(item.manifest_path);
-  const root = realpathSync(directory);
+  const root = sourceRoot(item);
   const fail = (name, what) => new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which ${what}`);
   const texts = new Map();
   // Each folder once: whether it led to text, or null while it is being read (a cycle adds nothing).
@@ -145,7 +162,7 @@ export function licenseTexts(item) {
       throw fail(name, "leads to no file");
     }
     const inside = relative(root, real);
-    if (inside.startsWith("..") || isAbsolute(inside)) throw fail(name, "leads outside its package");
+    if (inside.startsWith("..") || isAbsolute(inside)) throw fail(name, "leads outside what Cargo took of it");
     const stat = statSync(real);
     if (stat.isDirectory()) {
       if (folders.has(real)) return folders.get(real) === true;

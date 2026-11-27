@@ -184,18 +184,18 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     };
     const item = (directory, licenseFile = null) => pkg("crate", { manifest: join(directory, "Cargo.toml"), licenseFile });
     const fileLink = make((directory) => symlinkSync(join(outside, "LICENSE"), join(directory, "LICENSE")));
-    expect(() => licenseTexts(item(fileLink))).toThrow("has LICENSE, which leads outside its package");
+    expect(() => licenseTexts(item(fileLink))).toThrow("has LICENSE, which leads outside what Cargo took of it");
     const folderLink = make((directory) => symlinkSync(join(outside, "LICENSES"), join(directory, "LICENSES")));
-    expect(() => licenseTexts(item(folderLink))).toThrow("has LICENSES, which leads outside its package");
+    expect(() => licenseTexts(item(folderLink))).toThrow("has LICENSES, which leads outside what Cargo took of it");
     const named = make(() => {});
-    expect(() => licenseTexts(item(named, join(outside, "LICENSE")))).toThrow("which leads outside its package");
+    expect(() => licenseTexts(item(named, join(outside, "LICENSE")))).toThrow("which leads outside what Cargo took of it");
     expect(() => licenseTexts(item(named, "../outside/LICENSE"))).toThrow();
     const inFolder = make((directory) => {
       mkdirSync(join(directory, "LICENSES"));
       writeFileSync(join(directory, "LICENSES", "own.txt"), "own\n");
       symlinkSync(join(outside, "LICENSE"), join(directory, "LICENSES", "theirs.txt"));
     });
-    expect(() => licenseTexts(item(inFolder))).toThrow("has LICENSES/theirs.txt, which leads outside its package");
+    expect(() => licenseTexts(item(inFolder))).toThrow("has LICENSES/theirs.txt, which leads outside what Cargo took of it");
     // A text the package shares within itself is taken.
     const shared = make((directory) => {
       mkdirSync(join(directory, "legal"));
@@ -207,6 +207,33 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
       ["LICENSE-MIT", "mit\n"],
       ["NOTICE", "notice text\n"],
     ]);
+  });
+
+  it("read a license text a crate from a folder or a repository shares within it, and none from outside", () => {
+    const registry = "registry+https://github.com/rust-lang/crates.io-index";
+    for (const [marker, source] of [[".git", null], [".cargo-ok", "git+https://example.com/shared#0123abc"]]) {
+      const repository = folder();
+      mkdirSync(join(repository, marker === ".git" ? ".git" : "crates"), { recursive: true });
+      if (marker === ".cargo-ok") writeFileSync(join(repository, ".cargo-ok"), "");
+      writeFileSync(join(repository, "LICENSE"), "shared license\n");
+      const crate = join(repository, "crates", "member");
+      mkdirSync(crate, { recursive: true });
+      writeFileSync(join(crate, "Cargo.toml"), "");
+      const item = (licenseFile, from = source) => pkg("member", { source: from, manifest: join(crate, "Cargo.toml"), licenseFile });
+      expect(licenseTexts(item("../../LICENSE")), marker).toEqual([["../../LICENSE", "shared license\n"]]);
+      // A registry crate is what Cargo extracted: its own folder.
+      expect(() => licenseTexts(item("../../LICENSE", registry)), marker).toThrow("which leads outside what Cargo took of it");
+      // Nothing above the repository.
+      const outside = folder();
+      writeFileSync(join(outside, "LICENSE"), "someone else's\n");
+      expect(() => licenseTexts(item(join(outside, "LICENSE"))), marker).toThrow("which leads outside what Cargo took of it");
+    }
+    // A crate from a folder in no repository: its own folder.
+    const lone = folder();
+    mkdirSync(join(lone, "member"));
+    writeFileSync(join(lone, "member", "Cargo.toml"), "");
+    writeFileSync(join(lone, "LICENSE"), "beside it\n");
+    expect(() => licenseTexts(pkg("member", { source: null, manifest: join(lone, "member", "Cargo.toml"), licenseFile: "../LICENSE" }))).toThrow("which leads outside what Cargo took of it");
   });
 
   it.skipIf(process.platform === "win32")("stop at a license file or folder that holds no text, a NOTICE beside it or not", () => {
