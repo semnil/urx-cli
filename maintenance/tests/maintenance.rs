@@ -1028,3 +1028,31 @@ fn a_parent_others_can_change_stops_the_installation_before_any_change() {
         assert!(launcher_accepts(&scene), "{folder}");
     }
 }
+
+#[test]
+fn a_removal_stops_too_while_others_can_change_a_parent_and_keeps_everything() {
+    for folder in ["usr/local/lib", "Library", "usr"] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+        install(&scene.layout, &source, &expected, true, &never).unwrap();
+        let at = scene.base.join(folder);
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o775)).unwrap();
+        let before = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
+        let exposed = Err(Problem::Exposed(fs::canonicalize(&at).unwrap()));
+        assert_eq!(uninstall(&scene.layout, false, &never), exposed, "{folder}");
+        assert_eq!(uninstall(&scene.layout, true, &never), exposed, "{folder}");
+        assert_eq!(
+            fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
+            before,
+            "{folder}"
+        );
+        assert_eq!(
+            walk(&scene.layout.root),
+            files_of(&scene, "image"),
+            "{folder}"
+        );
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+        uninstall(&scene.layout, true, &never).unwrap();
+        assert!(!scene.layout.root.exists(), "{folder}");
+    }
+}

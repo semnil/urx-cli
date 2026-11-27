@@ -134,6 +134,8 @@ fn tree_of(layout: &Layout, root: Option<&Fd>, state: &State) -> Result<Vec<Stri
 /// installed, by the copy in the disk image or the recovery ZIP once the
 /// installed one is gone.
 pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Result<Report, Problem> {
+    // The names removed are in these folders: no one but root may be able to change them.
+    place::check_not_exposed(layout)?;
     let held = place::hold(
         layout,
         if apply {
