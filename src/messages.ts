@@ -61,7 +61,8 @@ export function lifecycleFailure(record: LifecycleFailure): ResultError {
 const IN_REQUEST: Record<OperationPhase, string> = {
   validation: "before the request was sent",
   admission: "before the request was sent",
-  send: "while the request was sent",
+  // A send that did not finish may have sent nothing; only its attempt is known.
+  send: "during the attempt to send the request",
   response: "while its response was awaited",
   // The result could not be handed back; whether a response arrived is not known.
   delivery: "while its result was handed back",
