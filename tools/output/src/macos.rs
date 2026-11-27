@@ -363,13 +363,8 @@ impl Work for MacWork {
                 ))
             });
         }
-        match status_at(self.parent.0, &self.target)? {
-            Some(published) if same_entry(&published, &held) => Ok(()),
-            _ => Err(Failure::other(format!(
-                "{} is not this build's folder after the rename: its work folder was replaced in that instant, and what is there is left as it is",
-                self.output.display()
-            ))),
-        }
+        // Published: the output is the next stage's from here, wherever it takes it.
+        Ok(())
     }
 }
 

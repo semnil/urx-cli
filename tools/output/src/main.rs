@@ -23,7 +23,8 @@
 //!    `renameatx_np` with `RENAME_EXCL`, after checking that the work
 //!    folder's name still names the folder it holds; Windows: a rename of the
 //!    held folder itself that does not replace). This rename is the moment the
-//!    build succeeds and the next stage can see its output.
+//!    build succeeds and the next stage can see its output; nothing of it is
+//!    touched afterwards, wherever the next stage takes it.
 //!
 //! When a step after the first fails, the record, if written, is removed from
 //! the work folder through the open folder, and the work folder is left
@@ -219,8 +220,9 @@ fn read_full(reader: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize>
 }
 
 /// Writes `entries` into `work`, checks what it holds, adds `last`, a file at
-/// the top of the staged output, and publishes it. When publishing fails
-/// after the record was written, the record is removed again.
+/// the top of the staged output, and publishes it. When the publishing rename
+/// does not happen after the record was written, the record is removed again
+/// from the work folder, which is then not published.
 pub fn publish(
     work: &mut dyn Work,
     entries: &[Entry],
