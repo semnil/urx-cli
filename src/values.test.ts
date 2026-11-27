@@ -1,9 +1,9 @@
-import { BASIC_RULES } from "@urx/device-control/catalog";
+import { BASIC_RULES, decimalValue } from "@urx/device-control/catalog";
 import { describe, expect, it } from "vitest";
 import { renderHelp } from "./cli/help.js";
 import { parse } from "./cli/parse.js";
 import { settingCommandOf } from "./cli/settings.js";
-import { isSupported, parseValue, valueJson, valueText } from "./values.js";
+import { isSupported, parseValue, sameValue, valueJson, valueText } from "./values.js";
 
 const rule = (id: keyof typeof BASIC_RULES) => {
   const value = (BASIC_RULES[id] as { value: unknown }).value;
@@ -19,12 +19,17 @@ describe("setting values at the CLI (C6, C8, O6)", () => {
     expect([valueJson(on, true), valueText(on, false)]).toEqual([true, "off"]);
   });
 
-  it("read decimal numbers and exact named values only", () => {
+  it("read decimal numbers as their canonical decimal text, and exact named values only", () => {
     const fader = rule("channel.fader");
-    expect(parseValue(fader, "-6")).toBe(-6);
-    expect(parseValue(fader, "-15.005")).toBe(-15.005);
-    expect(parseValue(fader, "007")).toBe(7);
-    expect(Object.is(parseValue(fader, "-0"), 0)).toBe(true);
+    expect(parseValue(fader, "-6")).toEqual({ decimal: "-6" });
+    expect(parseValue(fader, "-15.005")).toEqual({ decimal: "-15.005" });
+    expect(parseValue(fader, "007")).toEqual({ decimal: "7" });
+    expect(parseValue(fader, "1.50")).toEqual({ decimal: "1.5" });
+    // Negative zero is zero (C6).
+    expect([parseValue(fader, "-0"), parseValue(fader, "-0.00")]).toEqual([{ decimal: "0" }, { decimal: "0" }]);
+    // Digits a number would not keep stay, so the range check and rounding see them (W2).
+    expect(parseValue(fader, "10.0000000000000001")).toEqual({ decimal: "10.0000000000000001" });
+    expect(parseValue(fader, "9".repeat(309))).toEqual({ decimal: "9".repeat(309) });
     expect(parseValue(fader, "-inf")).toBe("-inf");
     for (const text of ["+1", "1e3", "5e-1", "1.", ".5", "1,000", "６", "-6dB", "NaN", "Infinity", "-Inf", "inf", "", " 1"]) {
       expect(parseValue(fader, text), text).toBeUndefined();
@@ -34,6 +39,11 @@ describe("setting values at the CLI (C6, C8, O6)", () => {
   it("show numbers with their O6 state and unit, and a named value as its state", () => {
     const fader = rule("channel.fader");
     expect(valueJson(fader, -6)).toEqual({ value: -6, state: "finite", unit: "dB" });
+    // A decimal value is a JSON number with every digit of its text.
+    expect(JSON.stringify(valueJson(fader, decimalValue("0.50000000000000001")))).toBe('{"value":0.50000000000000001,"state":"finite","unit":"dB"}');
+    expect(JSON.stringify(valueJson(fader, decimalValue("-15")))).toBe('{"value":-15,"state":"finite","unit":"dB"}');
+    expect([valueText(fader, decimalValue("10.0000000000000001")), valueText(rule("channel.pan"), decimalValue("-0.5"))]).toEqual(["10.0000000000000001 dB", "-0.5"]);
+    expect([sameValue(decimalValue("1.50"), decimalValue("1.5")), sameValue(decimalValue("1"), decimalValue("1.5")), sameValue(true, true)]).toEqual([true, false, true]);
     expect(valueJson(fader, "-inf")).toEqual({ value: null, state: "negative_infinity", unit: "dB" });
     expect([valueText(fader, -15.01), valueText(fader, "-inf")]).toEqual(["-15.01 dB", "-inf dB"]);
     expect(valueJson(rule("channel.pan"), -63)).toEqual({ value: -63, state: "finite", unit: null });

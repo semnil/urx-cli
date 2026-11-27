@@ -29,7 +29,7 @@ import type { AddonCheck } from "./native/addon.js";
 import { AddonTransport } from "./native/transport.js";
 import type { OutputStream } from "./output.js";
 import { baseExitCode, EXIT, type CauseCode, type ResultError } from "./result.js";
-import { isSupported, parseValue, valueJson, valueRuleOf, valueText } from "./values.js";
+import { isSupported, parseValue, sameValue, valueJson, valueRuleOf, valueText } from "./values.js";
 
 export interface SettingIo {
   readonly stdout: OutputStream;
@@ -177,7 +177,7 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
       // The write's own outcome is shown whatever else failed, so acceptance, rejection and uncertainty stay apart (O2).
       let human: string | null = null;
       if (written !== null && written.planned !== null && written.planned !== undefined && isSupported(rule)) {
-        const asked = written.requested === written.planned ? "" : ` (requested ${valueText(rule, written.requested)})`;
+        const asked = sameValue(written.requested, written.planned) ? "" : ` (requested ${valueText(rule, written.requested)})`;
         const value = valueText(rule, written.planned);
         if (dryRun) human = error === null ? `${where}: would send ${value}${asked}; nothing was sent (dry run)\n` : null;
         else if (outcome === "accepted") human = `${where}: ${value} accepted${asked}\n`;

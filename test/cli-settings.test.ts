@@ -167,7 +167,28 @@ describe("set of a basic channel control", () => {
     const range = await urx(["channel", "fader", "set", "--channel", "1", "--value=-96.5", "--json"], at.listPort);
     expect(range.exit).toBe(2);
     expect(JSON.parse(range.stdout)).toMatchObject({ data: { requested: { value: -96.5 }, outcome: "not_sent" }, error: { code: "invalid_input" } });
+    // Just above the maximum in digits a number would not keep, and beyond any number: still out of range, shown exactly (W2).
+    for (const value of ["10.0000000000000001", "9".repeat(309)]) {
+      const above = await urx(["channel", "fader", "set", "--channel", "1", "--value", value, "--json"], at.listPort);
+      expect(above.exit, value).toBe(2);
+      expect(above.stdout, value).toContain(`"requested":{"value":${value},"state":"finite","unit":"dB"}`);
+      expect(JSON.parse(above.stdout), value).toMatchObject({ data: { outcome: "not_sent" }, error: { code: "invalid_input" } });
+    }
     expect(at.requests.filter((line) => line.includes("/vd/parameters/"))).toEqual([]);
+  });
+
+  it("round a value on its exact decimal, not on the number nearest to it (W2)", async () => {
+    const at = await unit();
+    // Above the midpoint by less than a number can tell: it rounds up.
+    const pan = await urx(["channel", "pan", "set", "--channel", "1", "--value", "0.50000000000000001", "--json"], at.listPort);
+    expect(pan.exit).toBe(0);
+    expect(pan.stdout).toContain('"requested":{"value":0.50000000000000001,"state":"finite","unit":null}');
+    expect(JSON.parse(pan.stdout).data).toMatchObject({ planned: { value: 1, state: "finite" }, outcome: "accepted" });
+    expect((await urx(["channel", "pan", "set", "--channel", "1", "--value", "0.50000000000000001"], at.listPort)).stdout).toBe(
+      "channel 1: 1 accepted (requested 0.50000000000000001)\n",
+    );
+    // The same value in another form is not shown as a different request.
+    expect((await urx(["channel", "pan", "set", "--channel", "1", "--value", "2.0"], at.listPort)).stdout).toBe("channel 1: 2 accepted\n");
   });
 
   it("refuse a write, and its dry run, while the Console Lock is on, sending no setting write", async () => {
