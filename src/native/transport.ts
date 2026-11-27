@@ -175,11 +175,18 @@ class AdapterSubscription implements TransportSubscription {
 
 /** The TransportOperation the adapter hands out, keeping its native owner. */
 class AdapterOperation implements TransportOperation {
-  constructor(readonly native: NativeOperation) {}
+  readonly #finished: (operation: AdapterOperation) => void;
+  constructor(
+    readonly native: NativeOperation,
+    finished: (operation: AdapterOperation) => void,
+  ) {
+    this.#finished = finished;
+  }
   cancel(): void {
     this.native.cancel();
   }
   finish(): void {
+    this.#finished(this);
     this.native.finish();
   }
 }
@@ -189,6 +196,8 @@ export class AddonTransport implements Transport {
   readonly #notifications: NotificationRouter;
   /** The operations this transport created; no other is forwarded to its connection. */
   readonly #operations = new WeakSet<AdapterOperation>();
+  /** The operations this transport created that are not finished yet. */
+  readonly #open = new Set<AdapterOperation>();
 
   /** `notifications` is the router `connection` was opened with. */
   constructor(connection: NativeRequests, notifications: NotificationRouter) {
@@ -197,9 +206,21 @@ export class AddonTransport implements Transport {
   }
 
   createOperation(): TransportOperation {
-    const operation = new AdapterOperation(this.#connection.createOperation());
+    const operation = new AdapterOperation(this.#connection.createOperation(), (finished) => this.#open.delete(finished));
     this.#operations.add(operation);
+    this.#open.add(operation);
     return operation;
+  }
+
+  /**
+   * Cancels every operation this transport created and has not finished,
+   * those that operations of its own create (a write guard's) included: a
+   * request still waiting is completed unsent, one already sent settles as
+   * it would. Releasing what was registered is not an operation's and is
+   * not stopped.
+   */
+  cancelAll(): void {
+    for (const operation of [...this.#open]) operation.cancel();
   }
 
   /** Issued by the connection, so two adapters over one connection never share a ticket. */

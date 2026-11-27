@@ -99,8 +99,13 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
       device = connected.device;
       if (run.first() === null) {
         const { connection, notifications } = connected.opened;
-        const context = new OperationContext(new AddonTransport(connection, notifications), device.model);
-        run.interruption.onInterrupt(() => context.cancel("interrupted"));
+        const transport = new AddonTransport(connection, notifications);
+        const context = new OperationContext(transport, device.model);
+        // A Ctrl+C reaches every operation on the connection, the lock guard's registration included (U5).
+        run.interruption.onInterrupt(() => {
+          context.cancel("interrupted");
+          transport.cancelAll();
+        });
         await run.note("execution", "started");
         const executing = run.mark();
         const stopped = (error: unknown) => {

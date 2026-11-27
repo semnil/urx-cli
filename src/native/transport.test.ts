@@ -39,6 +39,33 @@ function native(overrides: Partial<NativeRequests> = {}) {
 const address = { paramId: 140, x: "0", y: "-1" };
 
 describe("the addon transport", () => {
+  it("cancel every operation it created and has not finished, and none it finished", () => {
+    const made: { name: string; calls: string[] }[] = [];
+    const connection = native({
+      createOperation: () => {
+        const entry = { name: `operation-${made.length + 1}`, calls: [] as string[] };
+        made.push(entry);
+        return { cancel: () => entry.calls.push("cancel"), finish: () => entry.calls.push("finish") };
+      },
+    }).connection;
+    const transport = new AddonTransport(connection);
+    const first = transport.createOperation();
+    const second = transport.createOperation();
+    const third = transport.createOperation();
+    third.finish();
+    transport.cancelAll();
+    expect(made.map((entry) => [entry.name, entry.calls])).toEqual([
+      ["operation-1", ["cancel"]],
+      ["operation-2", ["cancel"]],
+      ["operation-3", ["finish"]],
+    ]);
+    // A cancelled operation is still finished by its owner, and is then not cancelled again.
+    first.finish();
+    second.finish();
+    transport.cancelAll();
+    expect(made.map((entry) => entry.calls.length)).toEqual([2, 2, 1]);
+  });
+
   it("forward each request with its native owner, ticket and address, and return the native record as it came", async () => {
     const { connection, calls } = native();
     const transport = new AddonTransport(connection);
