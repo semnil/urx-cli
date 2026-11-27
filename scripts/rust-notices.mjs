@@ -40,8 +40,9 @@ export function programPackages(platform = process.platform) {
  */
 export const RECORDED_TEXTS = {
   // The LICENSE of https://github.com/napi-rs/napi-rs (blob 7fe7e35, last changed in ab2a003),
-  // the repository both crates name; their packages hold no license file.
-  napi: { version: "3.16.2", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
+  // the repository both crates name; their packages hold no license file. napi 3.16.3 was
+  // published from 7c3a649, whose LICENSE is that blob.
+  napi: { version: "3.16.3", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
   "napi-sys": { version: "3.4.1", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
 };
 

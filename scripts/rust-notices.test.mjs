@@ -339,7 +339,7 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
 
   it("record napi-rs's license for the two napi crates the addon links, as checked", () => {
     expect(RECORDED_TEXTS).toEqual({
-      napi: { version: "3.16.2", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
+      napi: { version: "3.16.3", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
       "napi-sys": { version: "3.4.1", license: "MIT", repository: "https://github.com/napi-rs/napi-rs", path: "notices/napi-rs.txt", from: "the LICENSE of https://github.com/napi-rs/napi-rs" },
     });
   });
