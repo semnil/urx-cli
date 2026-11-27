@@ -179,7 +179,9 @@ function run(
     { mode: 0o755 },
   );
   const path = join(dir, "block.sh");
-  writeFileSync(path, BLOCK);
+  // The stubs go first on PATH from inside the script as well: Git for Windows' bash puts its
+  // own /usr/bin, which holds a real `sleep`, ahead of the PATH it was started with.
+  writeFileSync(path, `PATH="$PWD/bin:$PATH"\n${BLOCK}`);
   // GitHub's default shell for a `run:` block with no `shell:` key is `bash -e {0}`.
   const proc = spawnSync("bash", ["-e", path], {
     encoding: "utf8",
