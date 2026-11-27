@@ -197,8 +197,17 @@ pub fn install(
         if stop() {
             return Err(Problem::Interrupted);
         }
-        // A name nothing is at: a folder there the record does not name is left as it is.
-        let (staging_name, staging_path) = free_work_name(layout, &parent, &tag)?;
+        // A name nothing is at, other than the interrupted run's: a folder there the record does
+        // not name is left as it is, and the release is assembled anew.
+        let (staging_name, staging_path) = free_work_name(
+            layout,
+            &parent,
+            &tag,
+            state
+                .as_ref()
+                .and_then(|state| state.work.as_ref())
+                .map(|work| work.name.as_str()),
+        )?;
         let failed = |_| Problem::Write(staging_path.clone());
         // Root's alone while it is assembled.
         let staging = sys::make_folder_at(&parent, &staging_name, 0o700).map_err(failed)?;
@@ -343,9 +352,15 @@ fn c_last(path: &Path) -> CString {
     .unwrap_or_default()
 }
 
-/// The first work folder name beside the root nothing is at: the root's
-/// name, `.install-`, the tag, and a counter after the first.
-fn free_work_name(layout: &Layout, parent: &Fd, tag: &str) -> Result<(CString, PathBuf), Problem> {
+/// The first work folder name beside the root nothing is at, other than
+/// `left` (the work folder an interrupted run left, even once it is gone):
+/// the root's name, `.install-`, the tag, and a counter after the first.
+fn free_work_name(
+    layout: &Layout,
+    parent: &Fd,
+    tag: &str,
+    left: Option<&str>,
+) -> Result<(CString, PathBuf), Problem> {
     let first = place::staging(layout, tag);
     for count in 1..=64u32 {
         let path = if count == 1 {
@@ -357,6 +372,9 @@ fn free_work_name(layout: &Layout, parent: &Fd, tag: &str) -> Result<(CString, P
             ))
         };
         let name = c_last(&path);
+        if left.is_some_and(|left| left.as_bytes() == name.as_bytes()) {
+            continue;
+        }
         if sys::entry_at(parent, &name)
             .map_err(|_| Problem::Write(path.clone()))?
             .is_none()

@@ -1389,3 +1389,33 @@ fn a_release_manifest_in_the_work_folder_other_than_the_recorded_one_stops_the_r
     assert!(!work.exists());
     assert!(state_of(&scene).is_none());
 }
+
+#[test]
+fn a_resumed_installation_assembles_under_a_name_other_than_the_interrupted_run_s() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &stop_at(5)),
+        Err(Problem::Interrupted)
+    );
+    let first = work_folder(&scene, &expected);
+    assert!(first.join(MANIFEST).is_file());
+    // Resumed and stopped at its first write: the interrupted folder, holding nothing but the
+    // release's files, is gone, and the release is assembled under the next name.
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &stop_at(3)),
+        Err(Problem::Interrupted)
+    );
+    assert!(!first.exists());
+    let second = format!("{}-2", first.file_name().unwrap().to_string_lossy());
+    assert_eq!(
+        state_of(&scene).unwrap().work.map(|work| work.name),
+        Some(second.clone())
+    );
+    assert!(first.with_file_name(&second).is_dir());
+    // The next run goes back to the first name, free again.
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    assert!(no_work_folder(&scene));
+    assert_eq!(walk(&scene.layout.root), files_of(&scene, "image"));
+    assert!(launcher_accepts(&scene));
+}
