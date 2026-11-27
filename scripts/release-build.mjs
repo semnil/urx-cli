@@ -12,15 +12,19 @@
 // replaced. The launcher is built from the same export into the same target
 // directory and placed at dist-release/launcher/ for the bundle
 // (scripts/build-bundle.mjs), and on macOS the removal tool with it, at
-// dist-release/maintenance/urx-uninstall (K20).
+// dist-release/maintenance/urx-uninstall (K20). The licenses of the
+// third-party Rust crates in those programs, read from the export's Cargo.lock
+// and the crates' packages (scripts/rust-notices.mjs), are written to
+// dist-release/notices/rust-crates.txt.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
+import { rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
@@ -122,6 +126,9 @@ export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex"
 
 /** The record of the files a release build made in its output, each with its SHA-256 and size, kept in that output. */
 export const RELEASE_FILES = "release-files.json";
+
+/** The licenses of the third-party Rust crates in a release's programs, in its output. */
+export const RUST_NOTICES = "notices/rust-crates.txt";
 
 /** Each file under `root` but `excluded`, with its SHA-256 and size. */
 export function describeFiles(root, excluded) {
@@ -351,6 +358,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
+    // The licenses of the third-party Rust crates in those programs, from this export's Cargo.lock.
+    mkdirSync(join(staging, "notices"), { recursive: true });
+    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, environment));
     writeReleaseFiles(staging);
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);

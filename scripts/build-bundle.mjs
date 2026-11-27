@@ -16,7 +16,8 @@
 //   app/                         the compiled CLI and the real common package
 //   native/urx-native.node       the addon
 //   maintenance/urx-uninstall    the removal tool (macOS only, K20)
-//   notices/                     the licenses of the CLI, urx-device and Node
+//   notices/                     the licenses of the CLI, urx-device, Node and
+//                                the third-party Rust crates in the programs
 //   release-manifest.json        relative paths, hashes and identities
 //
 // Usage: node scripts/build-bundle.mjs --node-archive <path>
@@ -27,7 +28,7 @@ import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, RUST_NOTICES, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -157,17 +158,19 @@ export function assemble({ release, releaseFiles, node, notices, staging, platfo
   const bad = releaseFiles.find((path) => !isRecordedPath(path));
   if (bad !== undefined) throw new Error(`the release output's record names a path outside it: ${JSON.stringify(bad)}`);
   if (new Set(releaseFiles.map((path) => path.toLowerCase())).size !== releaseFiles.length) throw new Error("the release output's record names a file twice");
-  for (const required of [launcher, addon, "main.js", ...tools]) {
+  for (const required of [launcher, addon, "main.js", RUST_NOTICES, ...tools]) {
     if (!releaseFiles.includes(required)) throw new Error(`the release output's record names no ${required}`);
   }
   copy(join(release, ...launcher.split("/")), "bin", `urx${platform.exe}`);
   copy(join(node, ...platform.runtimeInArchive), "runtime", `node${platform.exe}`);
   copy(join(release, ...addon.split("/")), "native", "urx-native.node");
   for (const tool of tools) copy(join(release, ...tool.split("/")), ...tool.split("/"));
+  copy(join(release, ...RUST_NOTICES.split("/")), ...RUST_NOTICES.split("/"));
   // The compiled CLI and the common package; the addon, the launcher and the maintenance tools have places of their own.
   for (const path of releaseFiles) {
-    if (path === launcher || path === addon || tools.includes(path)) continue;
+    if (path === launcher || path === addon || path === RUST_NOTICES || tools.includes(path)) continue;
     if (path.startsWith("launcher/")) throw new Error(`the release output's record names an unknown launcher file ${path}`);
+    if (path.startsWith("notices/")) throw new Error(`the release output's record names an unknown notices file ${path}`);
     if (path.startsWith("maintenance/")) throw new Error(`the release output's record names an unknown maintenance file ${path}`);
     copy(join(release, ...path.split("/")), "app", ...path.split("/"));
   }
