@@ -24,6 +24,9 @@ pub struct Layout {
     pub maintenance: PathBuf,
     /// The owner of everything maintenance makes (root).
     pub owner: u32,
+    /// The highest folder whose permissions decide whether other users reach
+    /// the installation: `/` for the fixed places.
+    pub top: PathBuf,
 }
 
 impl Layout {
@@ -34,6 +37,7 @@ impl Layout {
             link: PathBuf::from("/usr/local/bin/urx"),
             maintenance: PathBuf::from("/Library/Application Support/urx-cli-maintenance"),
             owner: 0,
+            top: PathBuf::from("/"),
         }
     }
 
@@ -75,6 +79,7 @@ pub struct Held {
     folder: Fd,
     _gate: std::fs::File,
     path: PathBuf,
+    owner: u32,
 }
 
 /// How maintenance takes the gate.
@@ -118,6 +123,10 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
     ) {
         return Err(unusable());
     }
+    // Under a write hold, the folder is given the mode every user's CLI needs to reach the gate.
+    if access != Access::Read {
+        sys::set_folder_mode(&folder, 0o755).map_err(|_| unusable())?;
+    }
     let gate_name = name(GATE);
     let gate = match sys::entry_at(&folder, &gate_name).map_err(|_| unusable())? {
         None if create => {
@@ -132,6 +141,10 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
             let (gate, entry) = sys::open_file_at(&folder, &gate_name).map_err(|_| unusable())?;
             if !is_ours(&entry, Kind::File, layout.owner) || entry.size != 0 {
                 return Err(unusable());
+            }
+            // Every user's CLI opens it for reading (K21).
+            if access != Access::Read {
+                sys::set_mode(&gate, 0o644).map_err(|_| unusable())?;
             }
             gate
         }
@@ -155,6 +168,7 @@ pub fn hold(layout: &Layout, access: Access) -> Result<Option<Held>, Problem> {
         folder,
         _gate: gate,
         path: path.clone(),
+        owner: layout.owner,
     }))
 }
 
@@ -196,7 +210,7 @@ impl Held {
         let state_name = name(STATE);
         let pending_name = pending(&state_name);
         let failed = |_| Problem::Write(self.path.join(STATE));
-        sys::remove_at(&self.folder, &pending_name, false).map_err(failed)?;
+        self.remove_pending_state()?;
         let mut file = sys::create_file_at(&self.folder, &pending_name).map_err(failed)?;
         file.write_all(&state.to_bytes()).map_err(failed)?;
         sys::set_mode(&file, 0o644).map_err(failed)?;
@@ -206,10 +220,27 @@ impl Held {
         sys::sync(self.folder.raw()).map_err(failed)
     }
 
+    /// Removes a pending state record an interrupted write left. The
+    /// maintenance folder is the installation's own (K21), so a regular file
+    /// of the owner under that name is maintenance's; anything else there
+    /// stops maintenance.
+    fn remove_pending_state(&self) -> Result<(), Problem> {
+        let pending_name = pending(&name(STATE));
+        match sys::entry_at(&self.folder, &pending_name).map_err(|_| self.unusable())? {
+            None => Ok(()),
+            Some(entry) if entry.kind == Kind::File && entry.owner == self.owner => {
+                sys::remove_at(&self.folder, &pending_name, false)
+                    .map_err(|_| Problem::Write(self.path.join(STATE)))?;
+                Ok(())
+            }
+            Some(_) => Err(self.unusable()),
+        }
+    }
+
     /// Removes the state record, keeping the gate and its folder (K21).
     pub fn remove_state(&self) -> Result<(), Problem> {
         let failed = |_| Problem::Write(self.path.join(STATE));
-        sys::remove_at(&self.folder, &pending(&name(STATE)), false).map_err(failed)?;
+        self.remove_pending_state()?;
         sys::remove_at(&self.folder, &name(STATE), false).map_err(failed)?;
         sys::sync(self.folder.raw()).map_err(failed)
     }
@@ -221,11 +252,7 @@ impl Held {
 pub fn open_root(layout: &Layout, create: bool) -> Result<Option<Fd>, Problem> {
     let (parent_path, root_name) = split(&layout.root);
     if create {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o755)
-            .create(parent_path)
-            .map_err(|_| Problem::Write(parent_path.to_path_buf()))?;
+        make_system_folders(parent_path).map_err(|_| Problem::Write(parent_path.to_path_buf()))?;
     }
     let parent = match sys::open_system_folder(parent_path) {
         Ok(parent) => parent,
@@ -300,11 +327,7 @@ fn link_state_in(parent: &Fd, link_name: &CStr, layout: &Layout) -> Result<LinkS
 pub fn make_link(layout: &Layout) -> Result<(), Problem> {
     let (parent_path, link_name) = split(&layout.link);
     let failed = || Problem::Write(layout.link.clone());
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(parent_path)
-        .map_err(|_| failed())?;
+    make_system_folders(parent_path).map_err(|_| failed())?;
     let parent = sys::open_system_folder(parent_path).map_err(|_| failed())?;
     match link_state_in(&parent, &link_name, layout)? {
         LinkState::Owned => Ok(()),
@@ -336,4 +359,39 @@ pub fn remove_link(layout: &Layout) -> Result<bool, Problem> {
     Ok(true)
 }
 
-use std::os::unix::fs::DirBuilderExt;
+/// Makes the missing folders of the absolute `path`, each 0755 whatever the
+/// umask, so that every user passes through them.
+fn make_system_folders(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let missing: Vec<&Path> = path
+        .ancestors()
+        .take_while(|folder| std::fs::symlink_metadata(folder).is_err())
+        .collect();
+    for folder in missing.into_iter().rev() {
+        std::fs::create_dir(folder)?;
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// Checks that every user passes through each folder above the root, the
+/// command link and the maintenance folder, up to the layout's top: a folder
+/// without search permission for others keeps every other user from the
+/// command, the installed files or the gate. Folders not there yet are made
+/// 0755 when they are needed.
+pub fn check_reachable(layout: &Layout) -> Result<(), Problem> {
+    use std::os::unix::fs::PermissionsExt;
+    for place in [&layout.root, &layout.link, &layout.maintenance] {
+        for folder in place.parent().into_iter().flat_map(Path::ancestors) {
+            if !folder.starts_with(&layout.top) {
+                break;
+            }
+            if let Ok(found) = std::fs::metadata(folder) {
+                if found.permissions().mode() & 0o001 == 0 {
+                    return Err(Problem::Unreachable(folder.to_path_buf()));
+                }
+            }
+        }
+    }
+    Ok(())
+}

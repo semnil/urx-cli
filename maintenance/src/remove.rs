@@ -1,69 +1,87 @@
 //! Removal under K20: under the exclusive gate, the state record says
 //! `removing` before anything is deleted; the command link goes only while it
 //! still points to the installation, each owned file goes only while it is a
-//! regular file, and folders go only once they are empty. Anything else is
-//! kept and reported. The state record is deleted last, once every owned
+//! regular file under exactly its spelling, the installed removal tool goes
+//! last of the files, and folders go only once they are empty. Anything else
+//! is kept and reported. The state record is deleted last, once every owned
 //! file is gone; the gate and its folder stay (K21).
 
 use crate::place::{self, Access, Layout, LinkState};
 use crate::records::{Phase, State};
 use crate::sys::{self, Fd, Kind};
-use crate::tree::{self, WalkError};
+use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
+
+/// The installed removal tool, removed after every other owned file.
+const TOOL: &str = "maintenance/urx-uninstall";
 
 /// What happened to one owned path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
     Removed,
-    /// Nothing was there.
+    /// Nothing was there under exactly this spelling.
     Missing,
     /// Something other than the installation's file was there, at this path
     /// under the root, and was kept.
     Kept(String),
 }
 
-/// Removes the owned file `path` under `root` while it is a regular file.
-pub(crate) fn remove_owned(layout: &Layout, root: &Fd, path: &str) -> Result<Removal, Problem> {
-    let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), false) {
+/// Removes the owned file `path` under `root` while it is a regular file
+/// listed under exactly that spelling: a file the file system finds only
+/// under another letter case is another path's, and is kept. With
+/// `pending_ours`, a pending file beside it is maintenance's and goes too.
+pub(crate) fn remove_owned(
+    layout: &Layout,
+    root: &Fd,
+    path: &str,
+    pending_ours: bool,
+) -> Result<Removal, Problem> {
+    let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Exact) {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(Removal::Missing),
         Err(WalkError::Conflict(at)) => return Ok(Removal::Kept(at)),
         Err(WalkError::Io(_)) => return Err(Problem::Write(layout.root.join(path))),
     };
     let failed = |_| Problem::Write(layout.root.join(path));
-    // A pending file maintenance left beside it is maintenance's too.
-    sys::remove_at(&parent, &place::pending(&name), false).map_err(failed)?;
-    match sys::entry_at(&parent, &name).map_err(failed)? {
-        None => Ok(Removal::Missing),
-        Some(entry) if entry.kind == Kind::File => {
+    if pending_ours {
+        let pending = place::pending(&name);
+        if let Spelled::Exact(entry) = tree::spelled(&parent, &pending).map_err(failed)? {
+            if entry.kind == Kind::File {
+                sys::remove_at(&parent, &pending, false).map_err(failed)?;
+            }
+        }
+    }
+    match tree::spelled(&parent, &name).map_err(failed)? {
+        Spelled::Missing | Spelled::Other { .. } => Ok(Removal::Missing),
+        Spelled::Exact(entry) if entry.kind == Kind::File => {
             sys::remove_at(&parent, &name, false).map_err(failed)?;
             sys::flush(parent.raw()).map_err(failed)?;
             Ok(Removal::Removed)
         }
-        Some(_) => Ok(Removal::Kept(path.to_owned())),
+        Spelled::Exact(_) => Ok(Removal::Kept(path.to_owned())),
     }
 }
 
 /// Removes the folders of `path` under `root` that are empty, deepest
-/// first, stopping at the first that is not.
+/// first, stopping at the first that is not, or that is there only under
+/// another spelling.
 pub(crate) fn prune(layout: &Layout, root: &Fd, path: &str) -> Result<(), Problem> {
     let names: Vec<&str> = path.split('/').collect();
     for depth in (1..names.len()).rev() {
         let folder = names[..depth].join("/");
-        let (parent, name) = match tree::parent_of(root, &folder, Some(layout.owner), false) {
+        let failed = || Problem::Write(layout.root.join(&folder));
+        let (parent, name) = match tree::parent_of(root, &folder, Some(layout.owner), How::Exact) {
             Ok(Some(found)) => found,
             Ok(None) | Err(WalkError::Conflict(_)) => return Ok(()),
-            Err(WalkError::Io(_)) => return Err(Problem::Write(layout.root.join(&folder))),
+            Err(WalkError::Io(_)) => return Err(failed()),
         };
-        match sys::entry_at(&parent, &name) {
-            Ok(Some(entry)) if place::is_ours(&entry, Kind::Folder, layout.owner) => {}
-            Ok(None) => continue,
+        match tree::spelled(&parent, &name) {
+            Ok(Spelled::Exact(entry)) if place::is_ours(&entry, Kind::Folder, layout.owner) => {}
+            Ok(Spelled::Missing) => continue,
             _ => return Ok(()),
         }
         match sys::remove_at(&parent, &name, true) {
-            Ok(_) => {
-                sys::flush(parent.raw()).map_err(|_| Problem::Write(layout.root.join(&folder)))?
-            }
+            Ok(_) => sys::flush(parent.raw()).map_err(|_| failed())?,
             Err(error)
                 if matches!(
                     error.raw_os_error(),
@@ -72,7 +90,7 @@ pub(crate) fn prune(layout: &Layout, root: &Fd, path: &str) -> Result<(), Proble
             {
                 return Ok(())
             }
-            Err(_) => return Err(Problem::Write(layout.root.join(&folder))),
+            Err(_) => return Err(failed()),
         }
     }
     Ok(())
@@ -81,7 +99,9 @@ pub(crate) fn prune(layout: &Layout, root: &Fd, path: &str) -> Result<(), Proble
 /// Removes the installation. Without `apply` it only reports what an apply
 /// would remove, and changes nothing. `stop` is asked before each change;
 /// once it answers true, nothing more is changed and the record stays
-/// `removing`, for removal to be run again.
+/// `removing`, for removal to be run again: by this tool while it is
+/// installed, by the copy in the disk image or the recovery ZIP once the
+/// installed one is gone.
 pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Result<Report, Problem> {
     let held = place::hold(
         layout,
@@ -129,6 +149,8 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         return Ok(report);
     }
     let held = held.expect("an apply holds the gate");
+    // A pending file is maintenance's only while a run of its own is unfinished.
+    let pending_ours = state.phase != Phase::Complete;
     if stop() {
         return Err(Problem::Interrupted);
     }
@@ -146,33 +168,56 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
             layout.link.display()
         ));
     }
-    if let Some(root) = &root {
-        for path in &state.owned {
-            if stop() {
-                return Err(Problem::Interrupted);
+    // The removal tool last, so that while any other owned file is left, the installed one is too.
+    let mut order: Vec<&String> = state
+        .owned
+        .iter()
+        .filter(|path| path.as_str() != TOOL)
+        .collect();
+    order.extend(state.owned.iter().filter(|path| path.as_str() == TOOL));
+    let mut tool_gone = false;
+    // Once the installed tool is gone, a removal left unfinished is finished by another copy.
+    let unfinished = |problem: Problem, tool_gone: bool| {
+        if tool_gone && matches!(problem, Problem::Interrupted | Problem::Write(_)) {
+            Problem::RemovalUnfinished {
+                interrupted: problem == Problem::Interrupted,
             }
-            if let Removal::Kept(at) = remove_owned(layout, root, path)? {
-                report.line(format!(
+        } else {
+            problem
+        }
+    };
+    if let Some(root) = &root {
+        for path in order {
+            if stop() {
+                return Err(unfinished(Problem::Interrupted, tool_gone));
+            }
+            match remove_owned(layout, root, path, pending_ours)
+                .map_err(|problem| unfinished(problem, tool_gone))?
+            {
+                Removal::Kept(at) => report.line(format!(
                     "Kept {}: it is not a file the installation made.",
                     layout.root.join(at).display()
-                ));
+                )),
+                Removal::Removed | Removal::Missing => {}
             }
+            tool_gone |= path == TOOL;
         }
         for path in &state.owned {
-            prune(layout, root, path)?;
+            prune(layout, root, path).map_err(|problem| unfinished(problem, true))?;
         }
     }
     if stop() {
-        return Err(Problem::Interrupted);
+        return Err(unfinished(Problem::Interrupted, true));
     }
-    let root_kept = remove_root(layout)?;
+    let root_kept = remove_root(layout).map_err(|problem| unfinished(problem, true))?;
     if root_kept {
         report.line(format!(
             "Kept {}: it holds files the installation did not make.",
             layout.root.display()
         ));
     }
-    held.remove_state()?;
+    held.remove_state()
+        .map_err(|problem| unfinished(problem, true))?;
     report.line(format!("Removed urx-cli {}.", state.release));
     Ok(report)
 }

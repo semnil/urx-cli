@@ -112,8 +112,8 @@ pub fn verify(path: &Path, expected: &str) -> Result<Source, Problem> {
 
 /// The SHA-256, size and mode of the regular file at `path` under `root`.
 fn read_file(root: &Fd, path: &str) -> Result<(String, u64, u32), WalkError> {
-    let (parent, name) =
-        tree::parent_of(root, path, None, false)?.ok_or(WalkError::Conflict(path.to_owned()))?;
+    let (parent, name) = tree::parent_of(root, path, None, tree::How::Lookup)?
+        .ok_or(WalkError::Conflict(path.to_owned()))?;
     let (mut file, entry) = sys::open_file_at(&parent, &name)?;
     let (sha256, size) = tree::hash(&mut file)?;
     Ok((sha256, size, entry.mode))

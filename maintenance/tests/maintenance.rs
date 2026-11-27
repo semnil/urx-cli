@@ -17,6 +17,12 @@ use urx_maintenance::Problem;
 type Run<'a> = &'a dyn Fn(&dyn Fn() -> bool) -> Result<(), Problem>;
 /// A change to a release tree.
 type Change = Box<dyn Fn(&Path)>;
+/// The old release's files, the new release's, and the paths the new layout must have.
+type LayoutChange = (
+    &'static [(&'static str, &'static str)],
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
 
 struct Scene {
     base: PathBuf,
@@ -45,6 +51,8 @@ fn scene() -> Scene {
         maintenance: base.join("Library/urx-cli-maintenance"),
         // SAFETY: geteuid has no preconditions.
         owner: unsafe { libc::geteuid() },
+        // The temporary folder above it may be the user's alone.
+        top: base.clone(),
     };
     Scene { base, layout }
 }
@@ -530,10 +538,14 @@ fn a_removal_interrupted_at_any_point_stays_removing_and_a_rerun_finishes_it() {
             asked.set(asked.get() + 1);
             asked.get() >= at
         };
-        assert_eq!(
-            uninstall(&scene.layout, true, &stop),
-            Err(Problem::Interrupted),
-            "at {at}"
+        let stopped = uninstall(&scene.layout, true, &stop);
+        // Once the installed tool is gone, the report names another copy.
+        assert!(
+            matches!(
+                stopped,
+                Err(Problem::Interrupted) | Err(Problem::RemovalUnfinished { interrupted: true })
+            ),
+            "at {at}: {stopped:?}"
         );
         let state = state_of(&scene).unwrap();
         if at > 1 {
@@ -562,4 +574,241 @@ fn an_interrupted_removal_is_finished_by_the_same_release_installer_too() {
     );
     install(&scene.layout, &source, &expected, true, &never).unwrap();
     assert!(launcher_accepts(&scene));
+}
+
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_file_someone_put_where_a_new_release_adds_one_stops_the_update_before_anything_changes() {
+    let scene = scene();
+    let (old, old_digest) = release(&scene, "old", "0.1.0", &[]);
+    install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+    fs::write(scene.layout.root.join("app/notes"), "user data").unwrap();
+    let before = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
+    let (new, new_digest) = release(&scene, "new", "0.2.0", &[("app/notes", "release 2")]);
+    let conflict = Err(Problem::Conflict(scene.layout.root.join("app/notes")));
+    assert_eq!(
+        install(&scene.layout, &new, &new_digest, false, &never),
+        conflict
+    );
+    assert_eq!(
+        install(&scene.layout, &new, &new_digest, true, &never),
+        conflict
+    );
+    assert_eq!(
+        fs::read_to_string(scene.layout.root.join("app/notes")).unwrap(),
+        "user data"
+    );
+    assert_eq!(
+        fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
+        before
+    );
+    assert!(launcher_accepts(&scene));
+    // And the removal keeps it.
+    uninstall(&scene.layout, true, &never).unwrap();
+    assert_eq!(
+        fs::read_to_string(scene.layout.root.join("app/notes")).unwrap(),
+        "user data"
+    );
+}
+
+#[test]
+fn a_pending_name_someone_used_is_kept_and_one_an_unfinished_run_left_is_cleared() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    // Beside a complete installation, a pending name is not maintenance's.
+    let foreign = scene.layout.root.join("app/main.js.urx-pending");
+    fs::write(&foreign, "user data").unwrap();
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &never),
+        Err(Problem::Conflict(foreign.clone()))
+    );
+    uninstall(&scene.layout, true, &never).unwrap();
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "user data");
+    fs::remove_dir_all(&scene.layout.root).unwrap();
+    // While a run of maintenance's is unfinished, one beside an owned path is its own.
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    let asked = Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() >= 3
+    };
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &stop),
+        Err(Problem::Interrupted)
+    );
+    fs::write(
+        scene.layout.root.join("app/main.js.urx-pending"),
+        "left by a crash",
+    )
+    .unwrap();
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    assert!(!scene.layout.root.join("app/main.js.urx-pending").exists());
+    assert!(launcher_accepts(&scene));
+}
+
+#[test]
+fn an_update_that_changes_only_letter_case_or_turns_a_file_into_a_folder_ends_with_the_new_layout()
+{
+    let changes: [LayoutChange; 4] = [
+        (
+            &[("app/readme", "old")],
+            &[("app/README", "new")],
+            &["app/README"],
+        ),
+        (
+            &[("app/module/x.js", "old")],
+            &[("app/Module/x.js", "new")],
+            &["app/Module/x.js"],
+        ),
+        (
+            &[("app/part", "old")],
+            &[("app/part/index.js", "new")],
+            &["app/part/index.js"],
+        ),
+        (
+            &[("app/part/index.js", "old")],
+            &[("app/part", "new")],
+            &["app/part"],
+        ),
+    ];
+    for (old_files, new_files, expected) in changes {
+        let scene = scene();
+        let (old, old_digest) = release(&scene, "old", "0.1.0", old_files);
+        install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+        let (new, new_digest) = release(&scene, "new", "0.2.0", new_files);
+        install(&scene.layout, &new, &new_digest, true, &never).unwrap();
+        assert!(launcher_accepts(&scene), "{new_files:?}");
+        for path in expected {
+            // The new file, under exactly its new spelling.
+            let at = scene.layout.root.join(path);
+            assert_eq!(fs::read_to_string(&at).unwrap(), "new", "{path}");
+            let mut folder = scene.layout.root.clone();
+            for name in path.split('/') {
+                assert!(
+                    names_in(&folder).contains(&name.to_owned()),
+                    "{name} in {}: {:?}",
+                    folder.display(),
+                    names_in(&folder)
+                );
+                folder.push(name);
+            }
+        }
+        assert!(!walk(&scene.layout.root)
+            .iter()
+            .any(|path| old_files.iter().any(|(old, _)| path == old)
+                && !expected.contains(&path.as_str())));
+        // Running the same release again keeps it.
+        install(&scene.layout, &new, &new_digest, true, &never).unwrap();
+        assert!(launcher_accepts(&scene), "{new_files:?}");
+    }
+}
+
+#[test]
+fn a_user_file_in_a_folder_a_new_release_turns_into_a_file_stops_the_update_with_the_old_release_usable(
+) {
+    let scene = scene();
+    let (old, old_digest) = release(&scene, "old", "0.1.0", &[("app/part/index.js", "old")]);
+    install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+    fs::write(scene.layout.root.join("app/part/mine"), "user data").unwrap();
+    let (new, new_digest) = release(&scene, "new", "0.2.0", &[("app/part", "new")]);
+    assert_eq!(
+        install(&scene.layout, &new, &new_digest, true, &never),
+        Err(Problem::Conflict(scene.layout.root.join("app/part")))
+    );
+    assert!(launcher_accepts(&scene));
+    assert_eq!(
+        fs::read_to_string(scene.layout.root.join("app/part/index.js")).unwrap(),
+        "old"
+    );
+}
+
+#[test]
+fn an_apply_gives_the_installation_the_modes_every_user_needs() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    for folder in [
+        scene.layout.root.clone(),
+        scene.layout.root.join("app"),
+        scene.layout.maintenance.clone(),
+    ] {
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(
+        scene.layout.maintenance.join("gate.lock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    for folder in [
+        scene.layout.root.clone(),
+        scene.layout.root.join("app"),
+        scene.layout.maintenance.clone(),
+    ] {
+        assert_eq!(mode(&folder), 0o755, "{}", folder.display());
+    }
+    assert_eq!(mode(&scene.layout.maintenance.join("gate.lock")), 0o644);
+    // A folder above the installation that other users cannot pass stops it before any change.
+    let usr = scene.base.join("usr");
+    fs::set_permissions(&usr, fs::Permissions::from_mode(0o700)).unwrap();
+    let before = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &never),
+        Err(Problem::Unreachable(usr.clone()))
+    );
+    assert_eq!(
+        fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
+        before
+    );
+    fs::set_permissions(&usr, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn the_installed_removal_tool_goes_last_and_a_removal_stopped_after_it_names_another_copy() {
+    let probe = scene();
+    let (source, expected) = release(&probe, "image", "0.1.0", &[("notices/LICENSE", "MIT")]);
+    install(&probe.layout, &source, &expected, true, &never).unwrap();
+    let total = questions(&|stop| uninstall(&probe.layout, true, stop).map(|_| ()));
+    for at in 1..=total {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[("notices/LICENSE", "MIT")]);
+        install(&scene.layout, &source, &expected, true, &never).unwrap();
+        let asked = Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= at
+        };
+        let result = uninstall(&scene.layout, true, &stop);
+        let tool = scene.layout.root.join("maintenance/urx-uninstall");
+        let others_left = scene.layout.root.exists()
+            && walk(&scene.layout.root)
+                .iter()
+                .any(|path| path != "maintenance/urx-uninstall");
+        if others_left {
+            assert!(
+                tool.exists(),
+                "at {at}: another owned file is left without the removal tool"
+            );
+            assert_eq!(result, Err(Problem::Interrupted), "at {at}");
+        } else if !tool.exists() {
+            assert_eq!(
+                result,
+                Err(Problem::RemovalUnfinished { interrupted: true }),
+                "at {at}"
+            );
+            assert_eq!(result.unwrap_err().exit_code(), 130);
+        }
+        // Another copy finishes it.
+        uninstall(&scene.layout, true, &never).unwrap();
+        assert!(state_of(&scene).is_none(), "at {at}");
+    }
 }

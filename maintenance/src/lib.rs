@@ -51,6 +51,12 @@ pub enum Problem {
     Verify(PathBuf),
     /// Ctrl+C (or a termination signal) arrived; nothing more was changed.
     Interrupted,
+    /// Other users cannot pass through this folder, so they could not reach
+    /// the command, the installed files or the gate.
+    Unreachable(PathBuf),
+    /// A removal stopped after the installed removal tool was removed, by an
+    /// interruption or a failed change: another copy of it finishes the removal.
+    RemovalUnfinished { interrupted: bool },
 }
 
 impl Problem {
@@ -89,12 +95,20 @@ impl Problem {
             Problem::Interrupted => {
                 "Interrupted before it finished. The installation is incomplete: run the same command again.".to_owned()
             }
+            Problem::Unreachable(path) => format!(
+                "Other users cannot pass through {}, so they could not run urx. Let every user search it (mode o+x), then run the installer again.",
+                path.display()
+            ),
+            Problem::RemovalUnfinished { .. } => "The removal did not finish, and the installed urx-uninstall is already removed. Finish it with sudo and --apply from the urx-uninstall on the urx-cli disk image (urx-cli/maintenance/urx-uninstall) or in the recovery ZIP.".to_owned(),
         }
     }
 
     /// The exit status: 130 for an interruption, 1 otherwise.
     pub fn exit_code(&self) -> i32 {
-        if *self == Problem::Interrupted {
+        if matches!(
+            self,
+            Problem::Interrupted | Problem::RemovalUnfinished { interrupted: true }
+        ) {
             130
         } else {
             1

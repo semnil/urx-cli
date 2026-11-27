@@ -182,6 +182,13 @@ pub fn set_mode(file: &File, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Gives the open folder `folder` the permission bits `mode`.
+pub fn set_folder_mode(folder: &Fd, mode: u32) -> io::Result<()> {
+    // SAFETY: `folder` is open.
+    checked(unsafe { libc::fchmod(folder.0, mode as libc::mode_t) })?;
+    Ok(())
+}
+
 /// Removes the entry `name` (a folder when `folder`) from the open folder
 /// `parent`, not following a link; false when nothing was there.
 pub fn remove_at(parent: &Fd, name: &CStr, folder: bool) -> io::Result<bool> {

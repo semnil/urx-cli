@@ -38,13 +38,15 @@ fn is_digest(text: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A relative path of an owned file: `/`-separated names, none empty, `.`
-/// or `..`, with no NUL, no control character and no name ending with the
-/// pending suffix.
+/// A relative path of an owned file: `/`-separated names of printable ASCII,
+/// none empty, `.` or `..`, and none ending with the pending suffix. ASCII
+/// alone leaves no two spellings of one name but its letter case, which
+/// `key` folds: a file system that ignores Unicode normalization or case
+/// then finds each owned file under one name only.
 pub fn is_owned_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 1024
-        && !path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+        && path.bytes().all(|byte| (0x20..0x7f).contains(&byte))
         && path.split('/').all(|name| {
             !name.is_empty()
                 && name != "."
@@ -54,12 +56,26 @@ pub fn is_owned_path(path: &str) -> bool {
         })
 }
 
+/// The name by which a file system that ignores letter case finds `path`.
+pub fn key(path: &str) -> String {
+    path.to_ascii_lowercase()
+}
+
 /// Each path names one file, whatever the letter case (macOS file systems
-/// usually ignore it), and no path is the folder of another: `a` and `a/b`
-/// cannot both be files.
+/// usually ignore it); no path is the folder of another (`a` and `a/b`
+/// cannot both be files); and each folder is spelled one way only, so that
+/// the files of one folder are never split across two spellings of it.
 fn one_file_each(paths: &[String]) -> bool {
-    let folded: std::collections::BTreeSet<String> =
-        paths.iter().map(|path| path.to_lowercase()).collect();
+    let folded: std::collections::BTreeSet<String> = paths.iter().map(|path| key(path)).collect();
+    let mut folders = std::collections::BTreeMap::<String, &str>::new();
+    for path in paths {
+        for (at, _) in path.match_indices('/') {
+            let folder = &path[..at];
+            if *folders.entry(key(folder)).or_insert(folder) != folder {
+                return false;
+            }
+        }
+    }
     folded.len() == paths.len()
         && folded.iter().all(|path| {
             path.match_indices('/')
@@ -309,6 +325,8 @@ mod tests {
             with(file("App/main.js")),
             with(file("BIN/URX")),
             with(file("a.urx-pending/b")),
+            with(file("caf\u{e9}")),
+            with(file("App/other.js")),
             with(file("a.urx-pending")),
             with(file("line\nbreak")),
             with(serde_json::json!({ "path": "x", "sha256": "0".repeat(63), "size": 1 })),
