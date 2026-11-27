@@ -106,12 +106,14 @@ function phaseOf(failure: LifecycleFailure): OperationPhase {
 
 /**
  * The structured failure of a subscription call's failure record. A
- * cancellation reports internal_error: the adapter does not know the owner's
- * stopping cause, and K34 invents none.
+ * cancellation reports internal_error, marked `cancelled`: the adapter does
+ * not know the owner's stopping cause, and K34 invents none.
  */
 function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup): OperationFailureError<SubscriptionProgress> {
   const code: OperationCause = failure.kind === "cause" && REQUEST_CAUSES.includes(failure.code) ? (failure.code as OperationCause) : "internal_error";
-  return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup } });
+  // A cancellation is marked as one (the transport contract of urx-device 0.3.0), so the
+  // operation that owns the subscription can tell it from the call's own failure.
+  return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup }, ...(failure.kind === "cancelled" ? { cancelled: true as const } : {}) });
 }
 
 /** A record or a binding failure the adapter cannot trust: nothing is known of its effect. */

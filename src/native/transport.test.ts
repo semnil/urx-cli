@@ -218,7 +218,9 @@ describe("subscriptions through the addon transport", () => {
       progress: { cleanup: { state: "connection_closed", failure: null } },
     });
     const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
-    expect(await failureOf(make(cancelled).activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete } });
+    expect(await failureOf(make(cancelled).activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete }, cancelled: true });
+    // Only a cancellation is marked.
+    expect(await failureOf(make(rejected).activate())).not.toHaveProperty("cancelled");
     for (const record of [{ kind: "success", value: 1 }, {}, null]) {
       expect(await failureOf(make(record).activate()), JSON.stringify(record)).toEqual({ code: "internal_error", phase: "send", progress: null });
     }
