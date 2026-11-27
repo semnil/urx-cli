@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { filesUnder, platformOf } from "./build-bundle.mjs";
-import { cleanUp, outputTool, publishOutput, recordedProblems, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, isRecordedPath, outputTool, publishOutput, recordedProblems, requireNoOutput, sha256 } from "./release-build.mjs";
 
 const MANIFEST = "release-manifest.json";
 
@@ -30,12 +30,14 @@ const pascal = (text) => `'${text.replaceAll("'", "''")}'`;
  */
 export function ownedFilesInclude(manifest, manifestDigest) {
   const owned = [...manifest.files.map((file) => ({ path: file.path, sha256: file.sha256 })), { path: MANIFEST, sha256: manifestDigest }];
+  const names = new Set();
   for (const file of owned) {
-    const segments = file.path.split("/");
-    if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || /[\\:*?"<>|]/.test(segment))) {
-      throw new Error(`the manifest names a path the installer cannot hold: ${file.path}`);
-    }
-    if (!/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error(`the manifest names no SHA-256 for ${file.path}`);
+    // The same paths a release record may name: one file inside the installation on either platform.
+    if (!isRecordedPath(file.path)) throw new Error(`the manifest names a path the installer cannot hold: ${JSON.stringify(file.path)}`);
+    // Windows compares names without regard to letter case.
+    if (names.has(file.path.toLowerCase())) throw new Error(`the manifest names ${file.path} twice`);
+    names.add(file.path.toLowerCase());
+    if (!/^[0-9a-f]{64}$/.test(file.sha256 ?? "")) throw new Error(`the manifest names no SHA-256 for ${file.path}`);
   }
   return [
     "procedure LoadOwnedFiles(var Paths, Hashes: TArrayOfString);",

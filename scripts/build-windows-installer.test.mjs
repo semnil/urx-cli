@@ -32,11 +32,14 @@ describe("the Windows installer's list of owned files", () => {
     ]);
   });
 
-  it("refuses a path that leaves the installation or that Windows cannot hold, and a missing hash", () => {
-    for (const path of ["../outside.js", "app//main.js", "app/a:b.js", "/absolute.js"]) {
-      expect(() => ownedFilesInclude({ files: [{ path, sha256: hash("a") }] }, digest)).toThrow(/cannot hold/);
+  it("refuses a path that leaves the installation or that Windows cannot hold, a file named twice, and a missing hash", () => {
+    for (const path of ["../outside.js", "app//main.js", "app/a:b.js", "/absolute.js", "app/a\u0001.js", ""]) {
+      expect(() => ownedFilesInclude({ files: [{ path, sha256: hash("a") }] }, digest), JSON.stringify(path)).toThrow(/cannot hold/);
     }
     expect(() => ownedFilesInclude({ files: [{ path: "app/main.js", sha256: "x" }] }, digest)).toThrow(/no SHA-256/);
+    const twice = [{ path: "app/main.js", sha256: hash("a") }, { path: "APP/Main.js", sha256: hash("b") }];
+    expect(() => ownedFilesInclude({ files: twice }, digest)).toThrow(/names APP\/Main.js twice/);
+    expect(() => ownedFilesInclude({ files: [{ path: "release-manifest.json", sha256: hash("a") }] }, digest)).toThrow(/names release-manifest.json twice/);
   });
 });
 
