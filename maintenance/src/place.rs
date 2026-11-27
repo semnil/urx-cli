@@ -462,17 +462,24 @@ fn make_system_folders(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Checks that every user reaches the installation. Run as root for the
-/// fixed places, it asks the system: a child process switched to the user
-/// nobody tries each place as the system resolves it, links and `..`
-/// included. Otherwise (the tests, run as their own user) it walks each path
-/// itself, following links, and checks that others may search every folder
-/// passed through, up to the layout's top. Before any change (`installed`
+/// Whether reachability is judged here: only root can ask the system as
+/// another user, so only a run as root for the fixed places judges it.
+pub fn judges_reachability(layout: &Layout) -> bool {
+    sys::effective_user() == 0 && layout.owner == 0
+}
+
+/// Checks that every user reaches the installation, by asking the system: a
+/// child process switched to the user nobody tries each place as the system
+/// resolves it, links and `..` included. Before any change (`installed`
 /// false) the folders above the root, the command link and the maintenance
-/// folder are checked, as far as they exist (the rest is made 0755); once
+/// folder are tried, as far as they exist (the rest is made 0755); once
 /// installed, the command through its link, the runtime, the CLI, the addon,
-/// the release manifest, the gate and the state record too.
+/// the release manifest, the gate and the state record too. Run as anyone
+/// but root it judges nothing (`judges_reachability`): the preview says so.
 pub fn check_reachable(layout: &Layout, installed: bool) -> Result<(), Problem> {
+    if !judges_reachability(layout) {
+        return Ok(());
+    }
     let mut folders: Vec<PathBuf> = [&layout.root, &layout.link, &layout.maintenance]
         .iter()
         .filter_map(|place| place.parent())
@@ -481,101 +488,38 @@ pub fn check_reachable(layout: &Layout, installed: bool) -> Result<(), Problem> 
     if installed {
         folders.extend([layout.root.clone(), layout.maintenance.clone()]);
     }
-    if sys::effective_user() == 0 && layout.owner == 0 {
-        let mut checks: Vec<(PathBuf, sys::Need)> = folders
-            .iter()
-            .filter_map(|folder| {
-                folder
-                    .ancestors()
-                    .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
-            })
-            .map(|folder| (folder.to_path_buf(), sys::Need::Execute))
-            .collect();
-        if installed {
-            checks.extend([
-                (layout.link.clone(), sys::Need::Execute),
-                (layout.root.join("runtime/node"), sys::Need::Execute),
-                (layout.root.join("app/main.js"), sys::Need::Read),
-                (layout.root.join("native/urx-native.node"), sys::Need::Read),
-                (layout.root.join(crate::records::MANIFEST), sys::Need::Read),
-                (layout.maintenance.join(GATE), sys::Need::Read),
-                (layout.maintenance.join(STATE), sys::Need::Read),
-            ]);
-        }
-        let named: Vec<(CString, sys::Need)> = checks
-            .iter()
-            .map(|(path, need)| {
-                (
-                    CString::new(path.as_os_str().as_bytes()).unwrap_or_default(),
-                    *need,
-                )
-            })
-            .collect();
-        return match sys::reachable_as_nobody(&named) {
-            Ok(None) => Ok(()),
-            Ok(Some(index)) => Err(Problem::Unreachable(checks[index].0.clone())),
-            Err(_) => Err(Problem::Unreachable(layout.root.clone())),
-        };
+    let mut checks: Vec<(PathBuf, sys::Need)> = folders
+        .iter()
+        .filter_map(|folder| {
+            folder
+                .ancestors()
+                .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        })
+        .map(|folder| (folder.to_path_buf(), sys::Need::Execute))
+        .collect();
+    if installed {
+        checks.extend([
+            (layout.link.clone(), sys::Need::Execute),
+            (layout.root.join("runtime/node"), sys::Need::Execute),
+            (layout.root.join("app/main.js"), sys::Need::Read),
+            (layout.root.join("native/urx-native.node"), sys::Need::Read),
+            (layout.root.join(crate::records::MANIFEST), sys::Need::Read),
+            (layout.maintenance.join(GATE), sys::Need::Read),
+            (layout.maintenance.join(STATE), sys::Need::Read),
+        ]);
     }
-    let top = std::fs::canonicalize(&layout.top).unwrap_or_else(|_| layout.top.clone());
-    for path in folders {
-        traverse(&path, &top, 0).map_err(Problem::Unreachable)?;
-    }
-    Ok(())
-}
-
-/// Walks `path` one name at a time as the system resolves it, following each
-/// link to its target, and checks every folder it passes through.
-fn traverse(path: &Path, top: &Path, depth: usize) -> Result<(), PathBuf> {
-    use std::path::Component;
-    if depth > 40 {
-        return Err(path.to_path_buf());
-    }
-    let mut current = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::Normal(name) => {
-                searchable(&current, top)?;
-                let next = current.join(name);
-                match std::fs::symlink_metadata(&next) {
-                    // Not there yet: made 0755 when it is needed.
-                    Err(_) => return Ok(()),
-                    Ok(found) if found.file_type().is_symlink() => {
-                        let target = std::fs::read_link(&next).map_err(|_| next.clone())?;
-                        let resolved = if target.is_absolute() {
-                            target
-                        } else {
-                            current.join(target)
-                        };
-                        traverse(&resolved, top, depth + 1)?;
-                        current = std::fs::canonicalize(&resolved).map_err(|_| next.clone())?;
-                    }
-                    Ok(_) => current = next,
-                }
-            }
-            Component::ParentDir => {
-                current.pop();
-            }
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-        }
-    }
-    searchable(&current, top)
-}
-
-/// Whether other users may search the folder `folder`; folders outside the
-/// layout's top are not the installation's to check.
-fn searchable(folder: &Path, top: &Path) -> Result<(), PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(real) = std::fs::canonicalize(folder) else {
-        return Ok(());
-    };
-    if !real.starts_with(top) {
-        return Ok(());
-    }
-    match std::fs::metadata(&real) {
-        Ok(found) if found.is_dir() && found.permissions().mode() & 0o001 == 0 => {
-            Err(folder.to_path_buf())
-        }
-        _ => Ok(()),
+    let named: Vec<(CString, sys::Need)> = checks
+        .iter()
+        .map(|(path, need)| {
+            (
+                CString::new(path.as_os_str().as_bytes()).unwrap_or_default(),
+                *need,
+            )
+        })
+        .collect();
+    match sys::reachable_as_nobody(&named) {
+        Ok(None) => Ok(()),
+        Ok(Some(index)) => Err(Problem::Unreachable(checks[index].0.clone())),
+        Err(_) => Err(Problem::Unreachable(layout.root.clone())),
     }
 }

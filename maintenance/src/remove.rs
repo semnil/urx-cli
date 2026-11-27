@@ -10,7 +10,7 @@
 //! (K21).
 
 use crate::place::{self, Access, Layout, LinkState};
-use crate::records::{digest, pending_tag, Manifest, Phase, State, MANIFEST};
+use crate::records::{pending_tag, Phase, State, Work, MANIFEST};
 use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
@@ -38,7 +38,9 @@ pub(crate) fn remove_owned(layout: &Layout, root: &Fd, path: &str) -> Result<Rem
     let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Exact) {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(Removal::Missing),
-        Err(WalkError::Conflict(at)) => return Ok(Removal::Kept(at)),
+        // A folder on the way that is not as the installation made it: whether the file is
+        // still there cannot be told, so the removal stops with its record.
+        Err(WalkError::Conflict(at)) => return Err(Problem::Conflict(layout.root.join(at))),
         Err(WalkError::Io(_)) => return Err(Problem::Write(layout.root.join(path))),
     };
     let failed = |_| Problem::Write(layout.root.join(path));
@@ -87,46 +89,6 @@ pub(crate) fn prune(layout: &Layout, root: &Fd, path: &str) -> Result<(), Proble
     Ok(())
 }
 
-/// The files of the tree at the root that the record names. Once complete or
-/// removing, the record's owned paths. While installing, the release's when
-/// the root holds the release manifest the record names (the swap was made),
-/// the complete installation's otherwise. A file that cannot be read stops
-/// the removal before it changes anything.
-fn tree_of(layout: &Layout, root: Option<&Fd>, state: &State) -> Result<Vec<String>, Problem> {
-    if state.phase != Phase::Installing {
-        return Ok(state.owned.clone());
-    }
-    let Some(root) = root else {
-        return Ok(state.base_paths().to_vec());
-    };
-    let unreadable = || Problem::Write(layout.root.join(MANIFEST));
-    let found = match tree::parent_of(root, MANIFEST, None, How::Exact) {
-        Ok(Some((parent, name))) => {
-            match tree::spelled(&parent, &name).map_err(|_| unreadable())? {
-                Spelled::Exact(entry) if entry.kind == Kind::File => Some((parent, name)),
-                _ => None,
-            }
-        }
-        Ok(None) => None,
-        Err(_) => return Err(unreadable()),
-    };
-    let Some((parent, name)) = found else {
-        return Ok(state.base_paths().to_vec());
-    };
-    use std::io::Read;
-    let (file, _) = sys::open_file_at(&parent, &name).map_err(|_| unreadable())?;
-    let mut bytes = Vec::new();
-    file.take(8 << 20)
-        .read_to_end(&mut bytes)
-        .map_err(|_| unreadable())?;
-    if digest(&bytes) == state.manifest {
-        let manifest = Manifest::parse(&bytes).ok_or_else(unreadable)?;
-        Ok(manifest.owned())
-    } else {
-        Ok(state.base_paths().to_vec())
-    }
-}
-
 /// Removes the installation. Without `apply` it only reports what an apply
 /// would remove, and changes nothing. `stop` is asked before each change;
 /// once it answers true, nothing more is changed and the record stays
@@ -166,7 +128,8 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         return Ok(report);
     };
     let link = place::link_state(layout)?;
-    let files = tree_of(layout, root.as_ref(), &state)?;
+    // The files of the tree at the root, as the record names them (K41 as revised).
+    let files = state.root_files().to_vec();
     if !apply {
         let mut report = Report::default();
         report.line(format!(
@@ -195,10 +158,13 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
     if stop() {
         return Err(Problem::Interrupted);
     }
+    // The record keeps what is left in both places: the tree at the root, and the work folder
+    // an interrupted installation recorded.
     held.write_state(&State {
         phase: Phase::Removing,
         owned: files.clone(),
-        base: Some(files.clone()),
+        base: None,
+        placed: None,
         ..state.clone()
     })?;
     let mut report = Report::default();
@@ -226,14 +192,12 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
             layout.link.display()
         ));
     }
-    // A work folder an interrupted installation of this release left, by its recorded files.
+    // The work folder an interrupted installation recorded, by its identity and files.
     if let Some(parent) = &parent {
         let staging_path = place::staging(layout, &tag);
-        let mut listed: BTreeSet<String> = state.owned.iter().cloned().collect();
-        listed.extend(files.iter().cloned());
-        if !clear_staging(layout, parent, &staging_path, &listed).map_err(&unfinished)? {
+        if !clear_work(layout, parent, &staging_path, state.work.as_ref()).map_err(&unfinished)? {
             report.line(format!(
-                "Kept {}: it holds files the installation did not make.",
+                "Kept {}: it is not, or no longer only, the installation's work folder.",
                 staging_path.display()
             ));
         }
@@ -278,13 +242,14 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
     Ok(report)
 }
 
-/// Removes the work folder at `path` beside the root by the recorded files
-/// in it; true when it is gone or was never there.
-fn clear_staging(
+/// Removes the work folder at `path` beside the root when it is the one
+/// `work` records, by its recorded files; true when it is gone or was never
+/// there.
+fn clear_work(
     layout: &Layout,
     parent: &Fd,
     path: &Path,
-    listed: &BTreeSet<String>,
+    work: Option<&Work>,
 ) -> Result<bool, Problem> {
     let name = sys::c_name(std::os::unix::ffi::OsStrExt::as_bytes(
         path.file_name().unwrap_or_default(),
@@ -294,7 +259,13 @@ fn clear_staging(
         return Ok(true);
     };
     let failed = |_| Problem::Write(path.to_path_buf());
-    if !tree::clear_listed(&staging, "", listed, layout.owner).map_err(failed)? {
+    let Some(work) =
+        work.filter(|work| sys::entry(staging.raw()).is_ok_and(|entry| entry.id == work.id))
+    else {
+        return Ok(false);
+    };
+    let files: BTreeSet<String> = work.files.iter().cloned().collect();
+    if !tree::clear_listed(&staging, "", &files, layout.owner).map_err(failed)? {
         return Ok(false);
     }
     drop(staging);

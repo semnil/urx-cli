@@ -482,29 +482,94 @@ fn a_removal_after_an_interrupted_installation_removes_the_tree_at_the_root_and_
 }
 
 #[test]
-fn a_removal_that_cannot_read_the_installed_manifest_while_installing_changes_nothing() {
+fn a_removal_that_cannot_enter_a_folder_of_the_installation_s_stops_and_keeps_its_record() {
     let scene = scene();
-    let (old, old_digest) = release(&scene, "old", "0.1.0", &[]);
-    install(&scene.layout, &old, &old_digest, true, &never).unwrap();
-    let (new, new_digest) = release(&scene, "new", "0.2.0", &[]);
-    assert_eq!(
-        install(&scene.layout, &new, &new_digest, true, &stop_at(2)),
-        Err(Problem::Interrupted)
-    );
-    let manifest = scene.layout.root.join(MANIFEST);
-    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
-    let before = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
-    assert_eq!(
-        uninstall(&scene.layout, true, &never),
-        Err(Problem::Write(manifest.clone()))
-    );
-    assert_eq!(
-        fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
-        before
-    );
-    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[("app/plugins/x.js", "x")]);
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    for folder in ["app", "app/plugins", "maintenance"] {
+        let at = scene.layout.root.join(folder);
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o775)).unwrap();
+        let result = uninstall(&scene.layout, true, &never);
+        assert!(
+            matches!(result, Err(Problem::Conflict(ref path)) if path == &at),
+            "{folder}: {result:?}"
+        );
+        assert_eq!(state_of(&scene).unwrap().phase, Phase::Removing, "{folder}");
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     uninstall(&scene.layout, true, &never).unwrap();
     assert!(!scene.layout.root.exists());
+    assert!(state_of(&scene).is_none());
+}
+
+#[test]
+fn a_removal_stopped_right_after_it_records_removing_finishes_in_both_places_whatever_finishes_it()
+{
+    let probe = scene();
+    let (old, old_digest) = release(&probe, "old", "0.1.0", &[("app/old.js", "old")]);
+    install(&probe.layout, &old, &old_digest, true, &never).unwrap();
+    let (new, new_digest) = release(&probe, "new", "0.2.0", &[("app/new.js", "new")]);
+    let total =
+        questions(&|stop| install(&probe.layout, &new, &new_digest, true, stop).map(|_| ()));
+    for update in [false, true] {
+        for at in 2..=total {
+            for finish in ["removal", "installer"] {
+                let scene = scene();
+                let (new, new_digest) = release(&scene, "new", "0.2.0", &[("app/new.js", "new")]);
+                if update {
+                    let (old, old_digest) =
+                        release(&scene, "old", "0.1.0", &[("app/old.js", "old")]);
+                    install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+                }
+                let _ = install(&scene.layout, &new, &new_digest, true, &stop_at(at));
+                // The root's manifest lost too: the record alone tells what is where.
+                let _ = fs::remove_file(scene.layout.root.join(MANIFEST));
+                let _ = uninstall(&scene.layout, true, &stop_at(2));
+                if finish == "removal" {
+                    uninstall(&scene.layout, true, &never).unwrap();
+                    assert!(
+                        names_in(scene.layout.root.parent().unwrap()).is_empty(),
+                        "at {at}"
+                    );
+                    assert!(state_of(&scene).is_none(), "at {at}");
+                } else {
+                    install(&scene.layout, &new, &new_digest, true, &never).unwrap();
+                    assert_eq!(walk(&scene.layout.root), files_of(&scene, "new"), "at {at}");
+                    assert!(no_work_folder(&scene), "at {at}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_repair_interrupted_after_its_swap_still_gives_the_folders_their_modes() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[("app/plugins/x.js", "x")]);
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    let total = questions(&|stop| {
+        let probe = self::scene();
+        let (s, e) = release(&probe, "image", "0.1.0", &[("app/plugins/x.js", "x")]);
+        install(&probe.layout, &s, &e, true, &never).unwrap();
+        install(&probe.layout, &s, &e, true, stop).map(|_| ())
+    });
+    // Stopped right after the swap, then a folder's mode changed.
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &stop_at(total - 2)),
+        Err(Problem::Interrupted)
+    );
+    for folder in ["", "app", "runtime", "app/plugins"] {
+        fs::set_permissions(
+            scene.layout.root.join(folder),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    for folder in ["", "app", "runtime", "app/plugins"] {
+        assert_eq!(mode(&scene.layout.root.join(folder)), 0o755, "{folder}");
+    }
+    assert!(launcher_accepts(&scene));
 }
 
 #[test]
@@ -559,7 +624,7 @@ fn something_foreign_where_the_installation_goes_is_kept_and_stops_it() {
     fs::write(staging.join("mine"), "user data").unwrap();
     assert_eq!(
         install(&scene.layout, &source, &expected, true, &never),
-        Err(Problem::Conflict(staging.join("mine")))
+        Err(Problem::Conflict(staging.clone()))
     );
     assert_eq!(
         fs::read_to_string(staging.join("mine")).unwrap(),
@@ -963,45 +1028,16 @@ fn an_apply_gives_the_installation_the_modes_every_user_needs() {
         assert_eq!(mode(&folder), 0o755, "{}", folder.display());
     }
     assert_eq!(mode(&scene.layout.maintenance.join("gate.lock")), 0o644);
-    let usr = scene.base.join("usr");
-    fs::set_permissions(&usr, fs::Permissions::from_mode(0o700)).unwrap();
-    let before = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
-    assert_eq!(
-        install(&scene.layout, &source, &expected, true, &never),
-        Err(Problem::Unreachable(fs::canonicalize(&usr).unwrap()))
+    // Run as anyone but root, reachability is not judged, and the preview says so.
+    let preview = install(&scene.layout, &source, &expected, false, &never).unwrap();
+    assert!(
+        preview
+            .lines
+            .iter()
+            .any(|line| line.contains("checked when this runs with sudo")),
+        "{:?}",
+        preview.lines
     );
-    assert_eq!(
-        fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
-        before
-    );
-    fs::set_permissions(&usr, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-#[test]
-fn a_folder_other_users_cannot_pass_behind_a_link_stops_the_installation() {
-    for place in ["lib", "bin", "Library"] {
-        let scene = scene();
-        let (source, expected) = release(&scene, "image", "0.1.0", &[]);
-        let hidden = scene.base.join("hidden");
-        fs::create_dir_all(hidden.join("inner")).unwrap();
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
-        let parent = match place {
-            "lib" => scene.layout.root.parent().unwrap().to_path_buf(),
-            "bin" => scene.layout.link.parent().unwrap().to_path_buf(),
-            _ => scene.layout.maintenance.parent().unwrap().to_path_buf(),
-        };
-        fs::create_dir_all(parent.parent().unwrap()).unwrap();
-        let _ = fs::remove_dir_all(&parent);
-        symlink(hidden.join("inner"), &parent).unwrap();
-        let result = install(&scene.layout, &source, &expected, true, &never);
-        assert_eq!(
-            result,
-            Err(Problem::Unreachable(fs::canonicalize(&hidden).unwrap())),
-            "{place}"
-        );
-        assert!(state_of(&scene).is_none(), "{place}");
-        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
-    }
 }
 
 #[test]
