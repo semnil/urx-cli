@@ -19,7 +19,7 @@
 // Usage: URX_DISPOSABLE_MACHINE=1 node scripts/check-windows-installer.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,17 @@ const maintenance = join(local, "urx-cli-maintenance");
 const statePath = join(maintenance, "state.json");
 const gatePath = join(maintenance, "gate.lock");
 const bin = join(app, "bin");
-if (existsSync(app) || existsSync(statePath)) fail(`urx-cli is already installed here (${app}); this check needs a machine without it`);
+/** Whether nothing is at `path`: only "no such file" says so; any other error is not an answer and stops the check. */
+const absent = (path) => {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw new Error(`installer check: whether ${path} is there could not be told`, { cause: error });
+  }
+};
+if (!absent(app) || !absent(statePath)) fail(`urx-cli is already installed here (${app}); this check needs a machine without it`);
 
 const [setupName, ...others] = readdirSync(join(root, "dist-installer"));
 if (setupName === undefined || others.length > 0 || !setupName.endsWith("-setup.exe")) fail("dist-installer holds no single setup program");
@@ -90,7 +100,7 @@ try {
   const elsewhere = join(logs, "elsewhere");
   const moved = runSetup(`/DIR=${elsewhere}`);
   if (moved.status === 0) fail("an installation went ahead into a folder other than the fixed one");
-  if (existsSync(elsewhere) && readdirSync(elsewhere).length > 0) fail(`an installation told to go elsewhere wrote into ${elsewhere}`);
+  if (!absent(elsewhere) && readdirSync(elsewhere).length > 0) fail(`an installation told to go elsewhere wrote into ${elsewhere}`);
   if (JSON.stringify(state()) !== JSON.stringify(installed)) fail(`an installation told to go elsewhere changed the state record to ${JSON.stringify(state())}`);
 
   // 4. The same installer completes again.
@@ -105,10 +115,10 @@ try {
   // The uninstaller finishes in a copy of itself; wait for it to leave the state record.
   const until = Date.now() + 120_000;
   const pause = new Int32Array(new SharedArrayBuffer(4));
-  while (existsSync(statePath) && Date.now() < until) Atomics.wait(pause, 0, 0, 500);
-  if (existsSync(statePath)) fail(`the removal left the state record ${readFileSync(statePath, "utf8")}`);
+  while (!absent(statePath) && Date.now() < until) Atomics.wait(pause, 0, 0, 500);
+  if (!absent(statePath)) fail(`the removal left the state record ${readFileSync(statePath, "utf8")}`);
   if (!existsSync(gatePath) || statSync(gatePath).size !== 0) fail("the removal did not keep the empty gate");
-  const left = owned.filter((path) => existsSync(join(app, ...path.split("/"))));
+  const left = owned.filter((path) => !absent(join(app, ...path.split("/"))));
   if (left.length > 0) fail(`the removal left installed files: ${left.join(", ")}`);
   if (readFileSync(join(app, "notes.txt"), "utf8") !== "the user's") fail("the removal did not keep the user's file");
   if (onPath()) fail(`the removal left ${bin} on the user's PATH`);
