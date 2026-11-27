@@ -1,35 +1,38 @@
-//! Claims a build's output folder and writes the build's files into that
-//! folder alone, for the release, bundle and installer builds. A build never
-//! removes, replaces or changes what is not its own at its output path.
+//! Publishes a build's output, for the release, bundle and installer builds,
+//! so that the output's path shows either nothing or the complete output with
+//! its record, and nothing already there is removed, replaced or changed.
 //!
-//! - `urx-output claim <output>` makes a folder under a random name beside
-//!   `<output>`, opens it, and renames that open folder to `<output>` only
-//!   where nothing is (macOS: `renameatx_np` with `RENAME_EXCL`; Windows: a
-//!   rename of the open handle that does not replace). It prints the claimed
-//!   folder's identity. It exits 3 when anything is at `<output>`.
-//! - `urx-output publish <staging> <output> <identity> [--last <name>]`
-//!   opens `<output>` without following a link and goes on only when it is
-//!   the claimed folder; it exits 4 otherwise. It then writes the files of
-//!   `<staging>` into that folder: on macOS each folder and file is created
-//!   relative to its open parent, so a path swapped meanwhile cannot redirect
-//!   a write; on Windows each folder is held open without delete sharing, so
-//!   none can be renamed or removed meanwhile. Every folder and file is
-//!   created where nothing is. Outside Windows, folder modes are set after
-//!   their contents, the output's own last. `<name>`, the record at the top of
-//!   the output that marks it finished, comes after that, and only when the
-//!   output holds exactly the files written beside it, each with the bytes
-//!   written: it is written and given its mode under a temporary name, then
-//!   renamed to `<name>` where nothing is. Last, `<output>` must still be the
-//!   claimed folder; it exits 5 when the folder was moved meanwhile, its
-//!   files written into it wherever it went.
-//! - `urx-output check <output> <identity>` exits 0 when `<output>` is the
-//!   claimed folder and 4 otherwise, so a build that stops says to remove
-//!   only a folder that is its own.
+//! `urx-output publish <staging> <output> [--last <name>]`
 //!
-//! Any other failure exits 1, and a wrong command line 2. Every failure
+//! 1. When anything is at `<output>`, an empty folder or a link included, it
+//!    exits 3 and touches nothing.
+//! 2. It makes a work folder beside `<output>` under a random name no other
+//!    program knows, holds it open, and writes the files of `<staging>` into
+//!    it: on macOS each folder and file relative to its open parent, on
+//!    Windows under folders held open without delete sharing. Every folder and
+//!    file is created where nothing is; outside Windows, folder modes are set
+//!    after their contents, the work folder's own last.
+//! 3. It walks the work folder once, opening each folder by name and checking
+//!    that it is the folder it made, and reads every file back against the
+//!    staged one. A file beside them, a missing or changed file, or a
+//!    replaced folder stops it.
+//! 4. `<name>`, the record at the top of the output that marks it finished,
+//!    is written under a temporary name, given its mode and renamed to its
+//!    own name in the work folder.
+//! 5. It renames the work folder to `<output>` only where nothing is (macOS:
+//!    `renameatx_np` with `RENAME_EXCL`, after checking that the work
+//!    folder's name still names the folder it holds; Windows: a rename of the
+//!    held folder itself that does not replace). This rename is the moment the
+//!    build succeeds and the next stage can see its output.
+//!
+//! When a step after the first fails, the record, if written, is removed from
+//! the work folder through the open folder, and the work folder is left
+//! without it, beside the output, for the user to remove; its path is in the
+//! message. When something appeared at `<output>` in the meantime, it exits
+//! 3; any other failure exits 1, and a wrong command line 2. Every failure
 //! prints one line on standard error.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -43,7 +46,7 @@ mod windows;
 #[cfg(windows)]
 use windows as platform;
 
-/// Why a claim or a publish stopped, with the exit status it gives.
+/// Why a publish stopped, with the exit status it gives.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Failure {
     pub code: u8,
@@ -55,23 +58,6 @@ impl Failure {
         Failure {
             code: 3,
             message: format!("{} already exists", output.display()),
-        }
-    }
-
-    pub fn not_claimed(output: &Path) -> Failure {
-        Failure {
-            code: 4,
-            message: format!("{} is not the folder this build claimed", output.display()),
-        }
-    }
-
-    pub fn moved(output: &Path) -> Failure {
-        Failure {
-            code: 5,
-            message: format!(
-                "{} was moved while it was written, so it no longer names this build's output",
-                output.display()
-            ),
         }
     }
 
@@ -103,55 +89,43 @@ pub enum Entry {
     },
 }
 
-/// The output the staged files are written into, folder by folder.
-pub trait Output {
-    /// Creates the folder `path` where nothing is, inside a folder this
-    /// output made, and keeps it for what goes into it.
+/// What one walk of a work folder found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    /// Every regular file, as `/`-joined names.
+    pub files: BTreeSet<String>,
+    /// Files whose bytes are not those of the staged file.
+    pub changed: Vec<String>,
+    /// Folders that are not the ones this work made.
+    pub replaced: Vec<String>,
+    /// Entries that are neither regular files nor folders.
+    pub others: Vec<String>,
+}
+
+/// The work folder the staged files are written into, folder by folder.
+pub trait Work {
+    /// The work folder's path, for messages.
+    fn path(&self) -> &Path;
+    /// Creates the folder `path` where nothing is, inside a folder this work
+    /// made, and keeps it open.
     fn make_folder(&mut self, path: &[String]) -> io::Result<()>;
     /// Creates the file `path` where nothing is, with `bytes` and `mode`.
     fn write_file(&mut self, path: &[String], bytes: &[u8], mode: u32) -> io::Result<()>;
-    /// Sets the mode of a folder this output made, or of the output itself
+    /// Sets the mode of a folder this work made, or of the work folder itself
     /// for an empty `path`.
     fn set_folder_mode(&mut self, path: &[String], mode: u32) -> io::Result<()>;
-    /// Every regular file in the output, as `/`-joined names; a link or
-    /// another kind of entry is an error.
-    fn files(&mut self) -> io::Result<BTreeSet<String>>;
-    /// Whether the file `path` this output wrote holds the bytes of `source`.
-    fn holds(&mut self, path: &[String], source: &Path) -> io::Result<bool>;
-    /// Writes the file `name` at the top of the output with `bytes` and
+    /// Walks the work folder once, opening each folder by name and checking
+    /// that it is one this work made, and reads each file found against
+    /// `expected` (its staged source by `/`-joined names).
+    fn walk(&mut self, expected: &BTreeMap<String, PathBuf>) -> io::Result<Found>;
+    /// Writes the file `name` at the top of the work folder with `bytes` and
     /// `mode` under a temporary name, then renames it to `name` where nothing
     /// is, so `name` appears only complete.
     fn write_record(&mut self, name: &str, bytes: &[u8], mode: u32) -> io::Result<()>;
-    /// Whether the output's path still names the folder written into.
-    fn still_in_place(&mut self) -> io::Result<bool>;
-}
-
-/// Whether `a` and `b` read the same bytes to their ends.
-pub fn same_contents(a: &mut impl io::Read, b: &mut impl io::Read) -> io::Result<bool> {
-    let mut left = vec![0u8; 1 << 20];
-    let mut right = vec![0u8; 1 << 20];
-    loop {
-        let from_a = read_full(a, &mut left)?;
-        let from_b = read_full(b, &mut right)?;
-        if from_a != from_b || left[..from_a] != right[..from_b] {
-            return Ok(false);
-        }
-        if from_a == 0 {
-            return Ok(true);
-        }
-    }
-}
-
-/// Fills `buffer` from `reader` as far as it goes, returning how much was read.
-fn read_full(reader: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match reader.read(&mut buffer[filled..])? {
-            0 => break,
-            read => filled += read,
-        }
-    }
-    Ok(filled)
+    /// Removes the record `name` this work wrote.
+    fn remove_record(&mut self, name: &str);
+    /// Renames the work folder to the output where nothing is.
+    fn publish(&mut self) -> Result<(), Failure>;
 }
 
 /// The mode a staged entry is written with: its permission bits outside
@@ -216,12 +190,39 @@ pub fn staged(root: &Path) -> io::Result<Vec<Entry>> {
     Ok(found)
 }
 
-/// Writes `entries` into `output`: folders and files where nothing is, then
-/// folder modes from the deepest to the output's own (`root_mode`), then,
-/// when `output` holds exactly the files written, `last`, a file at the top of
-/// the staged output.
+/// Whether `a` and `b` read the same bytes to their ends.
+pub fn same_contents(a: &mut impl io::Read, b: &mut impl io::Read) -> io::Result<bool> {
+    let mut left = vec![0u8; 1 << 20];
+    let mut right = vec![0u8; 1 << 20];
+    loop {
+        let from_a = read_full(a, &mut left)?;
+        let from_b = read_full(b, &mut right)?;
+        if from_a != from_b || left[..from_a] != right[..from_b] {
+            return Ok(false);
+        }
+        if from_a == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Fills `buffer` from `reader` as far as it goes, returning how much was read.
+fn read_full(reader: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..])? {
+            0 => break,
+            read => filled += read,
+        }
+    }
+    Ok(filled)
+}
+
+/// Writes `entries` into `work`, checks what it holds, adds `last`, a file at
+/// the top of the staged output, and publishes it. When publishing fails
+/// after the record was written, the record is removed again.
 pub fn publish(
-    output: &mut dyn Output,
+    work: &mut dyn Work,
     entries: &[Entry],
     root_mode: u32,
     last: Option<&str>,
@@ -232,7 +233,7 @@ pub fn publish(
     let mut record = None;
     for entry in entries {
         match entry {
-            Entry::Folder { path, .. } => output.make_folder(path).map_err(|error| {
+            Entry::Folder { path, .. } => work.make_folder(path).map_err(|error| {
                 Failure::other(format!(
                     "{} could not be made where nothing is: {error}",
                     named(path)
@@ -240,11 +241,11 @@ pub fn publish(
             })?,
             Entry::File { path, mode, source } => {
                 if is_last(path) {
-                    record = Some((path, *mode, source));
+                    record = Some((path[0].clone(), *mode, source));
                     continue;
                 }
                 let bytes = std::fs::read(source)?;
-                output.write_file(path, &bytes, *mode).map_err(|error| {
+                work.write_file(path, &bytes, *mode).map_err(|error| {
                     Failure::other(format!(
                         "{} could not be written where nothing is: {error}",
                         named(path)
@@ -260,7 +261,7 @@ pub fn publish(
     }
     for entry in entries.iter().rev() {
         if let Entry::Folder { path, mode } = entry {
-            output.set_folder_mode(path, *mode).map_err(|error| {
+            work.set_folder_mode(path, *mode).map_err(|error| {
                 Failure::other(format!(
                     "the mode of {} could not be set: {error}",
                     named(path)
@@ -268,61 +269,60 @@ pub fn publish(
             })?;
         }
     }
-    output
-        .set_folder_mode(&[], root_mode)
+    work.set_folder_mode(&[], root_mode)
         .map_err(|error| Failure::other(format!("the output's mode could not be set: {error}")))?;
-    let written: BTreeSet<String> = entries
+    let expected: BTreeMap<String, PathBuf> = entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::File { path, .. } if !is_last(path) => Some(named(path)),
+            Entry::File { path, source, .. } if !is_last(path) => {
+                Some((named(path), source.clone()))
+            }
             _ => None,
         })
         .collect();
-    let present = output
-        .files()
-        .map_err(|error| Failure::other(format!("the output could not be listed: {error}")))?;
-    let beside: Vec<&str> = present.difference(&written).map(String::as_str).collect();
-    if !beside.is_empty() {
+    let found = work
+        .walk(&expected)
+        .map_err(|error| Failure::other(format!("the output could not be read back: {error}")))?;
+    let mut problems = Vec::new();
+    for path in &found.replaced {
+        problems.push(format!("{path} is not the folder this build made"));
+    }
+    for path in &found.others {
+        problems.push(format!("{path} is neither a regular file nor a folder"));
+    }
+    for path in found
+        .files
+        .iter()
+        .filter(|path| !expected.contains_key(*path))
+    {
+        problems.push(format!("{path} was not written by this build"));
+    }
+    for path in expected.keys().filter(|path| !found.files.contains(*path)) {
+        problems.push(format!("{path} is missing"));
+    }
+    for path in &found.changed {
+        problems.push(format!("{path} changed after it was written"));
+    }
+    if !problems.is_empty() {
         return Err(Failure::other(format!(
-            "the output holds files this build did not write, left as they are: {}",
-            beside.join(", ")
+            "the output is not as this build wrote it: {}",
+            problems.join("; ")
         )));
     }
-    let lacking: Vec<&str> = written.difference(&present).map(String::as_str).collect();
-    if !lacking.is_empty() {
-        return Err(Failure::other(format!(
-            "the output lacks files this build wrote: {}",
-            lacking.join(", ")
-        )));
+    let Some((name, mode, source)) = record else {
+        return work.publish();
+    };
+    let bytes = std::fs::read(source)?;
+    work.write_record(&name, &bytes, mode).map_err(|error| {
+        Failure::other(format!(
+            "{name} could not be written where nothing is: {error}"
+        ))
+    })?;
+    let published = work.publish();
+    if published.is_err() {
+        work.remove_record(&name);
     }
-    for entry in entries {
-        if let Entry::File { path, source, .. } = entry {
-            if is_last(path) {
-                continue;
-            }
-            let same = output.holds(path, source).map_err(|error| {
-                Failure::other(format!("{} could not be read back: {error}", named(path)))
-            })?;
-            if !same {
-                return Err(Failure::other(format!(
-                    "{} changed after it was written",
-                    named(path)
-                )));
-            }
-        }
-    }
-    if let Some((path, mode, source)) = record {
-        let bytes = std::fs::read(source)?;
-        output
-            .write_record(&path[0], &bytes, mode)
-            .map_err(|error| {
-                Failure::other(format!(
-                    "{} could not be written where nothing is: {error}",
-                    named(path)
-                ))
-            })?;
-    }
-    Ok(())
+    published
 }
 
 /// A name for a folder beside the output that no other program can know.
@@ -338,72 +338,54 @@ pub fn random_suffix() -> u64 {
     hasher.finish()
 }
 
-const USAGE: &str = "usage: urx-output claim <output> | urx-output publish <staging> <output> <identity> [--last <name>] | urx-output check <output> <identity>";
+const USAGE: &str = "usage: urx-output publish <staging> <output> [--last <name>]";
 
-fn run(args: &[String]) -> Result<Option<String>, Failure> {
+fn run(args: &[String]) -> Result<(), Failure> {
     let usage = || Failure {
         code: 2,
         message: USAGE.to_owned(),
     };
-    match args {
-        [command, output] if command == "claim" => claim(Path::new(output)).map(Some),
-        [command, staging, output, identity, rest @ ..] if command == "publish" => {
-            let last = match rest {
-                [] => None,
-                [flag, name] if flag == "--last" => Some(name.as_str()),
-                _ => return Err(usage()),
-            };
-            let staging = Path::new(staging);
-            let entries = staged(staging)?;
-            let root_mode = mode_of(&std::fs::symlink_metadata(staging)?);
-            let mut opened = open(Path::new(output), identity)?;
-            publish(opened.as_mut(), &entries, root_mode, last)?;
-            if !opened.still_in_place()? {
-                return Err(Failure::moved(Path::new(output)));
-            }
-            Ok(None)
-        }
-        [command, output, identity] if command == "check" => {
-            open(Path::new(output), identity)?;
-            Ok(None)
-        }
-        _ => Err(usage()),
+    let [command, staging, output, rest @ ..] = args else {
+        return Err(usage());
+    };
+    if command != "publish" {
+        return Err(usage());
     }
+    let last = match rest {
+        [] => None,
+        [flag, name] if flag == "--last" => Some(name.as_str()),
+        _ => return Err(usage()),
+    };
+    let staging = Path::new(staging);
+    let entries = staged(staging)?;
+    let root_mode = mode_of(&std::fs::symlink_metadata(staging)?);
+    let mut work = create_work(Path::new(output))?;
+    publish(work.as_mut(), &entries, root_mode, last).map_err(|failure| Failure {
+        code: failure.code,
+        message: format!(
+            "{}; this build's files are left in {} without a record, for you to remove",
+            failure.message,
+            work.path().display()
+        ),
+    })
 }
 
 #[cfg(any(target_os = "macos", windows))]
-fn claim(output: &Path) -> Result<String, Failure> {
-    platform::claim(output)
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn open(output: &Path, identity: &str) -> Result<Box<dyn Output>, Failure> {
-    platform::open(output, identity)
+fn create_work(output: &Path) -> Result<Box<dyn Work>, Failure> {
+    platform::create_work(output)
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn claim(_output: &Path) -> Result<String, Failure> {
+fn create_work(_output: &Path) -> Result<Box<dyn Work>, Failure> {
     Err(Failure::other(
-        "outputs are claimed on macOS and Windows only",
-    ))
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn open(_output: &Path, _identity: &str) -> Result<Box<dyn Output>, Failure> {
-    Err(Failure::other(
-        "outputs are written on macOS and Windows only",
+        "outputs are published on macOS and Windows only",
     ))
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
-        Ok(printed) => {
-            if let Some(text) = printed {
-                println!("{text}");
-            }
-            ExitCode::SUCCESS
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             eprintln!("urx-output: {}", failure.message);
             ExitCode::from(failure.code)
@@ -415,17 +397,24 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// An output that records what was written and can be made to fail.
+    /// A change to what a walk finds.
+    type Change = fn(&mut Found);
+
+    /// A work folder that records what was written and can be made to fail.
     #[derive(Default)]
     struct Recorded {
         calls: Vec<String>,
         fail_root_mode: bool,
-        extra: Vec<String>,
-        changed: Vec<String>,
-        fail_record: bool,
+        fail_publish: bool,
+        /// Changes what the walk finds, after the writes.
+        change: Option<Change>,
+        found: Found,
     }
 
-    impl Output for Recorded {
+    impl Work for Recorded {
+        fn path(&self) -> &Path {
+            Path::new("work")
+        }
         fn make_folder(&mut self, path: &[String]) -> io::Result<()> {
             self.calls.push(format!("folder {}", path.join("/")));
             Ok(())
@@ -436,6 +425,7 @@ mod tests {
                 path.join("/"),
                 String::from_utf8_lossy(bytes)
             ));
+            self.found.files.insert(path.join("/"));
             Ok(())
         }
         fn set_folder_mode(&mut self, path: &[String], mode: u32) -> io::Result<()> {
@@ -445,33 +435,29 @@ mod tests {
             self.calls.push(format!("mode {} {mode:o}", path.join("/")));
             Ok(())
         }
-        fn files(&mut self) -> io::Result<BTreeSet<String>> {
-            let mut files: BTreeSet<String> = self
-                .calls
-                .iter()
-                .filter_map(|call| {
-                    call.strip_prefix("file ")
-                        .map(|rest| rest.split(' ').next().unwrap_or("").to_owned())
-                })
-                .collect();
-            files.extend(self.extra.iter().cloned());
-            Ok(files)
-        }
-        fn holds(&mut self, path: &[String], _source: &Path) -> io::Result<bool> {
-            Ok(!self.changed.contains(&path.join("/")))
+        fn walk(&mut self, _expected: &BTreeMap<String, PathBuf>) -> io::Result<Found> {
+            self.calls.push("walk".to_owned());
+            if let Some(change) = self.change {
+                change(&mut self.found);
+            }
+            Ok(std::mem::take(&mut self.found))
         }
         fn write_record(&mut self, name: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
-            if self.fail_record {
-                return Err(io::Error::other("short write"));
-            }
             self.calls.push(format!(
                 "record {name} {} {mode:o}",
                 String::from_utf8_lossy(bytes)
             ));
             Ok(())
         }
-        fn still_in_place(&mut self) -> io::Result<bool> {
-            Ok(true)
+        fn remove_record(&mut self, name: &str) {
+            self.calls.push(format!("remove {name}"));
+        }
+        fn publish(&mut self) -> Result<(), Failure> {
+            if self.fail_publish {
+                return Err(Failure::exists(Path::new("output")));
+            }
+            self.calls.push("publish".to_owned());
+            Ok(())
         }
     }
 
@@ -499,78 +485,123 @@ mod tests {
     }
 
     #[test]
-    fn writes_folders_and_files_then_modes_then_the_record() {
+    fn writes_checks_records_then_publishes() {
         let (root, entries) = staging();
-        let mut output = Recorded::default();
-        publish(&mut output, &entries, 0o755, Some("record.json")).unwrap();
-        let modes = if cfg!(unix) {
-            ["644", "755", "644", "755"]
+        let mut work = Recorded::default();
+        publish(&mut work, &entries, 0o755, Some("record.json")).unwrap();
+        let (file, folder) = if cfg!(unix) {
+            ("644", "755")
         } else {
-            ["0", "0", "0", "0"]
+            ("0", "0")
         };
         assert_eq!(
-            output.calls,
+            work.calls,
             vec![
-                format!("file a.txt a {}", modes[0]),
+                format!("file a.txt a {file}"),
                 "folder app".to_owned(),
-                format!("file app/main.js cli {}", modes[2]),
-                format!("mode app {}", modes[1]),
+                format!("file app/main.js cli {file}"),
+                format!("mode app {folder}"),
                 "mode  755".to_owned(),
-                format!("record record.json record {}", modes[2]),
+                "walk".to_owned(),
+                format!("record record.json record {file}"),
+                "publish".to_owned(),
             ]
         );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn writes_no_record_beside_a_file_it_did_not_write() {
+    fn neither_records_nor_publishes_what_is_not_as_written() {
         let (root, entries) = staging();
-        let mut output = Recorded {
-            extra: vec!["notes.txt".to_owned()],
-            ..Recorded::default()
-        };
-        let failure = publish(&mut output, &entries, 0o755, Some("record.json")).unwrap_err();
-        assert_eq!(
-            failure.message,
-            "the output holds files this build did not write, left as they are: notes.txt"
-        );
-        assert!(!output.calls.iter().any(|call| call.starts_with("record ")));
+        let cases: [(Change, &str); 5] = [
+            (
+                |found| {
+                    found.files.insert("notes.txt".to_owned());
+                },
+                "notes.txt was not written by this build",
+            ),
+            (
+                |found| {
+                    found.files.remove("a.txt");
+                },
+                "a.txt is missing",
+            ),
+            (
+                |found| found.changed.push("app/main.js".to_owned()),
+                "app/main.js changed after it was written",
+            ),
+            (
+                |found| found.replaced.push("app".to_owned()),
+                "app is not the folder this build made",
+            ),
+            (
+                |found| found.others.push("link".to_owned()),
+                "link is neither a regular file nor a folder",
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut work = Recorded {
+                change: Some(change),
+                ..Recorded::default()
+            };
+            let failure = publish(&mut work, &entries, 0o755, Some("record.json")).unwrap_err();
+            assert!(
+                failure.message.contains(expected),
+                "{} lacks {expected}",
+                failure.message
+            );
+            assert!(
+                !work
+                    .calls
+                    .iter()
+                    .any(|call| call.starts_with("record ") || call == "publish"),
+                "{expected}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn writes_no_record_when_the_output_mode_cannot_be_set() {
+    fn neither_records_nor_publishes_when_the_output_mode_cannot_be_set() {
         let (root, entries) = staging();
-        let mut output = Recorded {
+        let mut work = Recorded {
             fail_root_mode: true,
             ..Recorded::default()
         };
-        assert!(publish(&mut output, &entries, 0o755, Some("record.json")).is_err());
-        assert!(!output.calls.iter().any(|call| call.starts_with("record ")));
+        assert!(publish(&mut work, &entries, 0o755, Some("record.json")).is_err());
+        assert!(!work
+            .calls
+            .iter()
+            .any(|call| call.starts_with("record ") || call == "publish"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn writes_no_record_when_a_written_file_changed() {
+    fn removes_its_record_again_when_the_output_cannot_be_published() {
         let (root, entries) = staging();
-        let mut output = Recorded {
-            changed: vec!["app/main.js".to_owned()],
+        let mut work = Recorded {
+            fail_publish: true,
             ..Recorded::default()
         };
-        let failure = publish(&mut output, &entries, 0o755, Some("record.json")).unwrap_err();
-        assert_eq!(failure.message, "app/main.js changed after it was written");
-        assert!(!output.calls.iter().any(|call| call.starts_with("record ")));
+        assert_eq!(
+            publish(&mut work, &entries, 0o755, Some("record.json"))
+                .unwrap_err()
+                .code,
+            3
+        );
+        assert_eq!(
+            work.calls.last().map(String::as_str),
+            Some("remove record.json")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn fails_when_the_record_cannot_be_written() {
+    fn refuses_a_record_that_was_not_staged() {
         let (root, entries) = staging();
-        let mut output = Recorded {
-            fail_record: true,
-            ..Recorded::default()
-        };
-        assert!(publish(&mut output, &entries, 0o755, Some("record.json")).is_err());
+        let mut work = Recorded::default();
+        let failure = publish(&mut work, &entries, 0o755, Some("missing.json")).unwrap_err();
+        assert_eq!(failure.message, "the staged output holds no missing.json");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -591,23 +622,19 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_record_that_was_not_staged() {
-        let (root, entries) = staging();
-        let mut output = Recorded::default();
-        let failure = publish(&mut output, &entries, 0o755, Some("missing.json")).unwrap_err();
-        assert_eq!(failure.message, "the staged output holds no missing.json");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn reads_its_command_line() {
         assert_eq!(run(&[]).unwrap_err().code, 2);
+        assert_eq!(
+            run(&["claim".into(), "s".into(), "o".into()])
+                .unwrap_err()
+                .code,
+            2
+        );
         assert_eq!(
             run(&[
                 "publish".into(),
                 "s".into(),
                 "o".into(),
-                "i".into(),
                 "--first".into(),
                 "x".into()
             ])

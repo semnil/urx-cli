@@ -1,10 +1,12 @@
-//! Claiming and writing through held folders on Windows: the output and every
-//! folder made in it are held open without delete sharing until the files are
-//! written, so none of them can be renamed or removed meanwhile, and a path
-//! under them names the folder this build made.
+//! The work folder on Windows. The work folder and every folder made in it
+//! are held open without delete sharing while the files are written, so none
+//! of them can be renamed or removed meanwhile and a path under them names a
+//! folder this build made; the walk opens each folder by path and checks it
+//! against the one made; the work folder is renamed to the output through its
+//! own handle, with no replacing.
 
-use crate::{random_suffix, Failure, Output};
-use std::collections::BTreeSet;
+use crate::{random_suffix, same_contents, Failure, Found, Work};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
@@ -25,8 +27,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 const HOLD: u32 = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 /// Opens the folder at `path` without following a reparse point, sharing
-/// reads and writes but not deletion, so nobody can rename or remove it, or a
-/// folder above it, while the handle is open.
+/// reads and writes but not deletion, so nobody can rename or remove it while
+/// the handle is open.
 fn hold(path: &Path, access: u32) -> io::Result<File> {
     OpenOptions::new()
         .access_mode(access)
@@ -51,10 +53,11 @@ fn is_plain_folder(found: &BY_HANDLE_FILE_INFORMATION) -> bool {
 }
 
 /// The identity of a folder: its volume and file index.
-fn identity(found: &BY_HANDLE_FILE_INFORMATION) -> String {
-    format!(
-        "{}:{}:{}",
-        found.dwVolumeSerialNumber, found.nFileIndexHigh, found.nFileIndexLow
+fn identity(found: &BY_HANDLE_FILE_INFORMATION) -> (u32, u32, u32) {
+    (
+        found.dwVolumeSerialNumber,
+        found.nFileIndexHigh,
+        found.nFileIndexLow,
     )
 }
 
@@ -62,7 +65,7 @@ fn is_empty(path: &Path) -> io::Result<bool> {
     Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
-/// Renames the folder `held` is open on to `to`, unless anything is there.
+/// Renames the file or folder `held` is open on to `to`, unless anything is there.
 fn rename_held(held: &File, to: &Path) -> Result<(), u32> {
     let name: Vec<u16> = to.as_os_str().encode_wide().collect();
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
@@ -97,15 +100,26 @@ fn rename_held(held: &File, to: &Path) -> Result<(), u32> {
     Ok(())
 }
 
-/// Claims `output`: an empty folder made under a random name beside it, held,
-/// then renamed through that handle to `output` only where nothing is.
-/// Returns the folder's identity.
-pub fn claim(output: &Path) -> Result<String, Failure> {
+/// The work folder beside the output, held, with the folders made in it.
+struct WinWork {
+    output: PathBuf,
+    root: PathBuf,
+    /// The work folder, held with delete access for its own rename.
+    held: File,
+    /// The identity of every folder made, the work folder's own under `[]`.
+    made: BTreeMap<Vec<String>, (u32, u32, u32)>,
+    /// Kept open while the files are written: holding them keeps the folders in place.
+    pins: Vec<File>,
+}
+
+/// Makes the work folder for `output`, beside it under a random name, when
+/// nothing is at `output`.
+pub fn create_work(output: &Path) -> Result<Box<dyn Work>, Failure> {
     let output = std::path::absolute(output)?;
     let parent = output
         .parent()
         .ok_or_else(|| Failure::other(format!("{} names no folder", output.display())))?;
-    let name = output
+    let base = output
         .file_name()
         .ok_or_else(|| Failure::other(format!("{} names no folder", output.display())))?;
     match std::fs::symlink_metadata(&output) {
@@ -118,58 +132,40 @@ pub fn claim(output: &Path) -> Result<String, Failure> {
             )))
         }
     }
-    let mut made = None;
     for _ in 0..16 {
-        let candidate = parent.join(format!(
-            ".{}.claim-{:016x}",
-            name.to_string_lossy(),
+        let root = parent.join(format!(
+            "{}.work-{:016x}",
+            base.to_string_lossy(),
             random_suffix()
         ));
-        match std::fs::create_dir(&candidate) {
-            Ok(()) => {
-                made = Some(candidate);
-                break;
-            }
+        match std::fs::create_dir(&root) {
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
+        let held = hold(&root, HOLD | DELETE)?;
+        let found = information(&held)?;
+        if !is_plain_folder(&found) || !is_empty(&root)? {
+            return Err(Failure::other(
+                "the work folder just made is not an empty folder",
+            ));
+        }
+        let mut made = BTreeMap::new();
+        made.insert(Vec::new(), identity(&found));
+        return Ok(Box::new(WinWork {
+            output,
+            root,
+            held,
+            made,
+            pins: Vec::new(),
+        }));
     }
-    let temporary = made.ok_or_else(|| Failure::other("no unused name was found for the claim"))?;
-    let held = hold(&temporary, HOLD | DELETE)?;
-    let found = information(&held)?;
-    if !is_plain_folder(&found) || !is_empty(&temporary)? {
-        return Err(Failure::other(
-            "the folder made for the claim is not an empty folder",
-        ));
-    }
-    if let Err(code) = rename_held(&held, &output) {
-        drop(held);
-        // Only an empty folder can go, and the name is this run's own.
-        let _ = std::fs::remove_dir(&temporary);
-        return Err(
-            if code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS {
-                Failure::exists(&output)
-            } else {
-                Failure::other(format!(
-                    "{} could not be claimed: {}",
-                    output.display(),
-                    io::Error::from_raw_os_error(code as i32)
-                ))
-            },
-        );
-    }
-    Ok(identity(&found))
+    Err(Failure::other(
+        "no unused name was found for the work folder",
+    ))
 }
 
-/// The claimed output and every folder this build made in it, all held.
-struct Held {
-    root: PathBuf,
-    claimed: String,
-    /// Kept open, not read: holding them is what keeps the folders in place.
-    _holds: Vec<File>,
-}
-
-impl Held {
+impl WinWork {
     fn at(&self, path: &[String]) -> PathBuf {
         let mut at = self.root.clone();
         for name in path {
@@ -179,15 +175,21 @@ impl Held {
     }
 }
 
-impl Output for Held {
+impl Work for WinWork {
+    fn path(&self) -> &Path {
+        &self.root
+    }
+
     fn make_folder(&mut self, path: &[String]) -> io::Result<()> {
         let at = self.at(path);
         std::fs::create_dir(&at)?;
         let folder = hold(&at, HOLD)?;
-        if !is_plain_folder(&information(&folder)?) || !is_empty(&at)? {
+        let found = information(&folder)?;
+        if !is_plain_folder(&found) || !is_empty(&at)? {
             return Err(io::Error::other("it is not the empty folder just made"));
         }
-        self._holds.push(folder);
+        self.made.insert(path.to_vec(), identity(&found));
+        self.pins.push(folder);
         Ok(())
     }
 
@@ -204,12 +206,55 @@ impl Output for Held {
         Ok(())
     }
 
-    fn holds(&mut self, path: &[String], source: &Path) -> io::Result<bool> {
-        let mut written = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(self.at(path))?;
-        crate::same_contents(&mut written, &mut File::open(source)?)
+    fn walk(&mut self, expected: &BTreeMap<String, PathBuf>) -> io::Result<Found> {
+        fn visit(
+            work: &WinWork,
+            directory: &Path,
+            prefix: &[String],
+            expected: &BTreeMap<String, PathBuf>,
+            found: &mut Found,
+        ) -> io::Result<()> {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                // The entry's own metadata: a reparse point is not followed.
+                let metadata = entry.metadata()?;
+                let name = entry.file_name();
+                let text = name
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("a name in the output is not UTF-8"))?;
+                let mut path = prefix.to_vec();
+                path.push(text.to_owned());
+                let joined = path.join("/");
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    found.others.push(joined);
+                } else if metadata.is_dir() {
+                    let opened = hold(&entry.path(), HOLD)?;
+                    let same = work.made.get(&path) == Some(&identity(&information(&opened)?));
+                    if same {
+                        visit(work, &entry.path(), &path, expected, found)?;
+                    } else {
+                        found.replaced.push(joined);
+                    }
+                } else if metadata.is_file() {
+                    if let Some(source) = expected.get(&joined) {
+                        let mut written = OpenOptions::new()
+                            .read(true)
+                            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                            .open(entry.path())?;
+                        if !same_contents(&mut written, &mut File::open(source)?)? {
+                            found.changed.push(joined.clone());
+                        }
+                    }
+                    found.files.insert(joined);
+                } else {
+                    found.others.push(joined);
+                }
+            }
+            Ok(())
+        }
+        let mut found = Found::default();
+        visit(self, &self.root, &[], expected, &mut found)?;
+        Ok(found)
     }
 
     fn write_record(&mut self, name: &str, bytes: &[u8], _mode: u32) -> io::Result<()> {
@@ -228,71 +273,30 @@ impl Output for Held {
         });
         if written.is_err() {
             drop(file);
-            // The temporary file is this build's own, under a name no other program knows.
+            // The temporary file is this build's own, in its own work folder.
             let _ = std::fs::remove_file(&temporary);
         }
         written
     }
 
-    fn still_in_place(&mut self) -> io::Result<bool> {
-        match hold(&self.root, HOLD) {
-            Ok(held) => {
-                let found = information(&held)?;
-                Ok(is_plain_folder(&found) && identity(&found) == self.claimed)
-            }
-            Err(_) => Ok(false),
-        }
+    fn remove_record(&mut self, name: &str) {
+        // The work folder is still held here, so the path names this build's own record.
+        let _ = std::fs::remove_file(self.root.join(name));
     }
 
-    fn files(&mut self) -> io::Result<BTreeSet<String>> {
-        fn walk(directory: &Path, prefix: &str, found: &mut BTreeSet<String>) -> io::Result<()> {
-            for entry in std::fs::read_dir(directory)? {
-                let entry = entry?;
-                // The entry's own metadata: a reparse point is not followed.
-                let metadata = entry.metadata()?;
-                let name = entry.file_name();
-                let text = name
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("a name in the output is not UTF-8"))?;
-                let path = if prefix.is_empty() {
-                    text.to_owned()
-                } else {
-                    format!("{prefix}/{text}")
-                };
-                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                    return Err(io::Error::other(format!(
-                        "{path} is a link or another reparse point"
-                    )));
-                }
-                if metadata.is_dir() {
-                    walk(&entry.path(), &path, found)?;
-                } else if metadata.is_file() {
-                    found.insert(path);
-                } else {
-                    return Err(io::Error::other(format!(
-                        "{path} is neither a regular file nor a folder"
-                    )));
-                }
+    fn publish(&mut self) -> Result<(), Failure> {
+        // The folders inside are let go, so the work folder itself can be renamed.
+        self.pins.clear();
+        rename_held(&self.held, &self.output).map_err(|code| {
+            if code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS {
+                Failure::exists(&self.output)
+            } else {
+                Failure::other(format!(
+                    "{} could not be published: {}",
+                    self.output.display(),
+                    io::Error::from_raw_os_error(code as i32)
+                ))
             }
-            Ok(())
-        }
-        let mut found = BTreeSet::new();
-        walk(&self.root, "", &mut found)?;
-        Ok(found)
+        })
     }
-}
-
-/// Holds `output` without following a reparse point, when it is the folder `claimed` names.
-pub fn open(output: &Path, claimed: &str) -> Result<Box<dyn Output>, Failure> {
-    let root = std::path::absolute(output)?;
-    let held = hold(&root, HOLD).map_err(|_| Failure::not_claimed(output))?;
-    let found = information(&held)?;
-    if !is_plain_folder(&found) || identity(&found) != claimed {
-        return Err(Failure::not_claimed(output));
-    }
-    Ok(Box::new(Held {
-        root,
-        claimed: claimed.to_owned(),
-        _holds: vec![held],
-    }))
 }
