@@ -5,8 +5,10 @@
 // to run unless URX_DISPOSABLE_MACHINE=1 says the machine is a throwaway one,
 // unless sudo needs no password, and unless nothing of urx-cli is there yet.
 //
-// 1. A preview changes nothing, and an apply without sudo stops before
-//    changing anything.
+// 1. A preview changes nothing, an apply without sudo stops before changing
+//    anything, and so does one while a folder above the installation is one
+//    other users cannot pass through (the installer asks the system, as the
+//    user nobody).
 // 2. An apply with sudo completes: the state record says `complete` and names
 //    the installed release manifest, the gate is an empty root file, the link
 //    points to the installed launcher, and `/usr/local/bin/urx --version` runs.
@@ -71,6 +73,18 @@ expectRun("the preview", run(installer, []), 0);
 const unprivileged = expectRun("an apply without sudo", run(installer, ["--apply"]), 1);
 if (!unprivileged.stderr.includes("sudo")) fail(`an apply without sudo said ${JSON.stringify(unprivileged.stderr)}`);
 for (const path of [app, link, maintenance]) if (!absent(path)) fail(`${path} was made by a preview or an apply without sudo`);
+const lib = "/usr/local/lib";
+if (!absent(lib)) {
+  const libMode = statSync(lib).mode & 0o7777;
+  execFileSync("sudo", ["-n", "/bin/chmod", "700", lib]);
+  try {
+    const hidden = expectRun("an apply behind a folder others cannot pass", run(installer, ["--apply"], { sudo: true }), 1);
+    if (!hidden.stderr.includes("Other users cannot pass through")) fail(`an apply behind a folder others cannot pass said ${JSON.stringify(hidden.stderr)}`);
+  } finally {
+    execFileSync("sudo", ["-n", "/bin/chmod", libMode.toString(8), lib]);
+  }
+  for (const path of [app, link, statePath]) if (!absent(path)) fail(`${path} was made by an apply behind a folder others cannot pass`);
+}
 
 // 2. An apply with sudo completes.
 expectRun("the installation", run(installer, ["--apply"], { sudo: true }), 0);

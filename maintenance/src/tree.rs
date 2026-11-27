@@ -4,6 +4,7 @@
 use crate::place::is_ours;
 use crate::sys::{self, Entry, Fd, Kind};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read};
@@ -33,8 +34,8 @@ pub enum How {
     /// file system finds under another spelling (another letter case) is
     /// not this path's, and the path is missing.
     Exact,
-    /// Making each missing folder (0755), and renaming a folder the file
-    /// system finds only under another letter case to this path's spelling.
+    /// Making each missing folder (0755); a folder there only under another
+    /// spelling is a conflict.
     Make,
 }
 
@@ -116,16 +117,7 @@ pub fn parent_of(
                 return Err(WalkError::Conflict(walked))
             }
             Spelled::Other { .. } if how == How::Exact => return Ok(None),
-            Spelled::Other {
-                actual: Some(actual),
-                ..
-            } => {
-                // The same folder under another letter case: given this path's spelling.
-                sys::rename_at(parent, &actual, &name)?;
-                sys::flush(parent.raw())?;
-                sys::open_folder_at(parent, &name)?
-            }
-            Spelled::Other { actual: None, .. } => return Err(WalkError::Conflict(walked)),
+            Spelled::Other { .. } => return Err(WalkError::Conflict(walked)),
         };
         current = Some(next);
     }
@@ -144,35 +136,96 @@ pub fn parent_of(
     Ok(Some((parent, sys::c_name(last.as_bytes())?)))
 }
 
-/// Whether everything under the open folder `folder` (at `prefix`, ending
-/// with `/`) is a regular file whose path's `key` is in `keys`, through
-/// folders only: a folder that removing those files would leave empty.
-pub fn holds_only(
+/// Checks that everything under the open folder `folder` (at `prefix`,
+/// empty or ending with `/`) is one of `files`, under exactly that path, or a
+/// folder of the `owner`'s, writable by no one else, that holds one of them:
+/// a tree of the installation's and nothing else. The path of the first
+/// entry that is not.
+pub fn only_listed(
     folder: &Fd,
     prefix: &str,
-    keys: &std::collections::BTreeSet<String>,
-) -> io::Result<bool> {
+    files: &BTreeSet<String>,
+    owner: u32,
+) -> io::Result<Result<(), String>> {
     for name in sys::names(folder)? {
         let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
-            return Ok(false);
+            return Ok(Err(format!(
+                "{prefix}{}",
+                String::from_utf8_lossy(name.to_bytes())
+            )));
         };
         let path = format!("{prefix}{text}");
-        match sys::entry_at(folder, &name)?.map(|entry| entry.kind) {
-            Some(Kind::File) if keys.contains(&crate::records::key(&path)) => {}
-            Some(Kind::Folder) => {
-                if !holds_only(
-                    &sys::open_folder_at(folder, &name)?,
-                    &format!("{path}/"),
-                    keys,
-                )? {
-                    return Ok(false);
+        let Some(entry) = sys::entry_at(folder, &name)? else {
+            continue;
+        };
+        let inside = format!("{path}/");
+        match entry.kind {
+            Kind::File if files.contains(&path) => {}
+            Kind::Folder
+                if is_ours(&entry, Kind::Folder, owner)
+                    && files.iter().any(|file| file.starts_with(&inside)) =>
+            {
+                if let Err(at) =
+                    only_listed(&sys::open_folder_at(folder, &name)?, &inside, files, owner)?
+                {
+                    return Ok(Err(at));
                 }
             }
-            None => {}
-            Some(_) => return Ok(false),
+            _ => return Ok(Err(path)),
         }
     }
-    Ok(true)
+    Ok(Ok(()))
+}
+
+/// Removes, under the open folder `folder` (at `prefix`), each regular file
+/// that is one of `files` under exactly that path, and each folder of the
+/// `owner`'s that is left empty; anything else stays. Whether `folder` is
+/// left empty.
+pub fn clear_listed(
+    folder: &Fd,
+    prefix: &str,
+    files: &BTreeSet<String>,
+    owner: u32,
+) -> io::Result<bool> {
+    let mut empty = true;
+    for name in sys::names(folder)? {
+        let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
+            empty = false;
+            continue;
+        };
+        let path = format!("{prefix}{text}");
+        let Some(entry) = sys::entry_at(folder, &name)? else {
+            continue;
+        };
+        match entry.kind {
+            Kind::File if files.contains(&path) => {
+                sys::remove_at(folder, &name, false)?;
+            }
+            Kind::Folder if is_ours(&entry, Kind::Folder, owner) => {
+                let inner = sys::open_folder_at(folder, &name)?;
+                if clear_listed(&inner, &format!("{path}/"), files, owner)? {
+                    drop(inner);
+                    match sys::remove_at(folder, &name, true) {
+                        Ok(_) => {}
+                        Err(error)
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+                            ) =>
+                        {
+                            empty = false
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    empty = false;
+                }
+            }
+            _ => empty = false,
+        }
+    }
+    sys::flush(folder.raw())?;
+    Ok(empty)
 }
 
 /// Every file under `root`, by relative path, sorted. Anything there that is

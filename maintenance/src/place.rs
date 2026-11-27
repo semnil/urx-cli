@@ -287,6 +287,54 @@ pub fn open_root(layout: &Layout, create: bool) -> Result<Option<Fd>, Problem> {
     Ok(Some(root))
 }
 
+/// The work folder beside the root where the release whose manifest digest
+/// starts with `tag` is assembled, and where the previous tree is left by
+/// the swap that puts the release in place (K41 as revised).
+pub fn staging(layout: &Layout, tag: &str) -> PathBuf {
+    let name = layout
+        .root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    layout.root.with_file_name(format!("{name}.install-{tag}"))
+}
+
+/// The root's parent folder, open; with `create`, made with its missing
+/// system parents, each 0755. None when it is missing and not to be made.
+pub fn root_parent(layout: &Layout, create: bool) -> Result<Option<Fd>, Problem> {
+    let (parent_path, _) = split(&layout.root);
+    if create {
+        make_system_folders(parent_path).map_err(|_| Problem::Write(parent_path.to_path_buf()))?;
+    }
+    match sys::open_system_folder(parent_path) {
+        Ok(parent) => Ok(Some(parent)),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) && !create => Ok(None),
+        Err(_) => Err(Problem::Conflict(parent_path.to_path_buf())),
+    }
+}
+
+/// The folder `name` in the open folder `parent` (at `path`) when it is one
+/// maintenance made; None when nothing is there; anything else is a conflict.
+pub fn open_ours(parent: &Fd, name: &CStr, path: &Path, owner: u32) -> Result<Option<Fd>, Problem> {
+    let conflict = || Problem::Conflict(path.to_path_buf());
+    match sys::entry_at(parent, name).map_err(|_| conflict())? {
+        None => Ok(None),
+        Some(entry) if is_ours(&entry, Kind::Folder, owner) => {
+            let folder = sys::open_folder_at(parent, name).map_err(|_| conflict())?;
+            if is_ours(
+                &sys::entry(folder.raw()).map_err(|_| conflict())?,
+                Kind::Folder,
+                owner,
+            ) {
+                Ok(Some(folder))
+            } else {
+                Err(conflict())
+            }
+        }
+        Some(_) => Err(conflict()),
+    }
+}
+
 /// What is at the command link's path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
@@ -378,23 +426,64 @@ fn make_system_folders(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Checks that every user passes through each folder the system goes through
-/// to reach the root, the command link and the maintenance folder, links
-/// followed to their targets, up to the layout's top: a folder other users
-/// cannot search keeps them from the command, the installed files or the
-/// gate. With `places`, the root and the maintenance folder themselves are
-/// checked too. A folder not there yet is made 0755 when it is needed.
-pub fn check_reachable(layout: &Layout, places: bool) -> Result<(), Problem> {
-    let top = std::fs::canonicalize(&layout.top).unwrap_or_else(|_| layout.top.clone());
-    let mut paths: Vec<&Path> = [&layout.root, &layout.link, &layout.maintenance]
+/// Checks that every user reaches the installation. Run as root for the
+/// fixed places, it asks the system: a child process switched to the user
+/// nobody tries each place as the system resolves it, links and `..`
+/// included. Otherwise (the tests, run as their own user) it walks each path
+/// itself, following links, and checks that others may search every folder
+/// passed through, up to the layout's top. Before any change (`installed`
+/// false) the folders above the root, the command link and the maintenance
+/// folder are checked, as far as they exist (the rest is made 0755); once
+/// installed, the command through its link, the runtime, the CLI, the addon,
+/// the release manifest, the gate and the state record too.
+pub fn check_reachable(layout: &Layout, installed: bool) -> Result<(), Problem> {
+    let mut folders: Vec<PathBuf> = [&layout.root, &layout.link, &layout.maintenance]
         .iter()
         .filter_map(|place| place.parent())
+        .map(Path::to_path_buf)
         .collect();
-    if places {
-        paths.extend([layout.root.as_path(), layout.maintenance.as_path()]);
+    if installed {
+        folders.extend([layout.root.clone(), layout.maintenance.clone()]);
     }
-    for path in paths {
-        traverse(path, &top, 0).map_err(Problem::Unreachable)?;
+    if sys::effective_user() == 0 && layout.owner == 0 {
+        let mut checks: Vec<(PathBuf, sys::Need)> = folders
+            .iter()
+            .filter_map(|folder| {
+                folder
+                    .ancestors()
+                    .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+            })
+            .map(|folder| (folder.to_path_buf(), sys::Need::Execute))
+            .collect();
+        if installed {
+            checks.extend([
+                (layout.link.clone(), sys::Need::Execute),
+                (layout.root.join("runtime/node"), sys::Need::Execute),
+                (layout.root.join("app/main.js"), sys::Need::Read),
+                (layout.root.join("native/urx-native.node"), sys::Need::Read),
+                (layout.root.join(crate::records::MANIFEST), sys::Need::Read),
+                (layout.maintenance.join(GATE), sys::Need::Read),
+                (layout.maintenance.join(STATE), sys::Need::Read),
+            ]);
+        }
+        let named: Vec<(CString, sys::Need)> = checks
+            .iter()
+            .map(|(path, need)| {
+                (
+                    CString::new(path.as_os_str().as_bytes()).unwrap_or_default(),
+                    *need,
+                )
+            })
+            .collect();
+        return match sys::reachable_as_nobody(&named) {
+            Ok(None) => Ok(()),
+            Ok(Some(index)) => Err(Problem::Unreachable(checks[index].0.clone())),
+            Err(_) => Err(Problem::Unreachable(layout.root.clone())),
+        };
+    }
+    let top = std::fs::canonicalize(&layout.top).unwrap_or_else(|_| layout.top.clone());
+    for path in folders {
+        traverse(&path, &top, 0).map_err(Problem::Unreachable)?;
     }
     Ok(())
 }

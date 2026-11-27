@@ -1,10 +1,13 @@
 //! Removal under K20: under the exclusive gate, the state record says
-//! `removing` before anything is deleted; the command link goes only while it
-//! still points to the installation, each owned file goes only while it is a
-//! regular file under exactly its spelling, the installed removal tool goes
-//! last of the files, and folders go only once they are empty. Anything else
-//! is kept and reported. The state record is deleted last, once every owned
-//! file is gone; the gate and its folder stay (K21).
+//! `removing`, with the files of the tree at the root, before anything is
+//! deleted; the command link goes only while it still points to the
+//! installation, each of those files goes only while it is a regular file
+//! under exactly its spelling, the installed removal tool goes after the
+//! others and the release manifest last, and folders go only once they are
+//! empty. Anything else is kept and reported. The state record is deleted
+//! last, once every one of those files is gone; a failure before that keeps
+//! `removing` for the removal to be run again. The gate and its folder stay
+//! (K21).
 
 use crate::place::{self, Access, Layout, LinkState};
 use crate::records::{digest, pending_tag, Manifest, Phase, State, MANIFEST};
@@ -12,8 +15,9 @@ use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
 use std::collections::BTreeSet;
+use std::path::Path;
 
-/// The installed removal tool, removed after every other owned file.
+/// The installed removal tool, removed after every other file but the manifest.
 const TOOL: &str = "maintenance/urx-uninstall";
 
 /// What happened to one owned path.
@@ -29,17 +33,8 @@ pub enum Removal {
 
 /// Removes the owned file `path` under `root` while it is a regular file
 /// listed under exactly that spelling: a file the file system finds only
-/// under another letter case is another path's, and is kept. With `listed`,
-/// the file goes only while it holds exactly that SHA-256 and size (a file a
-/// run of the release wrote); another one there is kept. The pending file
-/// beside it that maintenance writes for the release tagged `tag` goes too.
-pub(crate) fn remove_owned(
-    layout: &Layout,
-    root: &Fd,
-    path: &str,
-    tag: &str,
-    listed: Option<(&str, u64)>,
-) -> Result<Removal, Problem> {
+/// under another letter case is another path's, and is kept.
+pub(crate) fn remove_owned(layout: &Layout, root: &Fd, path: &str) -> Result<Removal, Problem> {
     let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Exact) {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(Removal::Missing),
@@ -47,20 +42,8 @@ pub(crate) fn remove_owned(
         Err(WalkError::Io(_)) => return Err(Problem::Write(layout.root.join(path))),
     };
     let failed = |_| Problem::Write(layout.root.join(path));
-    let pending = place::pending(&name, tag);
-    if let Spelled::Exact(entry) = tree::spelled(&parent, &pending).map_err(failed)? {
-        if entry.kind == Kind::File {
-            sys::remove_at(&parent, &pending, false).map_err(failed)?;
-        }
-    }
     match tree::spelled(&parent, &name).map_err(failed)? {
         Spelled::Missing | Spelled::Other { .. } => Ok(Removal::Missing),
-        Spelled::Exact(entry)
-            if entry.kind == Kind::File
-                && listed.is_some_and(|listed| !holds(&parent, &name, listed)) =>
-        {
-            Ok(Removal::Kept(path.to_owned()))
-        }
         Spelled::Exact(entry) if entry.kind == Kind::File => {
             sys::remove_at(&parent, &name, false).map_err(failed)?;
             sys::flush(parent.raw()).map_err(failed)?;
@@ -68,31 +51,6 @@ pub(crate) fn remove_owned(
         }
         Spelled::Exact(_) => Ok(Removal::Kept(path.to_owned())),
     }
-}
-
-/// Whether the file `name` in `parent` holds exactly the SHA-256 and size `listed`.
-fn holds(parent: &Fd, name: &std::ffi::CStr, listed: (&str, u64)) -> bool {
-    let Ok((mut file, _)) = sys::open_file_at(parent, name) else {
-        return false;
-    };
-    matches!(tree::hash(&mut file), Ok((sha256, size)) if sha256 == listed.0 && size == listed.1)
-}
-
-/// The release manifest installed under `root` when it is the one the
-/// record names: what tells a file a run of that release wrote from another.
-fn installed_manifest(root: &Fd, state: &State) -> Option<(Vec<u8>, Manifest)> {
-    use std::io::Read;
-    let (parent, name) = tree::parent_of(root, MANIFEST, None, How::Exact).ok()??;
-    if !matches!(tree::spelled(&parent, &name), Ok(Spelled::Exact(_))) {
-        return None;
-    }
-    let (file, _) = sys::open_file_at(&parent, &name).ok()?;
-    let mut bytes = Vec::new();
-    file.take(8 << 20).read_to_end(&mut bytes).ok()?;
-    if digest(&bytes) != state.manifest {
-        return None;
-    }
-    Manifest::parse(&bytes).map(|manifest| (bytes, manifest))
 }
 
 /// Removes the folders of `path` under `root` that are empty, deepest
@@ -129,6 +87,46 @@ pub(crate) fn prune(layout: &Layout, root: &Fd, path: &str) -> Result<(), Proble
     Ok(())
 }
 
+/// The files of the tree at the root that the record names. Once complete or
+/// removing, the record's owned paths. While installing, the release's when
+/// the root holds the release manifest the record names (the swap was made),
+/// the complete installation's otherwise. A file that cannot be read stops
+/// the removal before it changes anything.
+fn tree_of(layout: &Layout, root: Option<&Fd>, state: &State) -> Result<Vec<String>, Problem> {
+    if state.phase != Phase::Installing {
+        return Ok(state.owned.clone());
+    }
+    let Some(root) = root else {
+        return Ok(state.base_paths().to_vec());
+    };
+    let unreadable = || Problem::Write(layout.root.join(MANIFEST));
+    let found = match tree::parent_of(root, MANIFEST, None, How::Exact) {
+        Ok(Some((parent, name))) => {
+            match tree::spelled(&parent, &name).map_err(|_| unreadable())? {
+                Spelled::Exact(entry) if entry.kind == Kind::File => Some((parent, name)),
+                _ => None,
+            }
+        }
+        Ok(None) => None,
+        Err(_) => return Err(unreadable()),
+    };
+    let Some((parent, name)) = found else {
+        return Ok(state.base_paths().to_vec());
+    };
+    use std::io::Read;
+    let (file, _) = sys::open_file_at(&parent, &name).map_err(|_| unreadable())?;
+    let mut bytes = Vec::new();
+    file.take(8 << 20)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unreadable())?;
+    if digest(&bytes) == state.manifest {
+        let manifest = Manifest::parse(&bytes).ok_or_else(unreadable)?;
+        Ok(manifest.owned())
+    } else {
+        Ok(state.base_paths().to_vec())
+    }
+}
+
 /// Removes the installation. Without `apply` it only reports what an apply
 /// would remove, and changes nothing. `stop` is asked before each change;
 /// once it answers true, nothing more is changed and the record stays
@@ -148,7 +146,15 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         Some(held) => held.state(layout.owner)?,
         None => None,
     };
-    let root = place::open_root(layout, false)?;
+    let parent = place::root_parent(layout, false)?;
+    let root_name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+        layout.root.file_name().unwrap_or_default(),
+    ))
+    .unwrap_or_default();
+    let root = match &parent {
+        Some(parent) => place::open_ours(parent, &root_name, &layout.root, layout.owner)?,
+        None => None,
+    };
     let Some(state) = state else {
         if root.is_some() {
             return Err(Problem::Unrecorded(layout.root.clone()));
@@ -158,13 +164,14 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
         return Ok(report);
     };
     let link = place::link_state(layout)?;
+    let files = tree_of(layout, root.as_ref(), &state)?;
     if !apply {
         let mut report = Report::default();
         report.line(format!(
             "Would remove urx-cli {} from {}: the {} files it installed{}.",
             state.release,
             layout.root.display(),
-            state.owned.len(),
+            files.len(),
             if link == LinkState::Owned {
                 format!(" and the link {}", layout.link.display())
             } else {
@@ -183,13 +190,13 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
     }
     let held = held.expect("an apply holds the gate");
     let tag = pending_tag(&state.manifest).to_owned();
-    let base: BTreeSet<&String> = state.base_paths().iter().collect();
     if stop() {
         return Err(Problem::Interrupted);
     }
     held.write_state(&State {
         phase: Phase::Removing,
-        base: Some(state.base_paths().to_vec()),
+        owned: files.clone(),
+        base: Some(files.clone()),
         ..state.clone()
     })?;
     let mut report = Report::default();
@@ -217,39 +224,32 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
             layout.link.display()
         ));
     }
-    // The removal tool last, so that while any other owned file is left, the installed one is too.
-    let mut order: Vec<&String> = state
-        .owned
+    // A work folder an interrupted installation of this release left, by its recorded files.
+    if let Some(parent) = &parent {
+        let staging_path = place::staging(layout, &tag);
+        let mut listed: BTreeSet<String> = state.owned.iter().cloned().collect();
+        listed.extend(files.iter().cloned());
+        if !clear_staging(layout, parent, &staging_path, &listed).map_err(&unfinished)? {
+            report.line(format!(
+                "Kept {}: it holds files the installation did not make.",
+                staging_path.display()
+            ));
+        }
+    }
+    // The removal tool after the others, so that while any other file is left, the installed one
+    // is too; the manifest last.
+    let mut order: Vec<&String> = files
         .iter()
-        .filter(|path| path.as_str() != TOOL)
+        .filter(|path| path.as_str() != TOOL && path.as_str() != MANIFEST)
         .collect();
-    order.extend(state.owned.iter().filter(|path| path.as_str() == TOOL));
+    order.extend(files.iter().filter(|path| path.as_str() == TOOL));
+    order.extend(files.iter().filter(|path| path.as_str() == MANIFEST));
     if let Some(root) = &root {
-        // The files a run of the release wrote, told apart from others by the installed manifest.
-        let installed = installed_manifest(root, &state);
         for path in order {
             if stop() {
                 return Err(unfinished(Problem::Interrupted));
             }
-            let listed = if base.contains(path) {
-                None
-            } else if path == MANIFEST {
-                Some(match &installed {
-                    Some((bytes, _)) => (state.manifest.as_str(), bytes.len() as u64),
-                    None => ("", u64::MAX),
-                })
-            } else {
-                // Not listed by a manifest the record names: nothing tells it is the installation's.
-                Some(
-                    installed
-                        .as_ref()
-                        .and_then(|(_, manifest)| {
-                            manifest.files.iter().find(|file| &file.path == path)
-                        })
-                        .map_or(("", u64::MAX), |file| (file.sha256.as_str(), file.size)),
-                )
-            };
-            match remove_owned(layout, root, path, &tag, listed).map_err(&unfinished)? {
+            match remove_owned(layout, root, path).map_err(&unfinished)? {
                 Removal::Kept(at) => report.line(format!(
                     "Kept {}: it is not a file the installation made.",
                     layout.root.join(at).display()
@@ -257,7 +257,7 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
                 Removal::Removed | Removal::Missing => {}
             }
         }
-        for path in &state.owned {
+        for path in &files {
             prune(layout, root, path).map_err(&unfinished)?;
         }
     }
@@ -274,6 +274,43 @@ pub fn uninstall(layout: &Layout, apply: bool, stop: &dyn Fn() -> bool) -> Resul
     held.remove_state(&tag).map_err(&unfinished)?;
     report.line(format!("Removed urx-cli {}.", state.release));
     Ok(report)
+}
+
+/// Removes the work folder at `path` beside the root by the recorded files
+/// in it; true when it is gone or was never there.
+fn clear_staging(
+    layout: &Layout,
+    parent: &Fd,
+    path: &Path,
+    listed: &BTreeSet<String>,
+) -> Result<bool, Problem> {
+    let name = sys::c_name(std::os::unix::ffi::OsStrExt::as_bytes(
+        path.file_name().unwrap_or_default(),
+    ))
+    .map_err(|_| Problem::Write(path.to_path_buf()))?;
+    let Some(staging) = place::open_ours(parent, &name, path, layout.owner)? else {
+        return Ok(true);
+    };
+    let failed = |_| Problem::Write(path.to_path_buf());
+    if !tree::clear_listed(&staging, "", listed, layout.owner).map_err(failed)? {
+        return Ok(false);
+    }
+    drop(staging);
+    match sys::remove_at(parent, &name, true) {
+        Ok(_) => {
+            sys::flush(parent.raw()).map_err(failed)?;
+            Ok(true)
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(failed(error)),
+    }
 }
 
 /// Removes the root once it is empty; true when it is kept, holding something.

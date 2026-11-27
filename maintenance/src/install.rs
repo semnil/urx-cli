@@ -1,21 +1,25 @@
-//! Installation, update and repair under K41: one process, under the
-//! exclusive gate, admits and inspects, records `installing`, removes the
-//! files only the previous release had, copies the release's files, removes
-//! the previous spellings of files whose name changed only in letter case,
+//! Installation, update and repair under K41 as revised (assembled beside
+//! the root): one process, under the exclusive gate, admits and inspects,
+//! records `installing`, assembles the complete release in a work folder
+//! beside the root, verifies it, and puts it in place with one rename (a swap
+//! with the previous tree, or a rename where no root is). It then removes the
+//! previous tree, left at the work folder's name, by its recorded paths,
 //! makes the command link, verifies everything and makes it durable, and
-//! only then records `complete`. A failure or an interruption before that
-//! leaves the `installing` record, which keeps the CLI from starting until
-//! the same release is installed again.
+//! only then records `complete`. An interruption therefore leaves at the root
+//! either the previous tree or the complete release, never a partly written
+//! tree; the `installing` record keeps the CLI from starting until the same
+//! release is installed again.
 
 use crate::place::{self, Access, Layout, LinkState};
-use crate::records::{key, Phase, State, MANIFEST};
+use crate::records::{pending_tag, Phase, State, MANIFEST};
 use crate::source::{self, Source};
 use crate::sys::{self, Fd, Kind};
 use crate::tree::{self, How, Spelled, WalkError};
 use crate::{Problem, Report};
 use std::collections::BTreeSet;
-use std::ffi::CStr;
+use std::ffi::CString;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// What an apply would do.
@@ -30,34 +34,15 @@ pub enum Action {
     Repair,
 }
 
-/// The changes an apply makes to the files, from what is installed and what
-/// this release lists.
-struct Changes {
-    /// This release's files.
-    target: Vec<String>,
-    /// Owned now and not this release's under any spelling: removed before
-    /// copying, which clears a place where this release has a folder for a
-    /// file or a file for a folder.
-    gone: Vec<String>,
-    /// Owned now under another letter case of one of this release's paths:
-    /// that spelling is removed after copying, where it is still another file.
-    respelled: Vec<String>,
-}
-
-impl Changes {
-    fn of(previous: &[String], target: Vec<String>) -> Changes {
-        let target_keys: BTreeSet<String> = target.iter().map(|path| key(path)).collect();
-        let (respelled, gone) = previous
-            .iter()
-            .filter(|path| target.binary_search(path).is_err())
-            .cloned()
-            .partition(|path| target_keys.contains(&key(path)));
-        Changes {
-            target,
-            gone,
-            respelled,
-        }
-    }
+/// What is at the root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Root {
+    Absent,
+    /// The installation's recorded files of the complete installation the
+    /// run starts from (all or some of them), and nothing else.
+    Previous,
+    /// Exactly this release, put in place by a run interrupted after the swap.
+    Target,
 }
 
 struct Inspection {
@@ -67,6 +52,7 @@ struct Inspection {
     /// The paths of the complete installation the run starts from, or started
     /// from when it was interrupted.
     base: Vec<String>,
+    root: Root,
     link: LinkState,
 }
 
@@ -125,61 +111,91 @@ pub fn install(
         return Ok(report);
     }
     let held = held.expect("an apply holds the gate");
-    let changes = Changes::of(&inspection.previous, source.manifest.owned());
+    let target = source.manifest.owned();
     let digest = source.digest();
+    let tag = pending_tag(&digest).to_owned();
     if stop() {
         return Err(Problem::Interrupted);
     }
     // Record before writing (K41 step 2): every path that may be owned, and
     // which of them the complete installation owned.
     let mut owned = inspection.previous.clone();
-    owned.extend(changes.target.iter().cloned());
+    owned.extend(target.iter().cloned());
     owned.sort_unstable();
     owned.dedup();
     held.write_state(&State {
         phase: Phase::Installing,
         release: release.clone(),
         manifest: digest.clone(),
-        owned,
+        owned: owned.clone(),
         base: Some(inspection.base.clone()),
     })?;
-    let tag = crate::records::pending_tag(&digest).to_owned();
-    let root = place::open_root(layout, true)?.expect("a created root is open");
-    // Mutate (step 3): what goes, then what comes, then the old spellings.
-    for path in &changes.gone {
+    let parent = place::root_parent(layout, true)?.expect("a made parent is open");
+    let staging_path = place::staging(layout, &tag);
+    let staging_name = c_last(&staging_path);
+    let root_name = c_last(&layout.root);
+    let listed: BTreeSet<String> = owned.iter().cloned().collect();
+    let mut report = Report::default();
+    if inspection.root != Root::Target {
+        // A work folder an interrupted run of this release left goes first.
+        if !clear_staging(layout, &parent, &staging_name, &staging_path, &listed)? {
+            return Err(Problem::Conflict(staging_path));
+        }
         if stop() {
             return Err(Problem::Interrupted);
         }
-        crate::remove::remove_owned(layout, &root, path, &tag, None)?;
-        crate::remove::prune(layout, &root, path)?;
+        let failed = |_| Problem::Write(staging_path.clone());
+        let staging = sys::make_folder_at(&parent, &staging_name, 0o755).map_err(failed)?;
+        // Assemble (step 3), every file in a folder of this run's own.
+        for path in &target {
+            if stop() {
+                return Err(Problem::Interrupted);
+            }
+            put(layout, &staging, &staging_path, &source, path)?;
+        }
+        settle_folders(&staging, &staging_path, &target)?;
+        for path in &target {
+            check(layout, &staging, &staging_path, &source, path)?;
+        }
+        sys::flush(staging.raw()).map_err(failed)?;
+        drop(staging);
+        if stop() {
+            return Err(Problem::Interrupted);
+        }
+        // Put in place with one rename: the previous tree goes to the work folder's name.
+        let placed = if inspection.root == Root::Absent {
+            sys::rename_exclusive(&parent, &staging_name, &root_name)
+        } else {
+            sys::swap(&parent, &staging_name, &root_name)
+        };
+        placed.map_err(|_| Problem::Write(layout.root.clone()))?;
+        sys::sync(parent.raw()).map_err(|_| Problem::Write(layout.root.clone()))?;
     }
-    // The manifest first: it is what tells the installation's new files from others afterwards.
-    let order = changes
-        .target
-        .iter()
-        .filter(|path| *path == MANIFEST)
-        .chain(changes.target.iter().filter(|path| *path != MANIFEST));
-    for path in order {
-        if stop() {
-            return Err(Problem::Interrupted);
-        }
-        put(layout, &root, &source, path, &tag)?;
+    // The previous tree, now at the work folder's name, by its recorded paths.
+    if stop() {
+        return Err(Problem::Interrupted);
     }
-    for path in &changes.respelled {
-        if stop() {
-            return Err(Problem::Interrupted);
-        }
-        crate::remove::remove_owned(layout, &root, path, &tag, None)?;
-        crate::remove::prune(layout, &root, path)?;
+    if !clear_staging(layout, &parent, &staging_name, &staging_path, &listed)? {
+        report.line(format!(
+            "Kept {}: the previous installation left files there that it did not make.",
+            staging_path.display()
+        ));
     }
     if stop() {
         return Err(Problem::Interrupted);
     }
     place::make_link(layout)?;
     // Verify and make durable (step 4).
-    settle_folders(layout, &root, &changes.target)?;
-    for path in &changes.target {
-        check(layout, &root, &source, path)?;
+    let root = place::open_ours(&parent, &root_name, &layout.root, layout.owner)?
+        .ok_or_else(|| Problem::Verify(layout.root.clone()))?;
+    for path in &target {
+        check(layout, &root, &layout.root, &source, path)?;
+    }
+    let target_set: BTreeSet<String> = target.iter().cloned().collect();
+    match tree::only_listed(&root, "", &target_set, layout.owner) {
+        Ok(Ok(())) => {}
+        Ok(Err(at)) => return Err(Problem::Conflict(layout.root.join(at))),
+        Err(_) => return Err(Problem::Verify(layout.root.clone())),
     }
     if place::link_state(layout)? != LinkState::Owned {
         return Err(Problem::Verify(layout.link.clone()));
@@ -190,7 +206,7 @@ pub fn install(
         phase: Phase::Complete,
         release: release.clone(),
         manifest: digest,
-        owned: changes.target,
+        owned: target,
         base: None,
     };
     // The record must be one the launcher starts from.
@@ -201,21 +217,23 @@ pub fn install(
         return Err(Problem::Interrupted);
     }
     held.write_state(&complete)?;
-    let mut report = Report::default();
-    report.line(match &inspection.action {
-        Action::Install => format!(
-            "Installed urx-cli {release} into {}.",
-            layout.root.display()
-        ),
-        Action::Update { from } => format!(
-            "Updated urx-cli {from} to {release} in {}.",
-            layout.root.display()
-        ),
-        Action::Repair => format!(
-            "Installed urx-cli {release} again into {}.",
-            layout.root.display()
-        ),
-    });
+    report.lines.insert(
+        0,
+        match &inspection.action {
+            Action::Install => format!(
+                "Installed urx-cli {release} into {}.",
+                layout.root.display()
+            ),
+            Action::Update { from } => format!(
+                "Updated urx-cli {from} to {release} in {}.",
+                layout.root.display()
+            ),
+            Action::Repair => format!(
+                "Installed urx-cli {release} again into {}.",
+                layout.root.display()
+            ),
+        },
+    );
     report.line(format!(
         "Run {} (or urx, where /usr/local/bin is on PATH).",
         layout.link.display()
@@ -223,23 +241,38 @@ pub fn install(
     Ok(report)
 }
 
+fn c_last(path: &Path) -> CString {
+    CString::new(
+        path.file_name()
+            .map(|name| name.as_bytes())
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default()
+}
+
 /// The preflight (K41 step 1): what is installed, whether this release may
-/// replace it, and that the apply would change nothing that is not the
-/// installation's. Something else where this release's files go stops it
-/// here, before the record changes, with the installed release as it was.
+/// replace it, and that the root and the work folder hold nothing but the
+/// installation's recorded files. Anything else there stops it here, before
+/// the record changes, and is kept (K18).
 fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<Inspection, Problem> {
-    let root = place::open_root(layout, false)?;
+    let parent = place::root_parent(layout, false)?;
+    let root = match &parent {
+        Some(parent) => {
+            place::open_ours(parent, &c_last(&layout.root), &layout.root, layout.owner)?
+        }
+        None => None,
+    };
     let link = place::link_state(layout)?;
     if link == LinkState::Foreign {
         return Err(Problem::Conflict(layout.link.clone()));
     }
     let digest = source.digest();
-    let (action, previous, base) = match state {
+    let (action, previous, base, phase) = match state {
         None => {
             if root.is_some() {
                 return Err(Problem::Unrecorded(layout.root.clone()));
             }
-            (Action::Install, Vec::new(), Vec::new())
+            (Action::Install, Vec::new(), Vec::new(), None)
         }
         Some(state) => {
             let same = state.manifest == digest;
@@ -255,217 +288,125 @@ fn inspect(layout: &Layout, source: &Source, state: Option<&State>) -> Result<In
                     })
                 }
             };
-            (action, state.owned.clone(), state.base_paths().to_vec())
+            (
+                action,
+                state.owned.clone(),
+                state.base_paths().to_vec(),
+                Some(state.phase),
+            )
         }
     };
-    let Some(root) = root else {
-        return Ok(Inspection {
-            action,
-            previous,
-            base,
-            link,
-        });
+    let target: BTreeSet<String> = source.manifest.owned().into_iter().collect();
+    let base_set: BTreeSet<String> = base.iter().cloned().collect();
+    let conflict = |at: &Path, error: std::io::Result<Result<(), String>>| match error {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(entry)) => Err(Problem::Conflict(at.join(entry))),
+        Err(_) => Err(Problem::Conflict(at.to_path_buf())),
     };
-    let changes = Changes::of(&previous, source.manifest.owned());
-    let plan = Plan::new(&previous, &base, &changes);
-    for path in &changes.target {
-        plan.clear_for(layout, &root, source, path)
-            .map_err(|at| Problem::Conflict(layout.root.join(at)))?;
+    // A work folder an interrupted run of this release left holds only recorded files.
+    if let Some(parent) = &parent {
+        let staging_path = place::staging(layout, pending_tag(&digest));
+        if let Some(staging) =
+            place::open_ours(parent, &c_last(&staging_path), &staging_path, layout.owner)?
+        {
+            let mut listed: BTreeSet<String> = previous.iter().cloned().collect();
+            listed.extend(target.iter().cloned());
+            conflict(
+                &staging_path,
+                tree::only_listed(&staging, "", &listed, layout.owner),
+            )?;
+        }
     }
+    let root_state = match &root {
+        None => Root::Absent,
+        Some(root)
+            if phase == Some(Phase::Installing) && is_release(layout, root, source, &target) =>
+        {
+            Root::Target
+        }
+        Some(root) => {
+            conflict(
+                &layout.root,
+                tree::only_listed(root, "", &base_set, layout.owner),
+            )?;
+            Root::Previous
+        }
+    };
     Ok(Inspection {
         action,
         previous,
         base,
+        root: root_state,
         link,
     })
 }
 
-/// What the preflight knows of the installation's own entries.
-struct Plan {
-    /// Folders the installation owns: the folders of every path it may own, by `key`.
-    folders: BTreeSet<String>,
-    /// Paths whose files are the installation's whatever they hold, by `key`.
-    base: BTreeSet<String>,
-    /// Paths the installation may own whose files are its own only as this
-    /// release lists them, by `key`.
-    added: BTreeSet<String>,
-    /// The files that go before this release's are written, exactly as
-    /// spelled, and their folders.
-    gone_files: BTreeSet<String>,
-    gone_folders: BTreeSet<String>,
+/// Whether the open root holds exactly this release: each of its files as
+/// listed, and nothing else.
+fn is_release(layout: &Layout, root: &Fd, source: &Source, target: &BTreeSet<String>) -> bool {
+    matches!(
+        tree::only_listed(root, "", target, layout.owner),
+        Ok(Ok(()))
+    ) && target
+        .iter()
+        .all(|path| check(layout, root, &layout.root, source, path).is_ok())
 }
 
-fn folders_of(path: &str) -> impl Iterator<Item = &str> {
-    path.match_indices('/').map(move |(at, _)| &path[..at])
-}
-
-impl Plan {
-    fn new(previous: &[String], base: &[String], changes: &Changes) -> Plan {
-        let base_keys: BTreeSet<String> = base.iter().map(|path| key(path)).collect();
-        Plan {
-            folders: previous
-                .iter()
-                .flat_map(|path| folders_of(path))
-                .map(key)
-                .collect(),
-            added: previous
-                .iter()
-                .map(|path| key(path))
-                .filter(|path| !base_keys.contains(path))
-                .collect(),
-            base: base_keys,
-            gone_files: changes.gone.iter().cloned().collect(),
-            gone_folders: changes
-                .gone
-                .iter()
-                .flat_map(|path| folders_of(path))
-                .map(str::to_owned)
-                .collect(),
-        }
-    }
-
-    /// Whether this release's file `path` has its place: each folder on the
-    /// way is one the installation owns, or missing, or a file that goes
-    /// first; the file's own place is empty, holds the installation's file
-    /// (a file of the complete installation, or one as this release lists
-    /// it), or is a folder of the installation's that the files going leave
-    /// empty. The path of the first thing in the way otherwise.
-    fn clear_for(
-        &self,
-        layout: &Layout,
-        root: &Fd,
-        source: &Source,
-        path: &str,
-    ) -> Result<(), String> {
-        let names: Vec<&str> = path.split('/').collect();
-        let mut folder: Option<Fd> = None;
-        let mut walked = String::new();
-        for (index, name) in names.iter().enumerate() {
-            let prefix = walked.clone();
-            if !walked.is_empty() {
-                walked.push('/');
-            }
-            walked.push_str(name);
-            let c_name = sys::c_name(name.as_bytes()).map_err(|_| walked.clone())?;
-            let parent = folder.as_ref().unwrap_or(root);
-            let found = tree::spelled(parent, &c_name).map_err(|_| walked.clone())?;
-            // The entry, and its path as the folder spells it.
-            let (entry, actual) = match &found {
-                Spelled::Missing => return Ok(()),
-                Spelled::Exact(entry) => (*entry, walked.clone()),
-                Spelled::Other { entry, actual } => {
-                    let Some(actual) = actual.as_ref().and_then(|actual| actual.to_str().ok())
-                    else {
-                        return Err(walked);
-                    };
-                    let spelled = if prefix.is_empty() {
-                        actual.to_owned()
-                    } else {
-                        format!("{prefix}/{actual}")
-                    };
-                    (*entry, spelled)
-                }
-            };
-            let last = index + 1 == names.len();
-            let ours_folder = place::is_ours(&entry, Kind::Folder, layout.owner)
-                && self.folders.contains(&key(&walked));
-            match entry.kind {
-                Kind::Folder if !ours_folder => return Err(walked),
-                Kind::Folder if !last => {
-                    folder =
-                        Some(sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?);
-                }
-                Kind::Folder => {
-                    // A folder that becomes a file: only one the files going leave empty.
-                    let inner = sys::open_folder_at(parent, &c_name).map_err(|_| walked.clone())?;
-                    return match self.holds_only_gone(&inner, &format!("{actual}/")) {
-                        Ok(true) if self.gone_folders.contains(&actual) => Ok(()),
-                        _ => Err(walked),
-                    };
-                }
-                // A file that becomes a folder: only one that goes first, under that spelling.
-                Kind::File if !last && self.gone_files.contains(&actual) => return Ok(()),
-                Kind::File | Kind::Link if last && self.base.contains(&key(&walked)) => {
-                    return Ok(())
-                }
-                // A file a run of this release wrote before it was interrupted: only as the release lists it.
-                Kind::File if last && self.added.contains(&key(&walked)) => {
-                    return if listed_file(source, path, parent, &c_name) {
-                        Ok(())
-                    } else {
-                        Err(walked)
-                    };
-                }
-                _ => return Err(walked),
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether everything under the open folder `folder` (at `prefix`, ending
-    /// with `/`, as spelled) is a file that goes or a folder of one, under
-    /// exactly that spelling.
-    fn holds_only_gone(&self, folder: &Fd, prefix: &str) -> std::io::Result<bool> {
-        for name in sys::names(folder)? {
-            let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
-                return Ok(false);
-            };
-            let path = format!("{prefix}{text}");
-            match sys::entry_at(folder, &name)?.map(|entry| entry.kind) {
-                Some(Kind::File) if self.gone_files.contains(&path) => {}
-                Some(Kind::Folder) if self.gone_folders.contains(&path) => {
-                    if !self.holds_only_gone(
-                        &sys::open_folder_at(folder, &name)?,
-                        &format!("{path}/"),
-                    )? {
-                        return Ok(false);
-                    }
-                }
-                None => {}
-                Some(_) => return Ok(false),
-            }
-        }
-        Ok(true)
-    }
-}
-
-/// Whether the file `name` in `parent` holds exactly what this release lists for `path`.
-fn listed_file(source: &Source, path: &str, parent: &Fd, name: &CStr) -> bool {
-    let Ok((mut file, _)) = sys::open_file_at(parent, name) else {
-        return false;
+/// Removes the work folder `name` in `parent`: each recorded file in it and
+/// each folder of the installation's left empty, then the folder itself.
+/// True when it is gone or was never there; false when something else keeps
+/// it, which stays.
+fn clear_staging(
+    layout: &Layout,
+    parent: &Fd,
+    name: &std::ffi::CStr,
+    path: &Path,
+    listed: &BTreeSet<String>,
+) -> Result<bool, Problem> {
+    let Some(staging) = place::open_ours(parent, name, path, layout.owner)? else {
+        return Ok(true);
     };
-    let Ok((sha256, size)) = tree::hash(&mut file) else {
-        return false;
-    };
-    if path == MANIFEST {
-        sha256 == source.digest() && size == source.manifest_bytes.len() as u64
-    } else {
-        source
-            .manifest
-            .files
-            .iter()
-            .any(|file| file.path == path && file.sha256 == sha256 && file.size == size)
+    let failed = |_| Problem::Write(path.to_path_buf());
+    if !tree::clear_listed(&staging, "", listed, layout.owner).map_err(failed)? {
+        return Ok(false);
+    }
+    drop(staging);
+    match sys::remove_at(parent, name, true) {
+        Ok(_) => {
+            sys::flush(parent.raw()).map_err(failed)?;
+            Ok(true)
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(failed(error)),
     }
 }
 
-/// Writes the owned file `path` from the source: to a pending sibling,
-/// hashed as it is copied, given its mode and flushed, then renamed into
-/// place under exactly this path's spelling. A file that no longer matches
-/// the manifest stops the installation.
-fn put(layout: &Layout, root: &Fd, source: &Source, path: &str, tag: &str) -> Result<(), Problem> {
-    let at = layout.root.join(path);
-    let (parent, name) = match tree::parent_of(root, path, Some(layout.owner), How::Make) {
+/// Writes the owned file `path` from the source into the work folder
+/// `staging` (at `at`), made by this run: hashed as it is copied, given its
+/// mode and flushed. A file that no longer matches the manifest stops the
+/// installation.
+fn put(
+    layout: &Layout,
+    staging: &Fd,
+    at: &Path,
+    source: &Source,
+    path: &str,
+) -> Result<(), Problem> {
+    let written = at.join(path);
+    let (parent, name) = match tree::parent_of(staging, path, Some(layout.owner), How::Make) {
         Ok(found) => found.expect("missing folders are made"),
-        Err(WalkError::Conflict(conflict)) => {
-            return Err(Problem::Conflict(layout.root.join(conflict)))
-        }
-        Err(WalkError::Io(_)) => return Err(Problem::Write(at)),
+        Err(WalkError::Conflict(conflict)) => return Err(Problem::Conflict(at.join(conflict))),
+        Err(WalkError::Io(_)) => return Err(Problem::Write(written)),
     };
-    let failed = |_| Problem::Write(at.clone());
-    // A pending file with this release's tag is one a run of this release left.
-    let pending = place::pending(&name, tag);
-    sys::remove_at(&parent, &pending, false).map_err(failed)?;
-    let mut file = sys::create_file_at(&parent, &pending).map_err(failed)?;
+    let failed = |_| Problem::Write(written.clone());
+    let mut file = sys::create_file_at(&parent, &name).map_err(failed)?;
     if path == MANIFEST {
         file.write_all(&source.manifest_bytes).map_err(failed)?;
     } else {
@@ -483,32 +424,11 @@ fn put(layout: &Layout, root: &Fd, source: &Source, path: &str, tag: &str) -> Re
             sys::open_file_at(&from_parent, &from_name).map_err(|_| changed(source, path))?;
         let (sha256, size) = copy(&mut from, &mut file).map_err(failed)?;
         if sha256 != expected.sha256 || size != expected.size {
-            drop(file);
-            let _ = sys::remove_at(&parent, &pending, false);
             return Err(changed(source, path));
         }
     }
     sys::set_mode(&file, source::mode_of(path)).map_err(failed)?;
-    sys::flush(std::os::unix::io::AsRawFd::as_raw_fd(&file)).map_err(failed)?;
-    drop(file);
-    match tree::spelled(&parent, &name).map_err(failed)? {
-        Spelled::Exact(entry) | Spelled::Other { entry, .. } if entry.kind == Kind::Folder => {
-            let _ = sys::remove_at(&parent, &pending, false);
-            return Err(Problem::Conflict(at));
-        }
-        // The installation's file under another letter case: given this spelling first, since
-        // a rename over it would keep the old one.
-        Spelled::Other {
-            actual: Some(actual),
-            ..
-        } => sys::rename_at(&parent, &actual, &name).map_err(failed)?,
-        Spelled::Other { actual: None, .. } => {
-            let _ = sys::remove_at(&parent, &pending, false);
-            return Err(Problem::Conflict(at));
-        }
-        Spelled::Missing | Spelled::Exact(_) => {}
-    }
-    sys::rename_at(&parent, &pending, &name).map_err(failed)
+    sys::flush(std::os::unix::io::AsRawFd::as_raw_fd(&file)).map_err(failed)
 }
 
 fn changed(source: &Source, path: &str) -> Problem {
@@ -544,12 +464,18 @@ fn copy(from: &mut std::fs::File, to: &mut std::fs::File) -> std::io::Result<(St
     ))
 }
 
-/// Reads the installed file `path` back, through exactly its spelling: the
-/// owner's regular file with its mode, holding exactly what the release lists.
-fn check(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), Problem> {
-    let at = layout.root.join(path);
-    let unverified = || Problem::Verify(at.clone());
-    let (parent, name) = tree::parent_of(root, path, Some(layout.owner), How::Exact)
+/// Reads the file `path` back from the tree open at `tree` (at `at`), through
+/// exactly its spelling: the owner's regular file with its mode, holding
+/// exactly what the release lists.
+fn check(
+    layout: &Layout,
+    tree: &Fd,
+    at: &Path,
+    source: &Source,
+    path: &str,
+) -> Result<(), Problem> {
+    let unverified = || Problem::Verify(at.join(path));
+    let (parent, name) = tree::parent_of(tree, path, Some(layout.owner), How::Exact)
         .ok()
         .flatten()
         .ok_or_else(unverified)?;
@@ -557,7 +483,10 @@ fn check(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), 
         return Err(unverified());
     }
     let (mut file, entry) = sys::open_file_at(&parent, &name).map_err(|_| unverified())?;
-    if entry.owner != layout.owner || entry.mode != source::mode_of(path) {
+    if entry.owner != layout.owner
+        || entry.mode != source::mode_of(path)
+        || entry.kind != Kind::File
+    {
         return Err(unverified());
     }
     let (sha256, size) = tree::hash(&mut file).map_err(|_| unverified())?;
@@ -577,22 +506,23 @@ fn check(layout: &Layout, root: &Fd, source: &Source, path: &str) -> Result<(), 
     }
 }
 
-/// Gives the root and every folder of this release's files the mode 0755,
-/// whatever it had, so that any user reaches the installed files, and
-/// flushes each, so that each name made or removed in it is on the disk.
-/// Folders the installation does not use are left as they are.
-fn settle_folders(layout: &Layout, root: &Fd, target: &[String]) -> Result<(), Problem> {
-    let failed = |_| Problem::Write(layout.root.clone());
-    let folders: BTreeSet<&str> = target.iter().flat_map(|path| folders_of(path)).collect();
+/// Gives the work folder and every folder of this release's files in it the
+/// mode 0755, so that any user reaches the installed files, and flushes each.
+fn settle_folders(staging: &Fd, at: &Path, target: &[String]) -> Result<(), Problem> {
+    let failed = |_| Problem::Write(at.to_path_buf());
+    let folders: BTreeSet<&str> = target
+        .iter()
+        .flat_map(|path| path.match_indices('/').map(move |(end, _)| &path[..end]))
+        .collect();
     for folder in folders {
-        let (parent, name) = match tree::parent_of(root, folder, Some(layout.owner), How::Exact) {
+        let (parent, name) = match tree::parent_of(staging, folder, None, How::Exact) {
             Ok(Some(found)) => found,
-            _ => return Err(Problem::Verify(layout.root.join(folder))),
+            _ => return Err(Problem::Verify(at.join(folder))),
         };
         let opened = sys::open_folder_at(&parent, &name).map_err(failed)?;
         sys::set_folder_mode(&opened, 0o755).map_err(failed)?;
         sys::flush(opened.raw()).map_err(failed)?;
     }
-    sys::set_folder_mode(root, 0o755).map_err(failed)?;
-    sys::flush(root.raw()).map_err(failed)
+    sys::set_folder_mode(staging, 0o755).map_err(failed)?;
+    sys::flush(staging.raw()).map_err(failed)
 }
