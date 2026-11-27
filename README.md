@@ -32,7 +32,7 @@ pnpm build:native
 pnpm test
 ```
 
-`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`. `pnpm build:bundle --node-archive <path>` then assembles the installed bundle from `dist-release` and the official Node archive, into `dist-bundle`; it checks the archive against the hash in `build-inputs.json` and downloads nothing. Neither build removes or replaces a previous output, an empty folder included, and a build that fails leaves its partly written output: remove `dist-release` or `dist-bundle` before building it again.
+`pnpm test` loads the addon that `pnpm build:native` built into `dist/native`. `pnpm build:release` builds both from the committed sources instead of the working tree, into `dist-release`. `pnpm build:bundle --node-archive <path>` then assembles the installed bundle from `dist-release` and the official Node archive, into `dist-bundle`; it checks the archive against the hash in `build-inputs.json` and downloads nothing. Neither build removes or replaces a previous output, an empty folder included: remove `dist-release` or `dist-bundle` before building it again. A build that fails leaves nothing there; its files stay in a `dist-release.work-…` or `dist-bundle.work-…` folder beside it, which you remove.
 
 ## Versioning
 
