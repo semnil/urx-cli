@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { bundleProblems, ownedFilesInclude } from "./build-windows-installer.mjs";
+import { bundleProblems, innoVersionNumber, ownedFilesInclude, windowsBundleProblems } from "./build-windows-installer.mjs";
 import { sha256 } from "./release-build.mjs";
 
 const temporary = [];
@@ -68,5 +68,32 @@ describe("the bundle the installer is built from", () => {
       "notes.txt is not one of its files",
     ]);
     expect(bundleProblems(dir, { product: "other", format: 1, files: [] })).toEqual(["the bundle has no urx-cli format 1 manifest"]);
+  });
+});
+
+describe("the Windows bundle and its compiler", () => {
+  const inputs = { node: { archives: { "win-x64": { file: "node-v26.13.0-win-x64.zip", sha256: "a".repeat(64) } } } };
+  const files = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"].map((path) => ({ path, sha256: "b".repeat(64), size: 1 }));
+  const runtime = { archive: "node-v26.13.0-win-x64.zip", sha256: "a".repeat(64) };
+
+  it("take a bundle built with the recorded Windows x64 Node archive and holding its required files", () => {
+    expect(windowsBundleProblems({ runtime, files }, inputs)).toEqual([]);
+  });
+
+  it("refuse another platform's bundle and one without a required file", () => {
+    const mac = { archive: "node-v26.13.0-darwin-arm64.tar.gz", sha256: "c".repeat(64) };
+    expect(windowsBundleProblems({ runtime: mac, files: [] }, inputs)).toEqual([
+      "the bundle's runtime is not node-v26.13.0-win-x64.zip, the Windows x64 Node archive build-inputs.json records",
+      "the bundle lists no bin/urx.exe",
+      "the bundle lists no runtime/node.exe",
+      "the bundle lists no native/urx-native.node",
+      "the bundle lists no app/main.js",
+    ]);
+  });
+
+  it("encode the recorded Inno Setup version as ISPP's Ver without its build number", () => {
+    expect(innoVersionNumber("7.1.1")).toBe(String(0x070101));
+    expect(innoVersionNumber("6.7.4")).toBe(String(0x060704));
+    for (const version of ["7.1", "7.1.1.0", "", undefined, "7.256.0"]) expect(() => innoVersionNumber(version), String(version)).toThrow();
   });
 });

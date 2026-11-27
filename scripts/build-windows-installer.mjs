@@ -1,7 +1,9 @@
 // The Windows installer (K17, K23): compiles installer/windows/urx-cli.iss
 // with Inno Setup's command-line compiler over dist-bundle/, after checking
 // that the bundle holds exactly the files its release manifest lists, each as
-// built, and writes the setup program to dist-installer/. The installer is
+// built, in a copy of dist-bundle/ it compiles from, that the bundle is a Windows
+// x64 one, and that the compiler is the Inno Setup version build-inputs.json
+// records; it writes the setup program to dist-installer/. The installer is
 // given the list of those files with their SHA-256, and checks each one after
 // installing it. Like the other builds, it stops before reading anything when
 // anything is at dist-installer/, and publishes the setup program with
@@ -15,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { filesUnder, platformOf } from "./build-bundle.mjs";
+import { filesUnder, platformOf, snapshotRelease } from "./build-bundle.mjs";
 import { cleanUp, isRecordedPath, outputTool, publishOutput, recordedProblems, requireNoOutput, sha256 } from "./release-build.mjs";
 
 const MANIFEST = "release-manifest.json";
@@ -58,6 +60,36 @@ export function bundleProblems(bundle, manifest) {
   return [...recordedProblems(bundle, manifest.files), ...unlisted.map((path) => `${path} is not one of its files`)];
 }
 
+/** The files a Windows bundle cannot be without: the launcher, the runtime, the addon and the CLI's entry. */
+const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"];
+
+/**
+ * What keeps the bundle `manifest` describes from being a Windows x64 bundle
+ * built with the Node archive `inputs` (build-inputs.json) records for it.
+ */
+export function windowsBundleProblems(manifest, inputs) {
+  const problems = [];
+  const archive = inputs.node.archives["win-x64"];
+  if (manifest.runtime?.archive !== archive.file || manifest.runtime?.sha256 !== archive.sha256) {
+    problems.push(`the bundle's runtime is not ${archive.file}, the Windows x64 Node archive build-inputs.json records`);
+  }
+  const listed = new Set(manifest.files.map((file) => file.path));
+  for (const path of REQUIRED) if (!listed.has(path)) problems.push(`the bundle lists no ${path}`);
+  return problems;
+}
+
+/**
+ * The Inno Setup version `version` (x.y.z), encoded as ISPP's `Ver` is without
+ * its build number, so the script can refuse any other compiler.
+ */
+export function innoVersionNumber(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? "");
+  if (match === null) throw new Error(`build-inputs.json records no Inno Setup version x.y.z: ${version}`);
+  const [major, minor, patch] = match.slice(1).map(Number);
+  if (major > 255 || minor > 255 || patch > 255) throw new Error(`the Inno Setup version ${version} does not fit ISPP's version number`);
+  return String(major * 65536 + minor * 256 + patch);
+}
+
 const USAGE = "usage: node scripts/build-windows-installer.mjs --iscc <path to ISCC.exe>";
 
 function main(argv) {
@@ -72,13 +104,19 @@ function main(argv) {
   const tool = outputTool(root);
   let scratch;
   try {
-    const manifestBytes = readFileSync(join(bundle, MANIFEST));
+    const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
+    const innoVersion = innoVersionNumber(inputs.innoSetup?.version);
+    scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    // The installer is compiled from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.
+    const snapshot = join(scratch, "bundle");
+    snapshotRelease(bundle, snapshot);
+    const manifestBytes = readFileSync(join(snapshot, MANIFEST));
     const manifest = JSON.parse(manifestBytes.toString("utf8"));
-    const problems = bundleProblems(bundle, manifest);
-    if (problems.length > 0) throw new Error(`${bundle} is not the bundle its manifest describes: ${problems.join("; ")}`);
+    const problems = bundleProblems(snapshot, manifest);
+    if (problems.length === 0) problems.push(...windowsBundleProblems(manifest, inputs));
+    if (problems.length > 0) throw new Error(`${bundle} is not the Windows bundle its manifest describes: ${problems.join("; ")}`);
     // The version is written into the installer's [Setup] section and its state record as it is.
     if (!/^[0-9A-Za-z.+-]+$/.test(manifest.release ?? "")) throw new Error(`the bundle's manifest names no release version the installer can carry: ${manifest.release}`);
-    scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
     const include = join(scratch, "owned-files.iss");
     writeFileSync(include, ownedFilesInclude(manifest, sha256(manifestBytes)));
     // Compiled into this run's scratch, then published.
@@ -89,8 +127,9 @@ function main(argv) {
         "/Qp",
         `/DAppVersion=${manifest.release}`,
         `/DManifestDigest=${sha256(manifestBytes)}`,
-        `/DBundleDir=${bundle}`,
+        `/DBundleDir=${snapshot}`,
         `/DOwnedFiles=${include}`,
+        `/DInnoVersion=${innoVersion}`,
         `/O${staging}`,
         join(root, "installer", "windows", "urx-cli.iss"),
       ],
