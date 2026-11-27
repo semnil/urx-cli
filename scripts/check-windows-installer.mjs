@@ -109,22 +109,22 @@ try {
   if (again.status !== 0 || state().phase !== "complete") fail(`running the installer again exited ${again.status}\n${again.log}`);
 
   const owned = [...JSON.parse(readFileSync(join(app, "release-manifest.json"), "utf8")).files.map((file) => file.path), "release-manifest.json"];
-  const uninstall = () => spawnSync(join(app, "maintenance", "unins000.exe"), ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { encoding: "utf8" });
-  // The uninstaller finishes in a copy of itself; `settled` waits for it to have done what it does.
-  const pause = new Int32Array(new SharedArrayBuffer(4));
-  const settled = (done, seconds) => {
-    const deadline = Date.now() + seconds * 1000;
-    while (!done() && Date.now() < deadline) Atomics.wait(pause, 0, 0, 500);
-    return done();
+  let removals = 0;
+  const uninstall = () => {
+    const log = join(logs, `uninstall-${++removals}.log`);
+    const result = spawnSync(join(app, "maintenance", "unins000.exe"), ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `/LOG=${log}`], { encoding: "utf8" });
+    return { status: result.status, log: existsSync(log) ? readFileSync(log, "utf8") : "" };
   };
+  const pause = new Int32Array(new SharedArrayBuffer(4));
 
-  // 5. A removal without the state record changes nothing.
+  // 5. A removal without the state record changes nothing. When InitializeUninstall refuses, the
+  // uninstaller's first part waits for its copy and exits 1; the log says why.
   const kept = readFileSync(statePath);
   rmSync(statePath);
   const refused = uninstall();
-  if (refused.status !== 0) fail(`the removal without a state record exited ${refused.status} before it started`);
-  // Given time to finish, it must still have removed nothing and left the PATH entry.
-  settled(() => false, 20);
+  if (refused.status !== 1 || !refused.log.includes("urx-cli: The installation state") || !refused.log.includes("is missing")) {
+    fail(`the removal without a state record exited ${refused.status} without saying the record is missing\n${refused.log}`);
+  }
   const touched = owned.filter((path) => absent(join(app, ...path.split("/"))));
   if (touched.length > 0) fail(`the removal without a state record removed ${touched.join(", ")}`);
   if (!onPath()) fail("the removal without a state record took the bin folder off the PATH");
@@ -134,7 +134,8 @@ try {
   // 6. A silent removal removes every installed file and keeps the gate and the user's file.
   writeFileSync(join(app, "notes.txt"), "the user's");
   const removed = uninstall();
-  if (removed.status !== 0) fail(`the removal exited ${removed.status}`);
+  if (removed.status !== 0) fail(`the removal exited ${removed.status}\n${removed.log}`);
+  // The uninstaller finishes in a copy of itself; wait for it to leave the state record.
   const until = Date.now() + 120_000;
   while (!absent(statePath) && Date.now() < until) Atomics.wait(pause, 0, 0, 500);
   if (!absent(statePath)) fail(`the removal left the state record ${readFileSync(statePath, "utf8")}`);
