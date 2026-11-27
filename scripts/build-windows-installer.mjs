@@ -54,8 +54,8 @@ export function ownedFilesInclude(manifest, manifestDigest) {
 
 export { bundleProblems };
 
-/** The files a Windows bundle cannot be without: the launcher, the runtime, the addon and the CLI's entry. */
-const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"];
+/** The files a Windows bundle cannot be without: the launcher, the runtime, the addon, the CLI's entry and the Rust crates' licenses. */
+const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js", "notices/rust-crates.txt"];
 
 /**
  * What keeps the bundle `manifest` describes from being a Windows x64 bundle

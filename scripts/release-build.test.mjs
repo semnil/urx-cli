@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cargoArtifact, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -291,6 +291,29 @@ describe("release output", () => {
     expect(() => recordedProblems(output, files)).toThrow(/may hold no link/);
   });
 
+});
+
+describe("the cargo builds' environment", () => {
+  it("names one folder as both the target and the build directory, over the caller's settings of either", () => {
+    expect(cargoEnvironment({ PATH: "/bin", CARGO_TARGET_DIR: "/mine/target", CARGO_BUILD_BUILD_DIR: "/mine/build" }, "/scratch/target")).toEqual({
+      PATH: "/bin",
+      CARGO_TARGET_DIR: "/scratch/target",
+      CARGO_BUILD_BUILD_DIR: "/scratch/target",
+    });
+  });
+});
+
+describe("the output tool", () => {
+  it("is built in the Cargo folder a build gives it, not the caller's", () => {
+    const folder = mkdtempSync(join(tmpdir(), "urx-output-tool-"));
+    try {
+      const tool = outputTool(fileURLToPath(new URL("../", import.meta.url)), cargoEnvironment(withoutGitLocation(process.env), folder));
+      expect(tool.startsWith(`${folder}/`) || tool.startsWith(`${folder}\\`)).toBe(true);
+      expect(existsSync(tool)).toBe(true);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }, 300_000);
 });
 
 describe("the launcher's location", () => {

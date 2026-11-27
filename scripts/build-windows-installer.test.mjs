@@ -73,7 +73,7 @@ describe("the bundle the installer is built from", () => {
 
 describe("the Windows bundle and its compiler", () => {
   const inputs = { node: { archives: { "win-x64": { file: "node-v26.13.0-win-x64.zip", sha256: "a".repeat(64) } } } };
-  const files = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"].map((path) => ({ path, sha256: "b".repeat(64), size: 1 }));
+  const files = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js", "notices/rust-crates.txt"].map((path) => ({ path, sha256: "b".repeat(64), size: 1 }));
   const runtime = { archive: "node-v26.13.0-win-x64.zip", sha256: "a".repeat(64) };
 
   it("take a bundle built with the recorded Windows x64 Node archive and holding its required files", () => {
@@ -88,6 +88,7 @@ describe("the Windows bundle and its compiler", () => {
       "the bundle lists no runtime/node.exe",
       "the bundle lists no native/urx-native.node",
       "the bundle lists no app/main.js",
+      "the bundle lists no notices/rust-crates.txt",
     ]);
   });
 

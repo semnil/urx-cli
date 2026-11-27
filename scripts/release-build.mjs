@@ -4,7 +4,10 @@
 // worktree of their own, so edits to the working tree, the index, Git's
 // change-display settings (assume-unchanged, skip-worktree), a sparse checkout
 // and the build order cannot change what is built. Both builds run there with
-// `--release` and a Cargo target directory of their own. The build stops
+// `--release` and a Cargo folder of their own, which every cargo the build
+// runs takes as both its target and its build directory, whatever Cargo's
+// settings say, so that what each build compiles lies where the notices look
+// for it. The build stops
 // before building when anything is at dist-release/, and publishes its
 // output with tools/output: complete, record included, in a work folder
 // beside it, then renamed to dist-release/ only where nothing is, so the path
@@ -12,18 +15,32 @@
 // replaced. The launcher is built from the same export into the same target
 // directory and placed at dist-release/launcher/ for the bundle
 // (scripts/build-bundle.mjs), and on macOS the removal tool with it, at
-// dist-release/maintenance/urx-uninstall (K20).
+// dist-release/maintenance/urx-uninstall (K20). Each program is built for
+// this platform named explicitly (`--target`), and the licenses of the
+// third-party Rust crates Cargo reports compiling into them
+// (scripts/rust-notices.mjs) are written to
+// dist-release/notices/rust-crates.txt.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
+import { hostTriple, rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
+
+/**
+ * The environment of the cargo builds and `cargo metadata` of a release build:
+ * `folder` as both the target directory and the build directory, over any
+ * Cargo setting of either, so that every unit lies under it.
+ */
+export function cargoEnvironment(base, folder) {
+  return { ...base, CARGO_TARGET_DIR: folder, CARGO_BUILD_BUILD_DIR: folder };
+}
 /** The common TypeScript package inside the export. */
 const CONTROL_PATH = join(COMMON_PATH, "packages", "control");
 
@@ -123,6 +140,9 @@ export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex"
 /** The record of the files a release build made in its output, each with its SHA-256 and size, kept in that output. */
 export const RELEASE_FILES = "release-files.json";
 
+/** The licenses of the third-party Rust crates in a release's programs, in its output. */
+export const RUST_NOTICES = "notices/rust-crates.txt";
+
 /** Each file under `root` but `excluded`, with its SHA-256 and size. */
 export function describeFiles(root, excluded) {
   return filesUnder(root)
@@ -220,14 +240,16 @@ export const launcherArtifact = (messages) => cargoArtifact(messages, "urx");
  * Builds `tools/output` in the checkout at `root` and returns its executable,
  * which publishes a build's output (see its main.rs). It is
  * build tooling, built from the working tree; nothing of it is in an output.
+ * Cargo runs in `env`: the caller's environment, or one that names a build's
+ * own Cargo folder (`cargoEnvironment`).
  */
-export function outputTool(root) {
+export function outputTool(root, env = environment) {
   const messages = execFileSync("cargo", ["build", "--locked", "-p", "urx-output", "--message-format=json-render-diagnostics"], {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "inherit"],
-    env: environment,
+    env,
   });
   return cargoArtifact(messages, "urx-output");
 }
@@ -302,19 +324,21 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const output = join(root, "dist-release");
   // Checked before building anything; the rename that publishes the output checks again.
   requireNoOutput(output);
-  const tool = outputTool(root);
   const scratch = mkdtempSync(join(tmpdir(), "urx-release-"));
   const source = join(scratch, "source");
+  // A Cargo folder of this run's own for every cargo it runs, the output tool's
+  // included: a shared one would let a concurrent release build overwrite this
+  // run's addon, and the caller's Cargo folders take no part in the build.
+  const cargoBuild = cargoEnvironment(environment, join(scratch, "target"));
   try {
+    const tool = outputTool(root, cargoBuild);
     const { appCommit, commonCommit } = exportRelease(root, source);
     process.stderr.write(`release build of urx-cli ${appCommit} with urx-device ${commonCommit}\n`);
     const run = (args) =>
       execFileSync(process.execPath, args, {
         cwd: source,
         stdio: "inherit",
-        // A target directory of this run's own: a shared one would let a
-        // concurrent release build overwrite this run's addon.
-        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+        env: cargoBuild,
       });
     // `pnpm build:release` runs this script; pnpm names its own JavaScript entry.
     const pnpm = process.env.npm_execpath;
@@ -323,14 +347,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run([pnpm, "exec", "tsc", "-p", "vendor/urx-device/packages/control/tsconfig.json"]);
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
-    run(["scripts/build-native.mjs", "--release"]);
+    // Each program is built for this platform named explicitly, as napi builds the addon, so that what Cargo
+    // compiles into it lies in the target's own folder and its report tells that from what runs on the host.
+    const triple = hostTriple(source, environment);
+    const nativeUnits = join(scratch, "native-units.jsonl");
+    run(["scripts/build-native.mjs", "--release", "--units", nativeUnits]);
     // The installed command, from the same export and target directory (K22).
-    const messages = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
+    const messages = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
       cwd: source,
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+      env: cargoBuild,
     });
     // Laid out in this run's scratch, then published, its record last.
     const staging = join(scratch, "output");
@@ -339,18 +367,23 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
     // The macOS removal tool, installed in the bundle's maintenance folder (K20);
     // Windows' uninstaller is Inno Setup's.
+    const reports = [readFileSync(nativeUnits, "utf8"), messages];
     for (const tool of maintenanceTools()) {
-      const built = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-maintenance", "--bin", tool, "--message-format=json-render-diagnostics"], {
+      const built = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-maintenance", "--bin", tool, "--message-format=json-render-diagnostics"], {
         cwd: source,
         encoding: "utf8",
         maxBuffer: 256 * 1024 * 1024,
         stdio: ["ignore", "pipe", "inherit"],
-        env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
+        env: cargoBuild,
       });
       cpSync(cargoArtifact(built, tool), join(staging, "maintenance", tool));
+      reports.push(built);
     }
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
+    // The licenses of the third-party Rust crates those builds compiled into the programs.
+    mkdirSync(join(staging, "notices"), { recursive: true });
+    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, cargoBuild, triple, reports));
     writeReleaseFiles(staging);
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);

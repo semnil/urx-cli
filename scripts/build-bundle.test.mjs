@@ -100,10 +100,11 @@ describe("the installed bundle (K18, K38)", () => {
       "launcher/urx",
       "maintenance/urx-uninstall",
       "node_modules/@urx/device-control/package.json",
+      "notices/rust-crates.txt",
     ];
     for (const path of releaseFiles) write(release, path);
     // Beside the release, not made by it: never copied.
-    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt", "maintenance/notes.txt"]) write(release, path);
+    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt", "maintenance/notes.txt", "notices/other.txt"]) write(release, path);
     const node = join(dir, "node-v26");
     write(node, "bin/node", "node");
     write(node, "LICENSE", "node license");
@@ -121,6 +122,7 @@ describe("the installed bundle (K18, K38)", () => {
       "maintenance/urx-uninstall",
       "native/urx-native.node",
       "notices/node.txt",
+      "notices/rust-crates.txt",
       "notices/urx-cli.txt",
       "runtime/node",
     ]);
@@ -130,11 +132,12 @@ describe("the installed bundle (K18, K38)", () => {
   it("refuses a record path outside the release output, and a file named twice", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    const named = ["main.js", "native/urx-native.node", "launcher/urx", "maintenance/urx-uninstall"];
+    const named = ["main.js", "native/urx-native.node", "launcher/urx", "maintenance/urx-uninstall", "notices/rust-crates.txt"];
     for (const path of named) write(release, path);
     write(dir, "outside.js");
     write(dir, "bin/node");
     write(release, "maintenance/other");
+    write(release, "notices/other.txt");
     const lay = (...extra) => {
       const staging = mkdtempSync(join(dir, "bundle-"));
       assemble({ release, releaseFiles: [...named, ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
@@ -143,6 +146,12 @@ describe("the installed bundle (K18, K38)", () => {
     expect(() => lay("/outside.js")).toThrow(/a path outside it/);
     expect(() => lay("Main.js")).toThrow(/a file twice/);
     expect(() => lay("maintenance/other")).toThrow(/an unknown maintenance file/);
+    expect(() => lay("notices/other.txt")).toThrow(/an unknown notices file/);
+    // Every bundle holds the licenses of the Rust crates in its programs.
+    const unnoticed = mkdtempSync(join(dir, "bundle-"));
+    expect(() =>
+      assemble({ release, releaseFiles: named.filter((path) => !path.startsWith("notices/")), node: dir, staging: unnoticed, platform: platformOf("darwin", "arm64"), notices: {} }),
+    ).toThrow(/names no notices\/rust-crates.txt/);
     // A macOS bundle cannot be without its removal tool (K20); a Windows one has none from the release.
     const without = mkdtempSync(join(dir, "bundle-"));
     expect(() =>
