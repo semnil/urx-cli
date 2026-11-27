@@ -196,7 +196,18 @@ pub fn claim(output: &Path) -> Result<String, Failure> {
 
 /// The claimed output, with the folders this build made in it, all open.
 struct Opened {
+    path: std::path::PathBuf,
+    claimed: String,
     folders: HashMap<Vec<String>, Fd>,
+}
+
+/// Opens `output` without following a link, as a folder.
+fn open_path(output: &Path) -> io::Result<Fd> {
+    let name = c_name(output.as_os_str().as_bytes())?;
+    // SAFETY: `name` is NUL-terminated.
+    Ok(Fd(checked(unsafe {
+        libc::open(name.as_ptr(), FOLDER_FLAGS)
+    })?))
 }
 
 impl Opened {
@@ -251,6 +262,63 @@ impl Output for Opened {
         Ok(())
     }
 
+    fn holds(&mut self, path: &[String], source: &Path) -> io::Result<bool> {
+        let (parent, name) = self.parent_of(path)?;
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `name` is NUL-terminated and `parent` is an open folder.
+        let fd = checked(unsafe { libc::openat(parent, name.as_ptr(), flags) })?;
+        // SAFETY: `fd` was just opened and is owned by `written` from here.
+        let mut written = unsafe { File::from_raw_fd(fd) };
+        crate::same_contents(&mut written, &mut File::open(source)?)
+    }
+
+    fn write_record(&mut self, name: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
+        let root = self
+            .folders
+            .get(&Vec::new())
+            .ok_or_else(|| io::Error::other("the output is not open"))?
+            .0;
+        let temporary = c_name(format!(".{name}.part-{:016x}", random_suffix()).as_bytes())?;
+        let target = c_name(name.as_bytes())?;
+        let flags =
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `temporary` is NUL-terminated and `root` is the open output; the file is created where nothing is.
+        let fd = checked(unsafe {
+            libc::openat(root, temporary.as_ptr(), flags, 0o600 as libc::c_uint)
+        })?;
+        // SAFETY: `fd` was just opened and is owned by `file` from here.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let written = (|| {
+            file.write_all(bytes)?;
+            // SAFETY: `file` is open.
+            checked(unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) })?;
+            // SAFETY: both names are NUL-terminated in the open output; nothing at `target` is replaced.
+            checked(unsafe {
+                libc::renameatx_np(
+                    root,
+                    temporary.as_ptr(),
+                    root,
+                    target.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            })?;
+            Ok(())
+        })();
+        if written.is_err() {
+            // The temporary file is this build's own, under a name no other program knows.
+            // SAFETY: `temporary` is NUL-terminated in the open output.
+            unsafe { libc::unlinkat(root, temporary.as_ptr(), 0) };
+        }
+        written
+    }
+
+    fn still_in_place(&mut self) -> io::Result<bool> {
+        match open_path(&self.path) {
+            Ok(fd) => Ok(identity(&status(fd.0)?) == self.claimed),
+            Err(_) => Ok(false),
+        }
+    }
+
     fn files(&mut self) -> io::Result<BTreeSet<String>> {
         fn walk(fd: libc::c_int, prefix: &str, found: &mut BTreeSet<String>) -> io::Result<()> {
             for name in names(fd)? {
@@ -294,18 +362,17 @@ impl Output for Opened {
 
 /// Opens `output` without following a link, when it is the folder `claimed` names.
 pub fn open(output: &Path, claimed: &str) -> Result<Box<dyn Output>, Failure> {
-    let name = c_name(output.as_os_str().as_bytes())?;
-    // SAFETY: `name` is NUL-terminated.
-    let fd = match checked(unsafe { libc::open(name.as_ptr(), FOLDER_FLAGS) }) {
-        Ok(fd) => Fd(fd),
-        Err(_) => return Err(Failure::not_claimed(output)),
-    };
+    let fd = open_path(output).map_err(|_| Failure::not_claimed(output))?;
     if identity(&status(fd.0)?) != claimed {
         return Err(Failure::not_claimed(output));
     }
     let mut folders = HashMap::new();
     folders.insert(Vec::new(), fd);
-    Ok(Box::new(Opened { folders }))
+    Ok(Box::new(Opened {
+        path: output.to_path_buf(),
+        claimed: claimed.to_owned(),
+        folders,
+    }))
 }
 
 #[cfg(test)]
@@ -461,9 +528,54 @@ mod tests {
             Some("record.json"),
         )
         .unwrap();
+        assert!(!opened.still_in_place().unwrap());
         assert!(moved.join("record.json").is_file());
         assert_eq!(mode(&output), 0o700);
         assert!(std::fs::read_dir(&output).unwrap().next().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writes_the_record_under_a_temporary_name_and_replaces_nothing_at_its_own() {
+        let dir = scratch();
+        let output = dir.join("dist-release");
+        let claimed = claim(&output).unwrap();
+        let mut opened = open(&output, &claimed).unwrap();
+        opened
+            .write_record("record.json", b"record", 0o644)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(output.join("record.json")).unwrap(),
+            "record"
+        );
+        assert_eq!(mode(&output.join("record.json")), 0o644);
+        std::fs::write(output.join("other.json"), "the user's").unwrap();
+        assert!(opened.write_record("other.json", b"record", 0o644).is_err());
+        assert_eq!(
+            std::fs::read_to_string(output.join("other.json")).unwrap(),
+            "the user's"
+        );
+        let names: Vec<String> = std::fs::read_dir(&output)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2, "no temporary file is left: {names:?}");
+        assert!(opened.still_in_place().unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reads_back_what_it_wrote() {
+        let dir = scratch();
+        let output = dir.join("dist-release");
+        let claimed = claim(&output).unwrap();
+        let mut opened = open(&output, &claimed).unwrap();
+        std::fs::write(dir.join("source"), "cli").unwrap();
+        let path = vec!["main.js".to_owned()];
+        opened.write_file(&path, b"cli", 0o644).unwrap();
+        assert!(opened.holds(&path, &dir.join("source")).unwrap());
+        std::fs::write(output.join("main.js"), "clx").unwrap();
+        assert!(!opened.holds(&path, &dir.join("source")).unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -12,7 +12,7 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE,
+    GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, GENERIC_WRITE, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FileRenameInfo, GetFileInformationByHandle, SetFileInformationByHandle,
@@ -164,6 +164,7 @@ pub fn claim(output: &Path) -> Result<String, Failure> {
 /// The claimed output and every folder this build made in it, all held.
 struct Held {
     root: PathBuf,
+    claimed: String,
     /// Kept open, not read: holding them is what keeps the folders in place.
     _holds: Vec<File>,
 }
@@ -201,6 +202,46 @@ impl Output for Held {
 
     fn set_folder_mode(&mut self, _path: &[String], _mode: u32) -> io::Result<()> {
         Ok(())
+    }
+
+    fn holds(&mut self, path: &[String], source: &Path) -> io::Result<bool> {
+        let mut written = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.at(path))?;
+        crate::same_contents(&mut written, &mut File::open(source)?)
+    }
+
+    fn write_record(&mut self, name: &str, bytes: &[u8], _mode: u32) -> io::Result<()> {
+        let temporary = self
+            .root
+            .join(format!(".{name}.part-{:016x}", random_suffix()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .access_mode(GENERIC_WRITE | DELETE)
+            .create_new(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&temporary)?;
+        let written = file.write_all(bytes).and_then(|()| {
+            rename_held(&file, &self.root.join(name))
+                .map_err(|code| io::Error::from_raw_os_error(code as i32))
+        });
+        if written.is_err() {
+            drop(file);
+            // The temporary file is this build's own, under a name no other program knows.
+            let _ = std::fs::remove_file(&temporary);
+        }
+        written
+    }
+
+    fn still_in_place(&mut self) -> io::Result<bool> {
+        match hold(&self.root, HOLD) {
+            Ok(held) => {
+                let found = information(&held)?;
+                Ok(is_plain_folder(&found) && identity(&found) == self.claimed)
+            }
+            Err(_) => Ok(false),
+        }
     }
 
     fn files(&mut self) -> io::Result<BTreeSet<String>> {
@@ -251,6 +292,7 @@ pub fn open(output: &Path, claimed: &str) -> Result<Box<dyn Output>, Failure> {
     }
     Ok(Box::new(Held {
         root,
+        claimed: claimed.to_owned(),
         _holds: vec![held],
     }))
 }
