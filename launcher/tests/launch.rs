@@ -14,19 +14,47 @@ use urx_launcher::{launch, Installation, Started};
 
 const CHILD: &str = "URX_LAUNCHER_TEST_CHILD";
 
-/// The stand-in runtime `cargo test` builds as an example.
+/// The stand-in runtime, this package's `fake-runtime` example: built once for
+/// these tests by the cargo that builds them, at the path that cargo reports.
+/// It is built in the folder that cargo gives integration tests for their own
+/// files (`CARGO_TARGET_TMPDIR`), as both its target and its build directory,
+/// so neither the way the tests' build was given its folders nor the checkout
+/// takes part.
 fn fake_runtime() -> PathBuf {
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let name = if cfg!(windows) {
-        "fake-runtime.exe"
-    } else {
-        "fake-runtime"
-    };
-    deps.parent().unwrap().join("examples").join(name)
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let folder = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fake-runtime");
+            let output = Command::new(env!("CARGO"))
+                .env("CARGO_TARGET_DIR", &folder)
+                .env("CARGO_BUILD_BUILD_DIR", &folder)
+                .args([
+                    "build",
+                    "--locked",
+                    "--example",
+                    "fake-runtime",
+                    "--message-format=json",
+                    "--manifest-path",
+                ])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "cargo did not build the stand-in runtime: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|message| {
+                    message["reason"] == "compiler-artifact"
+                        && message["target"]["name"] == "fake-runtime"
+                })
+                .and_then(|message| message["executable"].as_str().map(PathBuf::from))
+                .expect("cargo reported no executable of the stand-in runtime")
+        })
+        .clone()
 }
 
 /// A complete installation in a scratch directory.
