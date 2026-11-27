@@ -17,8 +17,10 @@
 ;   equivalent entry is there, and only then does the record say `complete`.
 ; - Setup closes and restarts nothing: a running urx holds the gate, so the
 ;   installer stops instead (CloseApplications=no, RestartApplications=no).
-; - A folder at the installation root that is not this installation's is
-;   left as it is, and so is anything at the root that is not a folder.
+; - A folder at the installation root without this installer's state record
+;   is left as it is, empty or not, and so is anything at the root that is
+;   not a folder. Where Windows cannot tell whether a file, the record or the
+;   user's PATH is there, nothing is changed.
 ; - The uninstaller says `removing` only once the removal starts, and deletes
 ;   the state record only when every installed file and the PATH entry it
 ;   added are gone; otherwise the record stays `removing` for setup to repair.
@@ -75,6 +77,10 @@ const
   WIN32_ERROR_SHARING_VIOLATION = 32;
   WIN32_MOVEFILE_REPLACE_EXISTING = 1;
   WIN32_MOVEFILE_WRITE_THROUGH = 8;
+  WIN32_ERROR_FILE_NOT_FOUND = 2;
+  WIN32_ERROR_PATH_NOT_FOUND = 3;
+  WIN32_HKEY_CURRENT_USER = -2147483647;
+  WIN32_KEY_QUERY_VALUE = 1;
   PRODUCT_MARK = '"product":"urx-cli","format":1,';
 
 type
@@ -89,23 +95,32 @@ type
 
 { Handles and pointers are pointer-sized (NativeInt, NativeUInt), so these
   declarations hold for a 32-bit and a 64-bit Setup alike. A handle is signed
-  here so that INVALID_HANDLE_VALUE reads as -1. }
+  here so that INVALID_HANDLE_VALUE reads as -1, and so is HKEY_CURRENT_USER,
+  which Windows defines as a sign-extended $80000001. A Windows BOOL result is
+  read as Boolean, as Inno Setup's own examples do, so it combines with
+  Pascal Script's Boolean; a registry call's LONG result is an Integer. }
 function Win32CreateFile(Name: String; Access, Share: DWORD; Security: NativeUInt; Disposition, Flags: DWORD; Template: NativeInt): NativeInt;
   external 'CreateFileW@kernel32.dll stdcall';
-function Win32CloseHandle(Handle: NativeInt): BOOL;
+function Win32CloseHandle(Handle: NativeInt): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
-function Win32GetFileInformationByHandle(Handle: NativeInt; var Information: TFileInformation): BOOL;
+function Win32GetFileInformationByHandle(Handle: NativeInt; var Information: TFileInformation): Boolean;
   external 'GetFileInformationByHandle@kernel32.dll stdcall';
 function Win32GetFileAttributes(Name: String): DWORD;
   external 'GetFileAttributesW@kernel32.dll stdcall';
-function Win32WriteFile(Handle: NativeInt; const Buffer: AnsiString; Count: DWORD; var Written: DWORD; Overlapped: NativeUInt): BOOL;
+function Win32WriteFile(Handle: NativeInt; const Buffer: AnsiString; Count: DWORD; var Written: DWORD; Overlapped: NativeUInt): Boolean;
   external 'WriteFile@kernel32.dll stdcall';
-function Win32FlushFileBuffers(Handle: NativeInt): BOOL;
+function Win32FlushFileBuffers(Handle: NativeInt): Boolean;
   external 'FlushFileBuffers@kernel32.dll stdcall';
-function Win32MoveFileEx(Existing, Replacement: String; Flags: DWORD): BOOL;
+function Win32MoveFileEx(Existing, Replacement: String; Flags: DWORD): Boolean;
   external 'MoveFileExW@kernel32.dll stdcall';
 function Win32ExpandEnvironmentStrings(Source: String; Destination: String; Size: DWORD): DWORD;
   external 'ExpandEnvironmentStringsW@kernel32.dll stdcall';
+function Win32RegOpenKeyEx(Key: NativeInt; SubKey: String; Options, Desired: DWORD; var Opened: NativeInt): Integer;
+  external 'RegOpenKeyExW@advapi32.dll stdcall';
+function Win32RegQueryValueEx(Key: NativeInt; Name: String; Reserved: NativeUInt; var ValueType: DWORD; Data: NativeUInt; var Size: DWORD): Integer;
+  external 'RegQueryValueExW@advapi32.dll stdcall';
+function Win32RegCloseKey(Key: NativeInt): Integer;
+  external 'RegCloseKey@advapi32.dll stdcall';
 
 #include OwnedFiles
 
@@ -163,25 +178,18 @@ begin
     and ((Attributes and FILE_ATTRIBUTE_REPARSE_POINT) = 0);
 end;
 
-function DirectoryIsEmpty(Path: String): Boolean;
+{ Whether something is at `Path` (Found), or that nothing is: False only
+  when Windows cannot tell, which every caller takes as a reason to stop. }
+function PathPresence(Path: String; var Found: Boolean): Boolean;
 var
-  Found: TFindRec;
+  Error: Integer;
 begin
   Result := True;
-  if FindFirst(Path + '\*', Found) then
-  begin
-    try
-      repeat
-        if (Found.Name <> '.') and (Found.Name <> '..') then
-        begin
-          Result := False;
-          Break;
-        end;
-      until not FindNext(Found);
-    finally
-      FindClose(Found);
-    end;
-  end;
+  Found := Win32GetFileAttributes(Path) <> WIN32_INVALID_FILE_ATTRIBUTES;
+  if Found then
+    Exit;
+  Error := DLLGetLastError;
+  Result := (Error = WIN32_ERROR_FILE_NOT_FOUND) or (Error = WIN32_ERROR_PATH_NOT_FOUND);
 end;
 
 { Takes the installation's gate exclusively (K21, K23): its folder is created
@@ -309,6 +317,24 @@ begin
   end;
 end;
 
+{ A release as the build lets one through: letters, digits, '.', '+' and '-'. }
+function IsReleaseText(Value: String): Boolean;
+var
+  Index: Integer;
+  C: Char;
+begin
+  Result := Value <> '';
+  for Index := 1 to Length(Value) do
+  begin
+    C := Value[Index];
+    if not (((C >= '0') and (C <= '9')) or ((C >= 'a') and (C <= 'z')) or ((C >= 'A') and (C <= 'Z')) or (C = '.') or (C = '+') or (C = '-')) then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+end;
+
 function IsLowerHex64(Value: String): Boolean;
 var
   Index: Integer;
@@ -332,7 +358,7 @@ var
   Rest, Release, Manifest: String;
 begin
   Result := False;
-  if not FileExists(StatePath) or not LoadStringFromFile(StatePath, Raw) then
+  if not LoadStringFromFile(StatePath, Raw) then
     Exit;
   Rest := Raw;
   if not TakePrefix(Rest, '{' + PRODUCT_MARK + '"phase":"') then
@@ -341,7 +367,7 @@ begin
     Exit;
   if (Phase <> 'installing') and (Phase <> 'complete') and (Phase <> 'removing') then
     Exit;
-  if not TakeUntil(Rest, '","manifest":"', Release) or (Release = '') then
+  if not TakeUntil(Rest, '","manifest":"', Release) or not IsReleaseText(Release) then
     Exit;
   if not TakeUntil(Rest, '","pathAdded":', Manifest) or not IsLowerHex64(Manifest) then
     Exit;
@@ -352,6 +378,23 @@ begin
   else
     Exit;
   Result := True;
+end;
+
+{ What is at the state record's place: 0 nothing, 1 a record in exactly the
+  form this installer writes, 2 anything else, or something Windows cannot
+  tell, which is left alone. }
+function StateKind(var Phase: String; var Added: Boolean): Integer;
+var
+  Found: Boolean;
+begin
+  if not PathPresence(StatePath, Found) then
+    Result := 2
+  else if not Found then
+    Result := 0
+  else if ReadOwnState(Phase, Added) then
+    Result := 1
+  else
+    Result := 2;
 end;
 
 function ExpandVariables(Value: String): String;
@@ -372,13 +415,56 @@ begin
   SetLength(Result, Size - 1);
 end;
 
+{ Whether the current user has a PATH value (Found), or that there is none:
+  False when Windows cannot tell, with the Windows error in `Problem`. }
+function UserPathPresence(var Found: Boolean; var Problem: String): Boolean;
+var
+  Key: NativeInt;
+  Opened, Queried: Integer;
+  ValueType, Size: DWORD;
+begin
+  Result := False;
+  Found := False;
+  Key := 0;
+  Opened := Win32RegOpenKeyEx(WIN32_HKEY_CURRENT_USER, 'Environment', 0, WIN32_KEY_QUERY_VALUE, Key);
+  if Opened = WIN32_ERROR_FILE_NOT_FOUND then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if Opened <> 0 then
+  begin
+    Problem := 'Your PATH could not be read (Windows error ' + IntToStr(Opened) + '), so it is left as it is.';
+    Exit;
+  end;
+  try
+    ValueType := 0;
+    Size := 0;
+    Queried := Win32RegQueryValueEx(Key, 'Path', 0, ValueType, 0, Size);
+  finally
+    Win32RegCloseKey(Key);
+  end;
+  if Queried = WIN32_ERROR_FILE_NOT_FOUND then
+    Result := True
+  else if Queried = 0 then
+  begin
+    Found := True;
+    Result := True;
+  end
+  else
+    Problem := 'Your PATH could not be read (Windows error ' + IntToStr(Queried) + '), so it is left as it is.';
+end;
+
 { The current user's PATH as the registry holds it, unexpanded: empty when
-  there is none, and a failure when there is one that cannot be read. }
+  Windows says there is none, and a failure when it cannot tell or the value
+  cannot be read. }
 function ReadUserPath(var Value: String; var Problem: String): Boolean;
+var
+  Found: Boolean;
 begin
   Value := '';
-  Result := True;
-  if not RegValueExists(HKCU, 'Environment', 'Path') then
+  Result := UserPathPresence(Found, Problem);
+  if not Result or not Found then
     Exit;
   if not RegQueryStringValue(HKCU, 'Environment', 'Path', Value) then
   begin
@@ -521,21 +607,31 @@ begin
   Result := True;
 end;
 
-{ The files of the bundle that are still there, after a removal. }
+{ The files of the bundle that are still there after a removal, and those
+  Windows cannot tell about, which count as still there. }
 function RemainingOwnedFiles: String;
 var
   Paths, Hashes: TArrayOfString;
   Index: Integer;
+  Found: Boolean;
+  Entry: String;
 begin
   Result := '';
   LoadOwnedFiles(Paths, Hashes);
   for Index := 0 to GetArrayLength(Paths) - 1 do
-    if FileExists(ExpandConstant('{app}\') + Paths[Index]) then
+  begin
+    Entry := '';
+    if not PathPresence(ExpandConstant('{app}\') + Paths[Index], Found) then
+      Entry := Paths[Index] + ' (Windows could not tell whether it is there)'
+    else if Found then
+      Entry := Paths[Index];
+    if Entry <> '' then
     begin
       if Result <> '' then
         Result := Result + ', ';
-      Result := Result + Paths[Index];
+      Result := Result + Entry;
     end;
+  end;
 end;
 
 procedure FailInstall(Problem: String);
@@ -548,8 +644,9 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Problem, Phase: String;
-  Own, Added: Boolean;
+  Own, Added, AppFound: Boolean;
   App: String;
+  Kind: Integer;
 begin
   Result := '';
   Added := False;
@@ -564,20 +661,28 @@ begin
     Result := Problem;
     Exit;
   end;
-  Own := ReadOwnState(Phase, Added);
-  if FileExists(StatePath) and not Own then
+  Kind := StateKind(Phase, Added);
+  if Kind = 2 then
   begin
     ReleaseGate;
-    Result := 'The installation state ' + StatePath + ' is not one this setup wrote, so it is left as it is.';
+    Result := 'The installation state ' + StatePath + ' is not one this setup wrote, or could not be read, so it is left as it is.';
     Exit;
   end;
-  if FileExists(App) or (DirExists(App) and not IsPlainDirectory(App)) then
+  Own := Kind = 1;
+  if not PathPresence(App, AppFound) then
+  begin
+    ReleaseGate;
+    Result := 'Windows could not tell whether ' + App + ' exists, so nothing is changed.';
+    Exit;
+  end;
+  if AppFound and not IsPlainDirectory(App) then
   begin
     ReleaseGate;
     Result := App + ' is not a plain folder, so it is left as it is.';
     Exit;
   end;
-  if DirExists(App) and not Own and not DirectoryIsEmpty(App) then
+  // Without a record of this installer's, a folder already there, empty or not, is someone else's.
+  if AppFound and not Own then
   begin
     ReleaseGate;
     Result := 'The folder ' + App + ' already exists and is not a urx-cli installation, so it is left as it is.';
@@ -639,13 +744,14 @@ begin
     SuppressibleMsgBox(Problem, mbError, MB_OK, IDOK);
     Exit;
   end;
-  if ReadOwnState(Phase, Added) then
-    PathAdded := Added
-  else if FileExists(StatePath) then
-  begin
-    ReleaseGate;
-    SuppressibleMsgBox('The installation state ' + StatePath + ' is not one this setup wrote, so it is left as it is.', mbError, MB_OK, IDOK);
-    Exit;
+  case StateKind(Phase, Added) of
+    1: PathAdded := Added;
+    2:
+      begin
+        ReleaseGate;
+        SuppressibleMsgBox('The installation state ' + StatePath + ' is not one this setup wrote, or could not be read, so it is left as it is.', mbError, MB_OK, IDOK);
+        Exit;
+      end;
   end;
   Result := True;
 end;
