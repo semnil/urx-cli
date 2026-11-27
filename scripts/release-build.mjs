@@ -12,9 +12,10 @@
 // replaced. The launcher is built from the same export into the same target
 // directory and placed at dist-release/launcher/ for the bundle
 // (scripts/build-bundle.mjs), and on macOS the removal tool with it, at
-// dist-release/maintenance/urx-uninstall (K20). The licenses of the
-// third-party Rust crates in those programs, read from the export's Cargo.lock
-// and the crates' packages (scripts/rust-notices.mjs), are written to
+// dist-release/maintenance/urx-uninstall (K20). Each program is built for
+// this platform named explicitly (`--target`), and the licenses of the
+// third-party Rust crates Cargo reports compiling into them
+// (scripts/rust-notices.mjs) are written to
 // dist-release/notices/rust-crates.txt.
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -24,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMON_PATH, gitlinkOf } from "./release-source.mjs";
-import { rustNotices } from "./rust-notices.mjs";
+import { hostTriple, rustNotices } from "./rust-notices.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
 const environment = withoutGitLocation(process.env);
@@ -330,9 +331,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     run([pnpm, "exec", "tsc", "-p", "vendor/urx-device/packages/control/tsconfig.json"]);
     run([pnpm, "exec", "tsc", "-p", "tsconfig.json"]);
     run(["scripts/build-info.mjs", "--release"]);
-    run(["scripts/build-native.mjs", "--release"]);
+    // Each program is built for this platform named explicitly, as napi builds the addon, so that what Cargo
+    // compiles into it lies in the target's own folder and its report tells that from what runs on the host.
+    const triple = hostTriple(source, environment);
+    const nativeUnits = join(scratch, "native-units.jsonl");
+    run(["scripts/build-native.mjs", "--release", "--units", nativeUnits]);
     // The installed command, from the same export and target directory (K22).
-    const messages = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
+    const messages = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-launcher", "--message-format=json-render-diagnostics"], {
       cwd: source,
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
@@ -346,8 +351,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     cpSync(launcherArtifact(messages), join(staging, "launcher", launcher));
     // The macOS removal tool, installed in the bundle's maintenance folder (K20);
     // Windows' uninstaller is Inno Setup's.
+    const reports = [readFileSync(nativeUnits, "utf8"), messages];
     for (const tool of maintenanceTools()) {
-      const built = execFileSync("cargo", ["build", "--release", "--locked", "-p", "urx-maintenance", "--bin", tool, "--message-format=json-render-diagnostics"], {
+      const built = execFileSync("cargo", ["build", "--release", "--locked", "--target", triple, "-p", "urx-maintenance", "--bin", tool, "--message-format=json-render-diagnostics"], {
         cwd: source,
         encoding: "utf8",
         maxBuffer: 256 * 1024 * 1024,
@@ -355,12 +361,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         env: { ...environment, CARGO_TARGET_DIR: join(scratch, "target") },
       });
       cpSync(cargoArtifact(built, tool), join(staging, "maintenance", tool));
+      reports.push(built);
     }
     copyCommonPackage(source, staging);
     markModuleFormat(staging);
-    // The licenses of the third-party Rust crates in those programs, from this export's Cargo.lock.
+    // The licenses of the third-party Rust crates those builds compiled into the programs.
     mkdirSync(join(staging, "notices"), { recursive: true });
-    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, environment));
+    writeFileSync(join(staging, RUST_NOTICES), rustNotices(source, { ...environment, CARGO_TARGET_DIR: join(scratch, "target") }, triple, reports));
     writeReleaseFiles(staging);
     publishOutput(staging, output, { last: RELEASE_FILES, tool });
     process.stderr.write(`release build written to ${output}\n`);

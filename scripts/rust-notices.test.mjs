@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS, treeNames } from "./rust-notices.mjs";
+import { compiledPackages, crateNotices, isLicenseFile, licenseTexts, OWN_MANIFESTS, ownOf, programCrates, programPackages, RECORDED_TEXTS } from "./rust-notices.mjs";
 
 const made = [];
 afterEach(() => {
@@ -34,74 +34,62 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
     expect(programPackages("win32")).toEqual(["urx-launcher", "urx-cli-native"]);
   });
 
-  it("read only the names and versions cargo tree gives, whatever it says of where each came from", () => {
-    const output = [
-      "urx-launcher v0.0.0 (/tmp/release (local)/launcher)",
-      "libc v0.2.191",
-      "futures-util v0.3.34 (*)",
-      "",
-      "nohash-hasher v0.2.0 (registry `review`)",
-      "fork v1.0.0 (file:///tmp/fork#0123abc)",
+  it("take the packages of the units cargo compiled into the target's folder, not build scripts, macros or what only they use", () => {
+    const target = join("/repo", "target");
+    const unit = (id, kind, folder, extra = {}) =>
+      JSON.stringify({ reason: "compiler-artifact", package_id: id, target: { kind: [kind], name: id }, filenames: [join(target, ...folder, `lib${id.length}.rlib`)], ...extra });
+    const report = [
+      "   Compiling libc v0.2.191",
+      unit("registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191", "lib", ["aarch64-apple-darwin", "release", "deps"]),
+      unit("registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191", "custom-build", ["release", "build", "libc-1"]),
+      // The same name and version from another registry, built only for a build script, on the host.
+      unit("sparse+https://review.example/index/#libc@0.2.191", "lib", ["release", "deps"]),
+      unit("registry+https://github.com/rust-lang/crates.io-index#napi-derive@3.7.2", "proc-macro", ["release", "deps"]),
+      unit("registry+https://github.com/rust-lang/crates.io-index#syn@3.0.10", "lib", ["release", "deps"]),
+      unit("path+file:///repo/launcher#urx-launcher@0.0.0", "bin", ["aarch64-apple-darwin", "release"]),
+      JSON.stringify({ reason: "build-script-executed", package_id: "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191" }),
+      JSON.stringify({ reason: "build-finished", success: true }),
     ].join("\n");
-    expect([...treeNames(output)]).toEqual(["urx-launcher@0.0.0", "libc@0.2.191", "futures-util@0.3.34", "nohash-hasher@0.2.0", "fork@1.0.0"]);
-    expect(() => treeNames("[build-dependencies]\nlibc v0.2.191")).toThrow("cargo tree printed a line that names no package");
-    expect(() => treeNames("\u001b[1mlibc\u001b[0m v0.2.191")).toThrow("cargo tree printed a line that names no package");
+    expect([...compiledPackages([report], target, "aarch64-apple-darwin")]).toEqual([
+      "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+      "path+file:///repo/launcher#urx-launcher@0.0.0",
+    ]);
+    // Another platform's units are not this release's.
+    expect([...compiledPackages([report], target, "x86_64-pc-windows-msvc")]).toEqual([]);
+    expect(() => compiledPackages(["{not json"], target, "aarch64-apple-darwin")).toThrow("cargo's report holds a line that is not a message");
   });
 
-  it("count by package ID the crates each program's graph reaches and cargo tree gives, all but this repository's and urx-device's own", () => {
+  it("count every compiled package but this repository's and urx-device's own, and require a unit of each program", () => {
     const registry = "registry+https://github.com/rust-lang/crates.io-index";
-    const review = "sparse+https://review.example/index/";
-    const node = (item, deps = []) => ({ id: item.id, deps: deps.map(([to, kind = null]) => ({ pkg: to.id, dep_kinds: [{ kind, target: null }] })) });
-    const launcher = pkg("urx-launcher", { source: null, manifest: "/repo/launcher/Cargo.toml" });
-    const native = pkg("urx-cli-native", { source: null, manifest: "/repo/native/Cargo.toml" });
-    const output = pkg("urx-output", { source: null, manifest: "/repo/tools/output/Cargo.toml" });
-    const transport = pkg("transport", { source: null, manifest: "/repo/vendor/urx-device/crates/transport/Cargo.toml" });
-    const libc = pkg("libc", { source: registry });
-    const libcTestOnly = pkg("libc", { source: review });
-    const itoa = pkg("itoa", { source: null, manifest: "/patched/itoa/Cargo.toml" });
-    const fork = pkg("fork", { source: "git+file:///tmp/fork#0123abc" });
-    const ctor = pkg("ctor", { source: registry });
-    const section = pkg("link-section", { source: registry });
-    const derive = { ...pkg("derive", { source: registry }), targets: [{ kind: ["proc-macro"] }] };
-    const macroOnly = pkg("macro-only", { source: registry });
-    const shared = pkg("shared", { source: registry });
-    const sharedReview = pkg("shared", { source: review });
-    const all = [launcher, native, output, transport, libc, libcTestOnly, itoa, fork, ctor, section, derive, macroOnly, shared, sharedReview];
-    for (const item of all) item.targets ??= [{ kind: ["lib"] }];
     const metadata = {
-      packages: all,
-      workspace_members: [launcher.id, native.id, output.id],
-      resolve: {
-        nodes: [
-          node(launcher, [[libc], [libcTestOnly, "dev"], [itoa], [fork], [derive], [shared], [sharedReview]]),
-          node(native, [[transport], [ctor], [libcTestOnly, "build"]]),
-          node(output, [[macroOnly]]),
-          node(transport, [[libc]]),
-          // A feature only urx-output enables gives ctor this edge in the workspace's unified graph.
-          node(ctor, [[section]]),
-          node(derive, [[macroOnly]]),
-          ...[libc, libcTestOnly, itoa, fork, section, macroOnly, shared, sharedReview].map((item) => node(item)),
-        ],
-      },
+      packages: [
+        pkg("urx-launcher", { source: null, manifest: "/repo/launcher/Cargo.toml" }),
+        pkg("urx-cli-native", { source: null, manifest: "/repo/native/Cargo.toml" }),
+        pkg("transport", { source: null, manifest: "/repo/vendor/urx-device/crates/transport/Cargo.toml" }),
+        pkg("libc", { source: registry }),
+        pkg("libc", { source: "sparse+https://review.example/index/" }),
+        pkg("itoa", { source: null, manifest: "/patched/itoa/Cargo.toml" }),
+        pkg("fork", { source: "git+file:///tmp/fork#0123abc" }),
+      ],
+      workspace_members: [],
     };
-    const own = new Set(["/repo/launcher/Cargo.toml", "/repo/native/Cargo.toml", "/repo/tools/output/Cargo.toml", "/repo/vendor/urx-device/crates/transport/Cargo.toml"]);
+    const id = (name, source = registry) => metadata.packages.find((item) => item.name === name && item.source === source).id;
+    metadata.workspace_members = [id("urx-launcher", null), id("urx-cli-native", null)];
+    const own = new Set(["/repo/launcher/Cargo.toml", "/repo/native/Cargo.toml", "/repo/vendor/urx-device/crates/transport/Cargo.toml"]);
     const isOwn = (item) => item.source === null && own.has(item.manifest_path);
-    const programs = [
-      { name: "urx-launcher", linked: new Set(["urx-launcher@1.0.0", "libc@1.0.0", "itoa@1.0.0", "fork@1.0.0", "shared@1.0.0"]) },
-      { name: "urx-cli-native", linked: new Set(["urx-cli-native@1.0.0", "transport@1.0.0", "libc@1.0.0", "ctor@1.0.0"]) },
-    ];
-    expect(programCrates(metadata, programs, isOwn).map((item) => `${item.name} ${item.source ?? item.manifest_path}`)).toEqual([
-      `ctor ${registry}`,
+    const ids = new Set([id("urx-launcher", null), id("urx-cli-native", null), id("transport", null), id("libc"), id("libc", "sparse+https://review.example/index/"), id("itoa", null), id("fork", "git+file:///tmp/fork#0123abc")]);
+    expect(programCrates(metadata, ids, isOwn, ["urx-launcher", "urx-cli-native"]).map((item) => `${item.name} ${item.source ?? item.manifest_path}`)).toEqual([
       "fork git+file:///tmp/fork#0123abc",
       "itoa /patched/itoa/Cargo.toml",
       `libc ${registry}`,
-      `shared ${registry}`,
-      `shared ${review}`,
+      "libc sparse+https://review.example/index/",
     ]);
-    expect(() => programCrates(metadata, [{ name: "urx-launcher", linked: new Set(["gone@1.0.0"]) }], isOwn)).toThrow(
-      "cargo tree gives gone@1.0.0 for urx-launcher, which its dependency graph in cargo metadata does not reach",
+    expect(() => programCrates(metadata, new Set([id("urx-launcher", null)]), isOwn, ["urx-launcher", "urx-cli-native"])).toThrow(
+      "cargo's report holds no unit of urx-cli-native: it does not cover that program",
     );
-    expect(() => programCrates(metadata, [{ name: "urx-maintenance", linked: new Set() }], isOwn)).toThrow("the workspace has no package urx-maintenance");
+    expect(() => programCrates(metadata, new Set([id("urx-launcher", null), "registry+x#gone@1.0.0"]), isOwn, ["urx-launcher"])).toThrow(
+      "cargo's report names the package registry+x#gone@1.0.0, which cargo metadata does not have",
+    );
   });
 
   it("name as this repository's and urx-device's own only manifests that are there", () => {
@@ -323,6 +311,13 @@ describe("the notices of the Rust crates in a release's programs (K38)", () => {
       expect(() => crateNotices([pkg("napi", { version: "3.16.2", ...changed })], { ...options, recorded }), JSON.stringify(changed)).toThrow("the license text recorded for napi is for 3.16.2 (MIT, https://example.com/napi), not");
     }
     expect(() => crateNotices([], { ...options, recorded })).toThrow("a license text is recorded for napi, which the release's programs do not take");
+    // No text of the list may be only whitespace, whichever way it came.
+    expect(() => crateNotices([pkg("napi", { version: "3.16.2" })], { ...options, readRecorded: () => " \n", recorded })).toThrow(
+      "the Rust crate napi 3.16.2 has notices/napi-rs.txt (napi-rs), which holds no license text",
+    );
+    expect(() => crateNotices([pkg("gamma")], { ...options, filesOf: () => [["LICENSES/Apache-2.0.txt", "apache\n"], ["LICENSES/MIT.txt", "\t\n"]] })).toThrow(
+      "the Rust crate gamma 1.0.0 has LICENSES/MIT.txt, which holds no license text",
+    );
     // A crate that holds its own license file no longer takes the recorded one.
     expect(() => crateNotices([pkg("napi", { version: "3.16.2" })], { ...options, filesOf: () => [["LICENSE", "own"]], recorded })).toThrow("a license text is recorded for napi");
   });

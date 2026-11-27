@@ -1,24 +1,24 @@
 // The notices of the third-party Rust crates built into a release's programs
 // (K38): the launcher, the addon and, on macOS, the maintenance tools. The
-// crates are those `cargo tree` gives for each of those packages as it is
-// built, for the platform the release is built on, with only the
-// dependencies that go into the program: not procedural macros, which run
-// only while it is compiled, nor build scripts' or tests' dependencies, nor
-// what only they use, and with the features that build enables, not those
-// another package of the workspace enables. Each is identified by its
-// package ID in `cargo metadata`'s dependency graph, followed from the
-// program, which carries where Cargo took it from; cargo tree gives only the
-// names and versions the program's build takes. Every crate that is not one
-// of this repository's or urx-device's own manifests (OWN_MANIFESTS, whose
-// licenses the bundle carries already) counts, wherever it lies. For
-// each, the notices name the crate, its version, license expression and
-// repository, and hold the text of the license file its manifest names
-// (`license-file`) and of every license file at the top of its package, read
-// through a link, a folder by its files. A crate whose package holds none
-// takes the text this repository records for exactly that version, license
-// and repository (RECORDED_TEXTS); a crate with neither, a recorded text for
-// another version, license or repository, and a recorded text no crate
-// takes each stop the build.
+// crates are taken from the release build's own report: each of those
+// programs is built for the platform the release is built on, named
+// explicitly (`--target`), with `--message-format=json-render-diagnostics`,
+// and every unit Cargo compiles into the target's folder (`<target
+// directory>/<triple>/`) is part of a program. Build scripts, procedural
+// macros and what only they use are built for the host outside that folder,
+// and features another package of the workspace enables are not built at
+// all, so neither is counted. Each unit names its package by ID, which
+// carries where Cargo took it from. Every package that is not one of this
+// repository's or urx-device's own manifests (OWN_MANIFESTS, whose licenses
+// the bundle carries already) counts, wherever it lies. For each, the
+// notices name the crate, its version, license expression and repository,
+// and hold the text of the license file its manifest names (`license-file`)
+// and of every license file at the top of its package, read through a link,
+// a folder by its files, only inside what Cargo took of it. A crate whose
+// package holds none takes the text this repository records for exactly that
+// version, license and repository (RECORDED_TEXTS); a crate with neither, a
+// recorded text for another version, license or repository, a recorded text
+// no crate takes, and any text that is only whitespace each stop the build.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -65,59 +65,57 @@ export function ownOf(source) {
 }
 
 /**
- * The crates `cargo tree --prefix none --format "{p}" --color never`
- * printed, each as `name@version`; what it says of where each was taken
- * from is not read (packages are told apart by `cargo metadata`).
+ * The package IDs of the units that the reports `reports` (Cargo's JSON
+ * messages, one a line, as `cargo build --message-format=json-render-diagnostics`
+ * prints them) say were compiled into `<targetDirectory>/<triple>/`: what the
+ * programs built for `triple` are made of. Build scripts and procedural
+ * macros, and the units only they use, are compiled for the host outside that
+ * folder and are not taken.
  */
-export function treeNames(output) {
-  const names = new Set();
-  for (const line of output.split(/\r?\n/)) {
-    if (line.trim() === "") continue;
-    const match = /^([A-Za-z0-9_-]+) v(\S+)/.exec(line);
-    if (match === null) throw new Error(`cargo tree printed a line that names no package: ${JSON.stringify(line)}`);
-    names.add(`${match[1]}@${match[2]}`);
+export function compiledPackages(reports, targetDirectory, triple) {
+  const into = `${join(targetDirectory, triple)}${sep}`;
+  const ids = new Set();
+  for (const report of reports) {
+    for (const line of report.split(/\r?\n/)) {
+      if (!line.startsWith("{")) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        throw new Error(`cargo's report holds a line that is not a message: ${JSON.stringify(line.slice(0, 80))}`);
+      }
+      if (message.reason !== "compiler-artifact") continue;
+      const kinds = message.target?.kind ?? [];
+      if (kinds.includes("custom-build") || kinds.includes("proc-macro")) continue;
+      if (!Array.isArray(message.filenames) || message.filenames.length === 0 || !message.filenames.every((file) => file.startsWith(into))) continue;
+      ids.add(message.package_id);
+    }
   }
-  return names;
+  return ids;
 }
 
 /**
  * The third-party packages of `metadata` (`cargo metadata --format-version
- * 1`, for one platform) in the programs `programs` ([{ name, linked }]): from
- * each program's workspace package, its dependency graph is followed along
- * normal dependencies, not into procedural macros, and of the packages it
- * reaches those whose name and version cargo tree gave for that program
- * (`linked`, `treeNames`) are taken, by package ID, without those `isOwn`
- * takes for this repository's or urx-device's own. Sorted by name, version
- * and source. A crate cargo tree gives that the graph does not reach stops
- * it.
+ * 1`) that `ids` (`compiledPackages`) names, without those `isOwn` takes for
+ * this repository's or urx-device's own, sorted by name, version and source.
+ * Every program of `programs` must be among `ids`, so that the report covers
+ * it, and every ID must be a package of `metadata`.
  */
-export function programCrates(metadata, programs, isOwn) {
+export function programCrates(metadata, ids, isOwn, programs) {
   const packages = new Map(metadata.packages.map((item) => [item.id, item]));
-  const nodes = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
-  const isMacro = (item) => item.targets.some((target) => target.kind.includes("proc-macro"));
-  const crates = new Map();
-  for (const { name, linked } of programs) {
-    const start = metadata.workspace_members.find((id) => packages.get(id).name === name);
-    if (start === undefined) throw new Error(`the workspace has no package ${name}`);
-    const reached = new Set();
-    const pending = [start];
-    while (pending.length > 0) {
-      const id = pending.pop();
-      if (reached.has(id)) continue;
-      reached.add(id);
-      for (const dep of nodes.get(id).deps) {
-        if (!dep.dep_kinds.some((kind) => kind.kind === null)) continue;
-        if (isMacro(packages.get(dep.pkg))) continue;
-        pending.push(dep.pkg);
-      }
+  for (const name of programs) {
+    if (![...ids].some((id) => packages.get(id)?.name === name && metadata.workspace_members.includes(id))) {
+      throw new Error(`cargo's report holds no unit of ${name}: it does not cover that program`);
     }
-    const taken = [...reached].map((id) => packages.get(id)).filter((item) => linked.has(`${item.name}@${item.version}`));
-    const missing = [...linked].filter((key) => !taken.some((item) => `${item.name}@${item.version}` === key));
-    if (missing.length > 0) throw new Error(`cargo tree gives ${missing.join(", ")} for ${name}, which its dependency graph in cargo metadata does not reach`);
-    for (const item of taken) if (!isOwn(item)) crates.set(item.id, item);
+  }
+  const crates = [];
+  for (const id of ids) {
+    const item = packages.get(id);
+    if (item === undefined) throw new Error(`cargo's report names the package ${id}, which cargo metadata does not have`);
+    if (!isOwn(item)) crates.push(item);
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  return [...crates.values()].sort((a, b) => order(a.name, b.name) || order(a.version, b.version) || order(String(a.source), String(b.source)));
+  return crates.sort((a, b) => order(a.name, b.name) || order(a.version, b.version) || order(String(a.source), String(b.source)));
 }
 
 /**
@@ -211,6 +209,10 @@ export function crateNotices(crates, { filesOf, readRecorded, recorded = RECORDE
       used.add(item.name);
       texts = [[`${text.path} (${text.from})`, readRecorded(text.path)]];
     }
+    // Every text the list holds, whichever way it came, holds more than whitespace.
+    for (const [name, body] of texts) {
+      if (body.trim() === "") throw new Error(`the Rust crate ${item.name} ${item.version} has ${name}, which holds no license text`);
+    }
     const header = [`${item.name} ${item.version}`, `License: ${item.license ?? "(none stated)"}`, ...(item.repository ? [`Repository: ${item.repository}`] : [])];
     return [RULE, ...header, ...texts.flatMap(([name, body]) => ["", `--- ${name} ---`, body.trimEnd()])].join("\n");
   });
@@ -219,22 +221,31 @@ export function crateNotices(crates, { filesOf, readRecorded, recorded = RECORDE
   return `The third-party Rust crates built into this release's programs, with their licenses.\n\n${blocks.join("\n\n")}\n`;
 }
 
-/**
- * The notices of the Rust crates in the programs of the export at `source`
- * (its Cargo.lock, for the platform this runs on), its recorded texts read
- * from it. `environment` is the cargo builds' environment.
- */
-export function rustNotices(source, environment, platform = process.platform) {
-  const run = (command, args) =>
-    execFileSync(command, args, { cwd: source, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], env: environment });
-  const host = /^host: (\S+)$/m.exec(run("rustc", ["-vV"]))?.[1];
+/** The platform `rustc` builds for by default, in the folder `source`. */
+export function hostTriple(source, environment) {
+  const host = /^host: (\S+)$/m.exec(execFileSync("rustc", ["-vV"], { cwd: source, encoding: "utf8", env: environment }))?.[1];
   if (host === undefined) throw new Error("rustc names no host platform");
-  const programs = programPackages(platform).map((name) => ({
-    name,
-    linked: treeNames(run("cargo", ["tree", "--locked", "--color", "never", "--target", host, "-p", name, "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}"])),
-  }));
-  const metadata = JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked", "--color", "never", "--filter-platform", host]));
-  return crateNotices(programCrates(metadata, programs, ownOf(source)), {
+  return host;
+}
+
+/**
+ * The notices of the Rust crates in the programs of the export at `source`,
+ * built for `triple` and reported in `reports` (`compiledPackages`), their
+ * recorded texts read from the export. `environment` is the cargo builds'
+ * environment (its CARGO_TARGET_DIR names where they built).
+ */
+export function rustNotices(source, environment, triple, reports, platform = process.platform) {
+  const metadata = JSON.parse(
+    execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--color", "never"], {
+      cwd: source,
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "inherit"],
+      env: environment,
+    }),
+  );
+  const ids = compiledPackages(reports, metadata.target_directory, triple);
+  return crateNotices(programCrates(metadata, ids, ownOf(source), programPackages(platform)), {
     filesOf: licenseTexts,
     readRecorded: (path) => readFileSync(join(source, ...path.split("/")), "utf8"),
   });
