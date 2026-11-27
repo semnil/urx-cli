@@ -24,6 +24,8 @@
 ; - The uninstaller says `removing` only once the removal starts, and deletes
 ;   the state record only when every installed file and the PATH entry it
 ;   added are gone; otherwise the record stays `removing` for setup to repair.
+;   Without a state record it changes nothing, since it cannot tell which
+;   PATH entry is this installer's.
 
 #ifndef AppVersion
   #error Build this installer with scripts/build-windows-installer.mjs
@@ -745,6 +747,13 @@ begin
     Exit;
   end;
   case StateKind(Phase, Added) of
+    0:
+      begin
+        // Without the record there is no telling whether the PATH entry is this installer's, so nothing is removed.
+        ReleaseGate;
+        SuppressibleMsgBox('The installation state ' + StatePath + ' is missing, so this removal cannot tell which PATH entry urx-cli added and changes nothing. Remove ' + ExpandConstant('{app}') + ' and the bin folder''s PATH entry by hand.', mbError, MB_OK, IDOK);
+        Exit;
+      end;
     1: PathAdded := Added;
     2:
       begin
