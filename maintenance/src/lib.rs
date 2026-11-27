@@ -10,6 +10,8 @@ pub mod install;
 #[cfg(unix)]
 pub mod interrupt;
 #[cfg(unix)]
+pub mod journal;
+#[cfg(unix)]
 pub mod place;
 pub mod records;
 #[cfg(unix)]
@@ -20,6 +22,8 @@ pub mod source;
 pub mod sys;
 #[cfg(unix)]
 pub mod tree;
+#[cfg(unix)]
+pub mod work;
 
 use std::path::PathBuf;
 

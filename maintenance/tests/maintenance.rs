@@ -8,6 +8,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use urx_maintenance::install::install;
+use urx_maintenance::journal::JOURNAL;
 use urx_maintenance::place::Layout;
 use urx_maintenance::records::{digest, Phase, State, MANIFEST};
 use urx_maintenance::remove::uninstall;
@@ -152,6 +153,15 @@ fn walk(root: &Path) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+/// The files of the tree at `root`, without the journal a release put in place keeps at its top
+/// until the installer removes it.
+fn tree_at(root: &Path) -> Vec<String> {
+    walk(root)
+        .into_iter()
+        .filter(|path| path != JOURNAL)
+        .collect()
 }
 
 fn names_in(folder: &Path) -> Vec<String> {
@@ -345,7 +355,7 @@ fn an_installation_interrupted_at_any_point_leaves_no_partial_tree_and_is_finish
         // The root is absent or the whole release, never part of it.
         if scene.layout.root.exists() {
             assert_eq!(
-                walk(&scene.layout.root),
+                tree_at(&scene.layout.root),
                 files_of(&scene, "image"),
                 "at {at}"
             );
@@ -375,7 +385,7 @@ fn an_update_interrupted_at_any_point_leaves_one_tree_or_the_other_and_only_its_
             Err(Problem::Interrupted),
             "at {at}"
         );
-        let tree = walk(&scene.layout.root);
+        let tree = tree_at(&scene.layout.root);
         assert!(
             tree == files_of(&scene, "old") || tree == files_of(&scene, "new"),
             "at {at}: {tree:?}"
@@ -1149,7 +1159,8 @@ fn after_a_swap_with_no_later_record_each_tree_is_told_by_its_object() {
             install(&scene.layout, &new, &new_digest, true, &stop_at(total - 2)),
             Err(Problem::Interrupted)
         );
-        assert_eq!(walk(&scene.layout.root), files_of(&scene, "new"));
+        assert_eq!(tree_at(&scene.layout.root), files_of(&scene, "new"));
+        assert!(scene.layout.root.join(JOURNAL).is_file());
         assert_eq!(
             walk(&work_folder(&scene, &new_digest)),
             files_of(&scene, "old")
@@ -1177,54 +1188,65 @@ fn after_a_swap_with_no_later_record_each_tree_is_told_by_its_object() {
 }
 
 #[test]
-fn in_an_interrupted_work_folder_only_files_as_the_release_lists_them_are_removed() {
+fn in_an_interrupted_work_folder_only_what_the_run_made_is_removed_whatever_it_holds() {
     for finish in ["installer", "removal"] {
         let scene = scene();
-        let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
-        // Stopped with the manifest and app/main.js written, app/new.js not yet.
+        let files = [("app/new.js", "new"), ("app/plugins/x.js", "x")];
+        let (source, expected) = release(&scene, "image", "0.1.0", &files);
+        // Stopped with the manifest and app/main.js written, app/new.js and app/plugins not yet.
         assert_eq!(
             install(&scene.layout, &source, &expected, true, &stop_at(5)),
             Err(Problem::Interrupted)
         );
         let work = work_folder(&scene, &expected);
         assert!(work.join("app/main.js").exists() && !work.join("app/new.js").exists());
-        fs::write(work.join("app/new.js"), "user data").unwrap();
+        // Someone's: a file holding exactly what the release lists, an empty folder at a folder
+        // of the release, and a folder of their own.
+        fs::write(work.join("app/new.js"), "new").unwrap();
         fs::set_permissions(work.join("app/new.js"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir(work.join("app/plugins")).unwrap();
+        fs::set_permissions(work.join("app/plugins"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(work.join("mine")).unwrap();
-        if finish == "installer" {
+        // The run's: a file cut short, and one at a reserved name not yet in the journal.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(work.join("app/main.js"))
+            .unwrap()
+            .set_len(2)
+            .unwrap();
+        fs::write(work.join("app/.urx-new-99"), "part").unwrap();
+        let report = if finish == "installer" {
             let report = install(&scene.layout, &source, &expected, true, &never).unwrap();
-            assert!(
-                report
-                    .lines
-                    .iter()
-                    .any(|line| line.starts_with(&format!("Kept {}", work.display()))),
-                "{:?}",
-                report.lines
-            );
             assert_eq!(walk(&scene.layout.root), files_of(&scene, "image"));
             assert!(launcher_accepts(&scene));
+            report
         } else {
             let report = uninstall(&scene.layout, true, &never).unwrap();
-            assert!(
-                report
-                    .lines
-                    .iter()
-                    .any(|line| line.starts_with(&format!("Kept {}", work.display()))),
-                "{:?}",
-                report.lines
-            );
             assert!(state_of(&scene).is_none());
-        }
+            report
+        };
+        assert!(
+            report.lines.iter().any(|line| line
+                == &format!(
+                    "Kept {}: it holds files the installation did not make (app/new.js, app/plugins, mine).",
+                    work.display()
+                )),
+            "{finish}: {:?}",
+            report.lines
+        );
+        assert_eq!(walk(&work), vec!["app/new.js".to_owned()], "{finish}");
         assert_eq!(
             fs::read_to_string(work.join("app/new.js")).unwrap(),
-            "user data",
+            "new",
             "{finish}"
         );
         assert_eq!(mode(&work.join("app/new.js")), 0o600, "{finish}");
+        assert!(names_in(&work.join("app/plugins")).is_empty(), "{finish}");
         assert!(work.join("mine").is_dir(), "{finish}");
-        assert!(
-            !work.join("app/main.js").exists(),
-            "{finish}: the release's own file goes"
+        assert_eq!(
+            names_in(&work),
+            vec!["app".to_owned(), "mine".to_owned()],
+            "{finish}"
         );
     }
 }
@@ -1244,7 +1266,7 @@ fn a_folder_in_the_work_folder_the_removal_cannot_enter_stops_it_with_its_record
         Err(Problem::Interrupted)
     );
     let work = work_folder(&scene, &expected);
-    for folder in ["app", "app/plugins"] {
+    for folder in ["app", "app/plugins", "maintenance"] {
         let at = work.join(folder);
         fs::set_permissions(&at, fs::Permissions::from_mode(0o775)).unwrap();
         assert_eq!(
@@ -1253,6 +1275,11 @@ fn a_folder_in_the_work_folder_the_removal_cannot_enter_stops_it_with_its_record
             "{folder}"
         );
         assert_eq!(state_of(&scene).unwrap().phase, Phase::Removing, "{folder}");
+        // What tells the rest is still there for the next run.
+        assert!(
+            work.join(JOURNAL).is_file() && work.join(MANIFEST).is_file(),
+            "{folder}"
+        );
         fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
     }
     uninstall(&scene.layout, true, &never).unwrap();
@@ -1341,7 +1368,7 @@ fn a_folder_that_takes_the_recorded_work_folder_s_name_is_left_as_it_is() {
         let moved = scene.layout.root.with_file_name("moved");
         fs::rename(&work, &moved).unwrap();
         fs::create_dir(&work).unwrap();
-        fs::remove_dir(&moved).unwrap();
+        fs::remove_dir_all(&moved).unwrap();
         let report = if finish == "installer" {
             let report = install(&scene.layout, &source, &expected, true, &never).unwrap();
             assert_eq!(walk(&scene.layout.root), files_of(&scene, "image"));
@@ -1365,28 +1392,50 @@ fn a_folder_that_takes_the_recorded_work_folder_s_name_is_left_as_it_is() {
 }
 
 #[test]
-fn a_release_manifest_in_the_work_folder_other_than_the_recorded_one_stops_the_removal() {
+fn a_work_folder_whose_journal_is_gone_stops_the_removal_at_a_path_of_the_release() {
     let scene = scene();
     let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
-    let (other, _) = release(&scene, "other", "0.2.0", &[("app/new.js", "new")]);
     // Stopped with the manifest written in the work folder and nothing else.
     assert_eq!(
         install(&scene.layout, &source, &expected, true, &stop_at(4)),
         Err(Problem::Interrupted)
     );
     let work = work_folder(&scene, &expected);
-    let manifest = work.join(MANIFEST);
-    assert_eq!(walk(&work), vec![MANIFEST.to_owned()]);
-    let recorded = fs::read(&manifest).unwrap();
-    fs::write(&manifest, fs::read(other.join(MANIFEST)).unwrap()).unwrap();
+    assert_eq!(walk(&work), vec![JOURNAL.to_owned(), MANIFEST.to_owned()]);
+    fs::remove_file(work.join(JOURNAL)).unwrap();
+    // Whether the manifest is the run's cannot be told.
     assert_eq!(
         uninstall(&scene.layout, true, &never),
-        Err(Problem::Conflict(manifest.clone()))
+        Err(Problem::Conflict(work.join(MANIFEST)))
     );
     assert_eq!(state_of(&scene).unwrap().phase, Phase::Removing);
-    fs::write(&manifest, &recorded).unwrap();
+    // Something at no path of the release is kept; with the manifest gone, the removal finishes.
+    fs::write(work.join("mine"), "user data").unwrap();
+    fs::remove_file(work.join(MANIFEST)).unwrap();
+    let report = uninstall(&scene.layout, true, &never).unwrap();
+    assert!(report
+        .lines
+        .iter()
+        .any(|line| line.starts_with(&format!("Kept {}:", work.display()))));
+    assert_eq!(names_in(&work), vec!["mine".to_owned()]);
+    assert!(state_of(&scene).is_none());
+}
+
+#[test]
+fn a_file_put_in_place_of_one_the_run_made_is_kept() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &stop_at(4)),
+        Err(Problem::Interrupted)
+    );
+    let work = work_folder(&scene, &expected);
+    // Another file at the manifest's path, holding exactly the manifest: another object.
+    let manifest = fs::read(work.join(MANIFEST)).unwrap();
+    fs::remove_file(work.join(MANIFEST)).unwrap();
+    fs::write(work.join(MANIFEST), &manifest).unwrap();
     uninstall(&scene.layout, true, &never).unwrap();
-    assert!(!work.exists());
+    assert_eq!(walk(&work), vec![MANIFEST.to_owned()]);
     assert!(state_of(&scene).is_none());
 }
 
@@ -1418,4 +1467,246 @@ fn a_resumed_installation_assembles_under_a_name_other_than_the_interrupted_run_
     assert!(no_work_folder(&scene));
     assert_eq!(walk(&scene.layout.root), files_of(&scene, "image"));
     assert!(launcher_accepts(&scene));
+}
+
+#[test]
+fn a_folder_put_at_the_root_s_name_while_a_removal_is_interrupted_stops_both_tools_and_is_kept() {
+    let scene = scene();
+    let (source, expected) = release(&scene, "image", "0.1.0", &[]);
+    install(&scene.layout, &source, &expected, true, &never).unwrap();
+    // Stopped right after recording `removing`.
+    assert_eq!(
+        uninstall(&scene.layout, true, &stop_at(2)),
+        Err(Problem::Interrupted)
+    );
+    assert_eq!(state_of(&scene).unwrap().phase, Phase::Removing);
+    let root = &scene.layout.root;
+    let moved = root.with_file_name("moved");
+    fs::rename(root, &moved).unwrap();
+    fs::create_dir_all(root.join("app")).unwrap();
+    fs::write(root.join("app/main.js"), "local restore").unwrap();
+    assert_eq!(
+        uninstall(&scene.layout, true, &never),
+        Err(Problem::Conflict(root.clone()))
+    );
+    assert_eq!(
+        install(&scene.layout, &source, &expected, true, &never),
+        Err(Problem::Conflict(root.clone()))
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("app/main.js")).unwrap(),
+        "local restore"
+    );
+    assert_eq!(state_of(&scene).unwrap().phase, Phase::Removing);
+    // The recorded tree back: the removal finishes.
+    fs::remove_dir_all(root).unwrap();
+    fs::rename(&moved, root).unwrap();
+    uninstall(&scene.layout, true, &never).unwrap();
+    assert!(state_of(&scene).is_none());
+    assert!(!root.exists());
+}
+
+#[test]
+fn a_folder_put_at_the_root_s_name_of_a_complete_installation_stops_both_tools_and_is_kept() {
+    let scene = scene();
+    let (old, old_digest) = release(&scene, "old", "0.1.0", &[]);
+    install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+    let (new, new_digest) = release(&scene, "new", "0.2.0", &[]);
+    let root = &scene.layout.root;
+    let moved = root.with_file_name("moved");
+    fs::rename(root, &moved).unwrap();
+    fs::create_dir_all(root.join("app")).unwrap();
+    fs::write(root.join("app/main.js"), "local restore").unwrap();
+    for (source, digest) in [(&new, &new_digest), (&old, &old_digest)] {
+        for apply in [false, true] {
+            assert_eq!(
+                install(&scene.layout, source, digest, apply, &never),
+                Err(Problem::Conflict(root.clone()))
+            );
+        }
+    }
+    for apply in [false, true] {
+        assert_eq!(
+            uninstall(&scene.layout, apply, &never),
+            Err(Problem::Conflict(root.clone()))
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("app/main.js")).unwrap(),
+        "local restore"
+    );
+    assert_eq!(state_of(&scene).unwrap().phase, Phase::Complete);
+    fs::remove_dir_all(root).unwrap();
+    fs::rename(&moved, root).unwrap();
+    install(&scene.layout, &new, &new_digest, true, &never).unwrap();
+    assert_eq!(walk(root), files_of(&scene, "new"));
+}
+
+#[test]
+fn a_recorded_work_folder_no_longer_as_made_stops_both_tools_with_its_record() {
+    let probe = scene();
+    let (old, old_digest) = release(&probe, "old", "0.1.0", &[("app/old.js", "old")]);
+    install(&probe.layout, &old, &old_digest, true, &never).unwrap();
+    let (new, new_digest) = release(&probe, "new", "0.2.0", &[("app/new.js", "new")]);
+    let total =
+        questions(&|stop| install(&probe.layout, &new, &new_digest, true, stop).map(|_| ()));
+    // Before the swap the work folder holds the release; after it, the previous tree.
+    for (at, finish) in [
+        (total - 3, "removal"),
+        (total - 3, "installer"),
+        (total - 2, "removal"),
+        (total - 2, "installer"),
+    ] {
+        let scene = scene();
+        let (old, old_digest) = release(&scene, "old", "0.1.0", &[("app/old.js", "old")]);
+        install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+        let (new, new_digest) = release(&scene, "new", "0.2.0", &[("app/new.js", "new")]);
+        assert_eq!(
+            install(&scene.layout, &new, &new_digest, true, &stop_at(at)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &new_digest);
+        let held = walk(&work);
+        let record = fs::read(scene.layout.maintenance.join("state.json")).unwrap();
+        fs::set_permissions(&work, fs::Permissions::from_mode(0o775)).unwrap();
+        let stopped = if finish == "removal" {
+            uninstall(&scene.layout, true, &never)
+        } else {
+            install(&scene.layout, &new, &new_digest, true, &never).map(|_| Default::default())
+        };
+        assert_eq!(
+            stopped,
+            Err(Problem::Conflict(work.clone())),
+            "{at} {finish}"
+        );
+        // Stopped before the record changed.
+        assert_eq!(
+            fs::read(scene.layout.maintenance.join("state.json")).unwrap(),
+            record,
+            "{at} {finish}"
+        );
+        assert_eq!(walk(&work), held, "{at} {finish}");
+        fs::set_permissions(&work, fs::Permissions::from_mode(0o755)).unwrap();
+        if finish == "removal" {
+            uninstall(&scene.layout, true, &never).unwrap();
+            assert!(state_of(&scene).is_none(), "{at} {finish}");
+        } else {
+            install(&scene.layout, &new, &new_digest, true, &never).unwrap();
+            assert_eq!(
+                walk(&scene.layout.root),
+                files_of(&scene, "new"),
+                "{at} {finish}"
+            );
+        }
+        assert!(no_work_folder(&scene), "{at} {finish}");
+    }
+}
+
+#[test]
+fn something_put_in_the_work_folder_while_it_is_assembled_stops_the_installation_and_is_kept() {
+    // Before app/main.js is written, a folder at `app`; before app/new.js, a file there.
+    for (at, path) in [(4, "app"), (5, "app/new.js")] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
+        let work = work_folder(&scene, &expected);
+        let put = || {
+            let there = work.join(path);
+            if path == "app" {
+                fs::create_dir(&there).unwrap();
+            } else {
+                fs::write(&there, "new").unwrap();
+            }
+        };
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &act_at(at, put)),
+            Err(Problem::Conflict(work.join(path))),
+            "{path}"
+        );
+        // Neither tool takes it for the installation's.
+        let report = uninstall(&scene.layout, true, &never).unwrap();
+        assert!(work.join(path).exists(), "{path}");
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| line.starts_with(&format!("Kept {}:", work.display()))),
+            "{path}: {:?}",
+            report.lines
+        );
+        assert!(state_of(&scene).is_none(), "{path}");
+    }
+}
+
+#[test]
+fn a_work_folder_kept_with_someone_s_files_is_no_longer_recorded_once_its_journal_is_gone() {
+    for finish in ["installer", "removal"] {
+        let scene = scene();
+        let (source, expected) = release(&scene, "image", "0.1.0", &[("app/new.js", "new")]);
+        assert_eq!(
+            install(&scene.layout, &source, &expected, true, &stop_at(5)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &expected);
+        fs::write(work.join("app/new.js"), "new").unwrap();
+        // Stopped right after the work folder was cleared.
+        let stopped = if finish == "installer" {
+            install(&scene.layout, &source, &expected, true, &stop_at(2)).map(|_| ())
+        } else {
+            uninstall(&scene.layout, true, &stop_at(3)).map(|_| ())
+        };
+        // With nothing installed at the root, the removal names the other copy to finish with.
+        let interrupted = if finish == "installer" {
+            Problem::Interrupted
+        } else {
+            Problem::RemovalUnfinished { interrupted: true }
+        };
+        assert_eq!(stopped, Err(interrupted), "{finish}");
+        assert!(!work.join(JOURNAL).exists(), "{finish}");
+        assert_eq!(state_of(&scene).unwrap().work, None, "{finish}");
+        // The next run does not stop at the file left there.
+        if finish == "installer" {
+            install(&scene.layout, &source, &expected, true, &never).unwrap();
+            assert!(launcher_accepts(&scene));
+        } else {
+            uninstall(&scene.layout, true, &never).unwrap();
+            assert!(state_of(&scene).is_none());
+        }
+        assert_eq!(walk(&work), vec!["app/new.js".to_owned()], "{finish}");
+    }
+}
+
+#[test]
+fn a_folder_the_removal_cannot_enter_in_the_previous_tree_beside_the_root_stops_it_with_the_manifest_kept(
+) {
+    let probe = scene();
+    let (old, old_digest) = release(&probe, "old", "0.1.0", &[]);
+    install(&probe.layout, &old, &old_digest, true, &never).unwrap();
+    let (new, new_digest) = release(&probe, "new", "0.2.0", &[]);
+    let total =
+        questions(&|stop| install(&probe.layout, &new, &new_digest, true, stop).map(|_| ()));
+    for folder in ["app", "maintenance", "native"] {
+        let scene = scene();
+        let (old, old_digest) = release(&scene, "old", "0.1.0", &[]);
+        install(&scene.layout, &old, &old_digest, true, &never).unwrap();
+        let (new, new_digest) = release(&scene, "new", "0.2.0", &[]);
+        // Stopped right after the swap: the previous tree at the work folder's name.
+        assert_eq!(
+            install(&scene.layout, &new, &new_digest, true, &stop_at(total - 2)),
+            Err(Problem::Interrupted)
+        );
+        let work = work_folder(&scene, &new_digest);
+        assert_eq!(walk(&work), files_of(&scene, "old"));
+        let at = work.join(folder);
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            uninstall(&scene.layout, true, &never),
+            Err(Problem::Conflict(at.clone())),
+            "{folder}"
+        );
+        assert!(work.join(MANIFEST).is_file(), "{folder}");
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+        uninstall(&scene.layout, true, &never).unwrap();
+        assert!(no_work_folder(&scene), "{folder}");
+        assert!(state_of(&scene).is_none(), "{folder}");
+    }
 }

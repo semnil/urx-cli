@@ -2,6 +2,7 @@
 //! never through a link.
 
 use crate::place::is_ours;
+use crate::records::MANIFEST;
 use crate::sys::{self, Entry, Fd, Kind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -34,9 +35,6 @@ pub enum How {
     /// file system finds under another spelling (another letter case) is
     /// not this path's, and the path is missing.
     Exact,
-    /// Making each missing folder (0755); a folder there only under another
-    /// spelling is a conflict.
-    Make,
 }
 
 /// How a name is spelled in a folder.
@@ -105,7 +103,6 @@ pub fn parent_of(
             spelled(parent, &name)?
         };
         let next = match found {
-            Spelled::Missing if how == How::Make => sys::make_folder_at(parent, &name, 0o755)?,
             Spelled::Missing => return Ok(None),
             Spelled::Exact(entry) => {
                 if !fits(&entry) {
@@ -116,22 +113,14 @@ pub fn parent_of(
             Spelled::Other { entry, .. } if !fits(&entry) => {
                 return Err(WalkError::Conflict(walked))
             }
-            Spelled::Other { .. } if how == How::Exact => return Ok(None),
-            Spelled::Other { .. } => return Err(WalkError::Conflict(walked)),
+            Spelled::Other { .. } => return Ok(None),
         };
         current = Some(next);
     }
     let parent = match current {
         Some(folder) => folder,
         // The root itself: a second descriptor of it.
-        None => {
-            // SAFETY: duplicates an open descriptor, owned by the new Fd.
-            let fd = unsafe { libc::fcntl(root.raw(), libc::F_DUPFD_CLOEXEC, 0) };
-            if fd < 0 {
-                return Err(WalkError::Io(io::Error::last_os_error()));
-            }
-            sys::adopt(fd)
-        }
+        None => sys::duplicate(root)?,
     };
     Ok(Some((parent, sys::c_name(last.as_bytes())?)))
 }
@@ -177,36 +166,31 @@ pub fn only_listed(
     Ok(Ok(()))
 }
 
-/// What a removal by list left under a folder.
+/// What a removal left under a folder.
 #[derive(Debug, Default)]
 pub struct Left {
-    /// Entries kept, by relative path: not listed, or listed but not holding
-    /// what the release lists.
+    /// Entries kept, by relative path: not the installation's.
     pub kept: Vec<String>,
     /// Whether the folder was left empty.
     pub empty: bool,
 }
 
-/// The SHA-256 and size each listed file must hold to be removed.
-pub type Listed = std::collections::BTreeMap<String, (String, u64)>;
-
-/// Removes, under the open folder `folder` (at `prefix`), each regular file
-/// that is one of `files` under exactly that path (with `hashes`, only while
-/// it holds exactly what they list), and each folder of the installation's
-/// left empty. Anything else is kept. A folder on the way to a listed file
-/// that is not as the installation makes it (`is_ours`) cannot be looked
-/// into: its path is the error, and nothing more is removed.
+/// Removes, under the open folder `folder` (at `prefix`, empty or ending
+/// with `/`), each regular file that is one of `files` under exactly that
+/// path, the release manifest at the top after the others, and each folder
+/// of the installation's left empty. Anything else is kept. A folder on the
+/// way to a listed file that is not as the installation makes it
+/// (`is_ours`) cannot be looked into: its path is the error, and nothing
+/// more is removed.
 pub fn remove_listed(
     folder: &Fd,
     prefix: &str,
     files: &BTreeSet<String>,
-    hashes: Option<&Listed>,
     owner: u32,
 ) -> io::Result<Result<Left, String>> {
-    let mut left = Left {
-        kept: Vec::new(),
-        empty: true,
-    };
+    let top = prefix.is_empty();
+    let mut left = Left::default();
+    let mut manifest = false;
     for name in sys::names(folder)? {
         let Ok(text) = std::str::from_utf8(name.to_bytes()) else {
             left.kept.push(format!(
@@ -222,18 +206,10 @@ pub fn remove_listed(
         let inside = format!("{path}/");
         match entry.kind {
             Kind::File if files.contains(&path) => {
-                let removable = match hashes {
-                    None => true,
-                    Some(hashes) => {
-                        let (mut file, _) = sys::open_file_at(folder, &name)?;
-                        let (sha256, size) = hash(&mut file)?;
-                        hashes.get(&path) == Some(&(sha256, size))
-                    }
-                };
-                if removable {
-                    sys::remove_at(folder, &name, false)?;
+                if top && path == MANIFEST {
+                    manifest = true;
                 } else {
-                    left.kept.push(path);
+                    sys::remove_at(folder, &name, false)?;
                 }
             }
             Kind::Folder if files.iter().any(|file| file.starts_with(&inside)) => {
@@ -241,27 +217,22 @@ pub fn remove_listed(
                     return Ok(Err(path));
                 }
                 let inner = sys::open_folder_at(folder, &name)?;
-                match remove_listed(&inner, &inside, files, hashes, owner)? {
+                match remove_listed(&inner, &inside, files, owner)? {
                     Err(at) => return Ok(Err(at)),
                     Ok(inner_left) => {
                         left.kept.extend(inner_left.kept);
                         drop(inner);
                         if inner_left.empty {
-                            match sys::remove_at(folder, &name, true) {
-                                Ok(_) => {}
-                                Err(error)
-                                    if matches!(
-                                        error.raw_os_error(),
-                                        Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
-                                    ) => {}
-                                Err(error) => return Err(error),
-                            }
+                            crate::journal::remove_folder(folder, &name)?;
                         }
                     }
                 }
             }
             _ => left.kept.push(path),
         }
+    }
+    if manifest {
+        sys::remove_at(folder, &sys::c_name(MANIFEST.as_bytes())?, false)?;
     }
     sys::flush(folder.raw())?;
     left.empty = sys::names(folder)?.is_empty();

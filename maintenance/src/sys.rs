@@ -140,6 +140,13 @@ pub fn open_folder_at(parent: &Fd, name: &CStr) -> io::Result<Fd> {
     Ok(Fd(fd))
 }
 
+/// A second descriptor of the open `fd`, closed on exec.
+pub fn duplicate(fd: &Fd) -> io::Result<Fd> {
+    // SAFETY: duplicates an open descriptor, owned by the new Fd.
+    let copy = checked(unsafe { libc::fcntl(fd.0, libc::F_DUPFD_CLOEXEC, 0) })?;
+    Ok(Fd(copy))
+}
+
 /// Makes the folder `name` in the open folder `parent` with `mode`, whatever
 /// the umask, and opens it.
 pub fn make_folder_at(parent: &Fd, name: &CStr, mode: u32) -> io::Result<Fd> {

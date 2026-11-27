@@ -371,6 +371,40 @@ pub fn open_ours(parent: &Fd, name: &CStr, path: &Path, owner: u32) -> Result<Op
     }
 }
 
+/// The volume of the open folder `parent`, the root's: every object a
+/// record names is a name in that folder, on that volume. Its number is the
+/// one the system gives the volume when it is mounted, compared only within
+/// one run.
+pub fn volume_of(parent: &Fd, path: &Path) -> Result<u64, Problem> {
+    sys::entry(parent.raw())
+        .map(|entry| entry.id.0)
+        .map_err(|_| Problem::Conflict(path.to_path_buf()))
+}
+
+/// The inode of `entry`, at `path`, which must be on `volume`: another
+/// volume at a name beside the root is not the installation's.
+pub fn inode_on(entry: &Entry, volume: u64, path: &Path) -> Result<u64, Problem> {
+    if entry.id.0 == volume {
+        Ok(entry.id.1)
+    } else {
+        Err(Problem::Conflict(path.to_path_buf()))
+    }
+}
+
+/// What is at `name` in the open folder `parent` (at `path`), with its
+/// inode on `volume`; None when nothing is.
+pub fn inode_at(
+    parent: &Fd,
+    name: &CStr,
+    volume: u64,
+    path: &Path,
+) -> Result<Option<(u64, Entry)>, Problem> {
+    match sys::entry_at(parent, name).map_err(|_| Problem::Conflict(path.to_path_buf()))? {
+        None => Ok(None),
+        Some(entry) => Ok(Some((inode_on(&entry, volume, path)?, entry))),
+    }
+}
+
 /// What is at the command link's path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {

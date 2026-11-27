@@ -23,6 +23,11 @@ pub const REQUIRED: [&str; 5] = [
 /// no owned path ends with it.
 pub const PENDING_SUFFIX: &str = ".urx-pending";
 
+/// The start of the names maintenance keeps for itself inside a tree it
+/// makes (its journal, and each entry before it is moved to its path): no
+/// name of an owned path starts with it, in any letter case.
+pub const RESERVED_PREFIX: &str = ".urx-";
+
 /// The pending sibling's tag: the start of the manifest digest of the
 /// release it is written for. A pending name is maintenance's only with the
 /// tag of the release maintenance is installing or removing, never by its
@@ -47,7 +52,8 @@ fn is_digest(text: &str) -> bool {
 }
 
 /// A relative path of an owned file: `/`-separated names of printable ASCII,
-/// none empty, `.` or `..`, and none ending with the pending suffix. ASCII
+/// none empty, `.` or `..`, none holding the pending suffix and none
+/// starting with the reserved prefix in any letter case. ASCII
 /// alone leaves no two spellings of one name but its letter case, which
 /// `key` folds: a file system that ignores Unicode normalization or case
 /// then finds each owned file under one name only.
@@ -61,6 +67,7 @@ pub fn is_owned_path(path: &str) -> bool {
                 && name != ".."
                 && name.len() <= 255
                 && !name.contains(PENDING_SUFFIX)
+                && !key(name).starts_with(RESERVED_PREFIX)
         })
 }
 
@@ -197,27 +204,31 @@ impl Phase {
 }
 
 /// A work folder beside the root (K41 as revised): its name, which object
-/// it is, the files it may hold, and whether each must be checked against
-/// the release manifest before it is removed (a release being assembled) or
-/// is removed by the list (the previous tree, swapped out of the root).
+/// it is (its inode), the files it may hold, and whether what it holds is
+/// told by its journal (`check`: a release being assembled, of which only
+/// what the journal names is the installation's) or by the list (the
+/// previous tree, swapped out of the root).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
     pub name: String,
-    pub id: (u64, u64),
+    pub id: u64,
     pub files: Vec<String>,
     pub check: bool,
 }
 
 /// The state record on macOS: the phase, the target release and the SHA-256
 /// of its manifest, and the files the installation may own.
-/// - `complete`: `owned` is the release's files, at the root.
+/// Each object is named by its inode, on the volume of the root's parent.
+/// - `complete`: `owned` is the release's files, at the root, whose object
+///   is `root`.
 /// - `installing`: `owned` is the release's files and `base` those of the
 ///   tree at the root the run started from, whose object is `previous`
 ///   (none for a first installation); `work`, once made, is the work folder
 ///   the release is assembled in. Which object is at the root, and which at
 ///   the work folder's name, is read from the objects themselves.
 /// - `removing`: `owned` is the files of the tree at the root when the
-///   removal began, and `work` the work folder left beside it, if any.
+///   removal began, whose object is `root` (none when there was none), and
+///   `work` the work folder left beside it, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
@@ -227,7 +238,9 @@ pub struct State {
     /// Present exactly while installing.
     pub base: Option<Vec<String>>,
     /// Only while installing.
-    pub previous: Option<(u64, u64)>,
+    pub previous: Option<u64>,
+    /// Present once complete; while removing, when there was a root.
+    pub root: Option<u64>,
     /// Absent once complete.
     pub work: Option<Work>,
 }
@@ -254,12 +267,17 @@ fn sorted(paths: &[String]) -> Vec<String> {
     paths
 }
 
-fn object_id(value: &Value) -> Option<(u64, u64)> {
+/// An object's inode, in exactly the form `to_bytes` writes it.
+fn inode_of(value: &Value) -> Option<u64> {
     let value = value.as_object()?;
-    Some((
-        value.get("device")?.as_u64()?,
-        value.get("inode")?.as_u64()?,
-    ))
+    if !exact_keys(value, &["inode"]) {
+        return None;
+    }
+    value.get("inode")?.as_u64()
+}
+
+fn inode_value(inode: u64) -> Value {
+    serde_json::json!({ "inode": inode })
 }
 
 /// A work folder's name: one name, of printable ASCII.
@@ -274,14 +292,6 @@ fn is_folder_name(name: &str) -> bool {
 }
 
 impl State {
-    /// Every file the installation may own, at the root or in a work folder.
-    pub fn all_files(&self) -> Vec<String> {
-        let mut all = self.owned.clone();
-        all.extend(self.base.iter().flatten().cloned());
-        all.extend(self.work.iter().flat_map(|work| work.files.iter().cloned()));
-        sorted(&all)
-    }
-
     /// Reads a state record in exactly the form `to_bytes` writes for its
     /// phase, its paths sorted, unique, and `owned` including the manifest
     /// unless removing.
@@ -299,10 +309,18 @@ impl State {
             _ => return None,
         };
         let mut keys = vec!["product", "format", "phase", "release", "manifest", "owned"];
-        if phase == Phase::Installing {
-            keys.push("base");
-            if object.contains_key("previous") {
-                keys.push("previous");
+        match phase {
+            Phase::Installing => {
+                keys.push("base");
+                if object.contains_key("previous") {
+                    keys.push("previous");
+                }
+            }
+            Phase::Complete => keys.push("root"),
+            Phase::Removing => {
+                if object.contains_key("root") {
+                    keys.push("root");
+                }
             }
         }
         if phase != Phase::Complete && object.contains_key("work") {
@@ -325,18 +343,17 @@ impl State {
             None => None,
         };
         let previous = match object.get("previous") {
-            Some(previous) => {
-                if !exact_keys(previous.as_object()?, &["device", "inode"]) {
-                    return None;
-                }
-                Some(object_id(previous)?)
-            }
+            Some(previous) => Some(inode_of(previous)?),
+            None => None,
+        };
+        let root = match object.get("root") {
+            Some(root) => Some(inode_of(root)?),
             None => None,
         };
         let work = match object.get("work") {
             Some(work) => {
                 let fields = work.as_object()?;
-                if !exact_keys(fields, &["name", "device", "inode", "files", "check"]) {
+                if !exact_keys(fields, &["name", "inode", "files", "check"]) {
                     return None;
                 }
                 let name = fields.get("name")?.as_str()?;
@@ -345,7 +362,7 @@ impl State {
                 }
                 Some(Work {
                     name: name.to_owned(),
-                    id: object_id(work)?,
+                    id: fields.get("inode")?.as_u64()?,
                     files: sorted_paths(fields.get("files")?)?,
                     check: fields.get("check")?.as_bool()?,
                 })
@@ -359,6 +376,7 @@ impl State {
             owned,
             base,
             previous,
+            root,
             work,
         })
     }
@@ -378,13 +396,15 @@ impl State {
             value["base"] = serde_json::json!(sorted(base));
         }
         if let Some(previous) = self.previous {
-            value["previous"] = serde_json::json!({ "device": previous.0, "inode": previous.1 });
+            value["previous"] = inode_value(previous);
+        }
+        if let Some(root) = self.root {
+            value["root"] = inode_value(root);
         }
         if let Some(work) = &self.work {
             value["work"] = serde_json::json!({
                 "name": work.name,
-                "device": work.id.0,
-                "inode": work.id.1,
+                "inode": work.id,
                 "files": sorted(&work.files),
                 "check": work.check,
             });
@@ -487,10 +507,11 @@ mod tests {
             manifest: "a".repeat(64),
             owned: vec!["bin/urx".to_owned(), MANIFEST.to_owned()],
             base: (phase == Phase::Installing).then(|| vec!["bin/urx".to_owned()]),
-            previous: (phase == Phase::Installing).then_some((3, 4)),
+            previous: (phase == Phase::Installing).then_some(4),
+            root: (phase != Phase::Installing).then_some(5),
             work: (phase != Phase::Complete).then(|| Work {
                 name: "urx-cli.install-0".to_owned(),
-                id: (1, 2),
+                id: 2,
                 files: vec!["bin/urx".to_owned()],
                 check: true,
             }),
@@ -515,6 +536,7 @@ mod tests {
         let installing = State {
             phase: Phase::Installing,
             base: Some(Vec::new()),
+            root: None,
             ..complete
         };
         assert!(urx_launcher::install::check(&installing.to_bytes(), manifest).is_err());
@@ -524,7 +546,7 @@ mod tests {
     fn a_state_record_in_any_other_form_is_refused() {
         let base = serde_json::json!({
             "product": "urx-cli", "format": 1, "phase": "complete", "release": "0.1.0",
-            "manifest": "a".repeat(64), "owned": ["bin/urx", MANIFEST],
+            "manifest": "a".repeat(64), "owned": ["bin/urx", MANIFEST], "root": { "inode": 1 },
         });
         let changed = |key: &str, value: Value| {
             let mut record = base.clone();
@@ -545,10 +567,36 @@ mod tests {
             changed("owned", serde_json::json!(["../x", MANIFEST])),
             // `base` and `previous` only while installing, `work` only while not complete.
             changed("base", serde_json::json!([])),
-            changed("previous", serde_json::json!({ "device": 1, "inode": 2 })),
+            changed("previous", serde_json::json!({ "inode": 2 })),
             changed(
                 "work",
-                serde_json::json!({ "name": "w", "device": 1, "inode": 2, "files": [], "check": true }),
+                serde_json::json!({ "name": "w", "inode": 2, "files": [], "check": true }),
+            ),
+            // An object is named by its inode alone; `complete` names its root.
+            changed("root", serde_json::json!({ "device": 1, "inode": 2 })),
+            changed("root", serde_json::json!(2)),
+            {
+                let mut record = base.clone();
+                record.as_object_mut().unwrap().remove("root");
+                serde_json::to_vec(&record).unwrap()
+            },
+            {
+                let mut record = base.clone();
+                record["phase"] = Value::from("installing");
+                record["base"] = serde_json::json!([]);
+                serde_json::to_vec(&record).unwrap()
+            },
+            {
+                let mut record = base.clone();
+                record["phase"] = Value::from("removing");
+                record["work"] = serde_json::json!({ "name": "w", "device": 1, "inode": 2, "files": [], "check": true });
+                serde_json::to_vec(&record).unwrap()
+            },
+            // No owned name is one maintenance keeps for itself.
+            changed("owned", serde_json::json!([".urx-new-1", MANIFEST])),
+            changed(
+                "owned",
+                serde_json::json!(["bin/.URX-journal", "bin/urx", MANIFEST]),
             ),
             {
                 let mut record = base.clone();
