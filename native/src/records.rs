@@ -163,9 +163,10 @@ impl From<&DeviceEntry> for DeviceRecord {
         DeviceRecord {
             id: entry.id.clone(),
             model: entry.model.clone(),
+            // Discovery fails an unreadable `firm_list` as invalid_response, so no entry carries one.
             firmware: entry.firmware.as_ref().map(|firmware| match firmware {
                 SystemFirmware::Version(version) => Either::A(version.clone()),
-                SystemFirmware::Absent => Either::B(Null),
+                SystemFirmware::Absent | SystemFirmware::Unreadable => Either::B(Null),
             }),
         }
     }
