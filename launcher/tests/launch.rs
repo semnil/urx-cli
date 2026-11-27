@@ -15,13 +15,19 @@ use urx_launcher::{launch, Installation, Started};
 const CHILD: &str = "URX_LAUNCHER_TEST_CHILD";
 
 /// The stand-in runtime, this package's `fake-runtime` example: built once for
-/// these tests by the cargo that builds them, at the path that cargo reports,
-/// wherever its settings put the build's files.
+/// these tests by the cargo that builds them, at the path that cargo reports.
+/// It is built in the folder that cargo gives integration tests for their own
+/// files (`CARGO_TARGET_TMPDIR`), as both its target and its build directory,
+/// so neither the way the tests' build was given its folders nor the checkout
+/// takes part.
 fn fake_runtime() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     BUILT
         .get_or_init(|| {
+            let folder = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fake-runtime");
             let output = Command::new(env!("CARGO"))
+                .env("CARGO_TARGET_DIR", &folder)
+                .env("CARGO_BUILD_BUILD_DIR", &folder)
                 .args([
                     "build",
                     "--locked",
