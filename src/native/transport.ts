@@ -106,25 +106,28 @@ function phaseOf(failure: LifecycleFailure): OperationPhase {
 
 /**
  * The structured failure of a subscription call's failure record. A
- * cancellation reports the stopping cause its operation was cancelled for
- * (`AddonTransport.cancelAll`), and internal_error without one: K34 invents
- * none.
+ * cancellation reports `stopping`, the first cause the owner gave its
+ * operation's `cancel`, marked `cancelled`, so the operation that owns the
+ * subscription can tell it from the call's own failure; internal_error when
+ * the owner gave none, since K34 invents no cause. A call's own failure keeps
+ * its cause and carries no mark.
  */
-function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup, stopping: OperationCause | undefined): OperationFailureError<SubscriptionProgress> {
-  const code: OperationCause =
-    failure.kind === "cancelled"
-      ? (stopping ?? "internal_error")
-      : REQUEST_CAUSES.includes(failure.code)
-        ? (failure.code as OperationCause)
-        : "internal_error";
+function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup, stopping?: OperationCause): OperationFailureError<SubscriptionProgress> {
+  if (failure.kind === "cancelled") {
+    return new OperationFailureError({ code: stopping ?? "internal_error", phase: phaseOf(failure), progress: { cleanup }, cancelled: true });
+  }
+  const code: OperationCause = failure.kind === "cause" && REQUEST_CAUSES.includes(failure.code) ? (failure.code as OperationCause) : "internal_error";
   return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup } });
 }
 
 /** A record or a binding failure the adapter cannot trust: nothing is known of its effect. */
 const untrusted = (phase: OperationPhase) => new OperationFailureError({ code: "internal_error", phase, progress: null });
 
-/** Validates a subscription call's unit record; throws its failure. */
-async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase, stopping: () => OperationCause | undefined): Promise<void> {
+/**
+ * Validates a subscription call's unit record; throws its failure, a
+ * cancellation's with the cause `stopping` gives when it fails.
+ */
+async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase, stopping: () => OperationCause | undefined = () => undefined): Promise<void> {
   let record: unknown;
   try {
     record = await call();
@@ -180,7 +183,10 @@ class AdapterSubscription implements TransportSubscription {
   }
 }
 
-/** The TransportOperation the adapter hands out, keeping its native owner. */
+/**
+ * The TransportOperation the adapter hands out, keeping its native owner and
+ * the first stopping cause its owner gave `cancel`.
+ */
 class AdapterOperation implements TransportOperation {
   readonly #finished: (operation: AdapterOperation) => void;
   #stopping: OperationCause | undefined;
@@ -190,15 +196,12 @@ class AdapterOperation implements TransportOperation {
   ) {
     this.#finished = finished;
   }
-  /** The cause `cancelFor` recorded; the first stays. */
+  /** The first cause given to `cancel`, if any. */
   get stopping(): OperationCause | undefined {
     return this.#stopping;
   }
-  cancel(): void {
-    this.native.cancel();
-  }
-  /** Cancels for `cause`, recorded before the native cancellation (K34). */
-  cancelFor(cause: OperationCause): void {
+  /** Records `cause` (the first one given stays) before the native cancellation (K34). */
+  cancel(cause?: OperationCause): void {
     this.#stopping ??= cause;
     this.native.cancel();
   }
@@ -238,7 +241,7 @@ export class AddonTransport implements Transport {
    * stopped.
    */
   cancelAll(cause: OperationCause): void {
-    for (const operation of [...this.#open]) operation.cancelFor(cause);
+    for (const operation of [...this.#open]) operation.cancel(cause);
   }
 
   /** Issued by the connection, so two adapters over one connection never share a ticket. */

@@ -13,12 +13,11 @@
 // Usage: node scripts/build-windows-installer.mjs --iscc <path to ISCC.exe>
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { filesUnder, platformOf, snapshotRelease } from "./build-bundle.mjs";
-import { cleanUp, isRecordedPath, outputTool, publishOutput, recordedProblems, requireNoOutput, sha256 } from "./release-build.mjs";
+import { bundleProblems, platformOf, snapshotRelease } from "./build-bundle.mjs";
+import { cleanUp, isRecordedPath, outputTool, publishOutput, requireNoOutput, scratchFolder, sha256 } from "./release-build.mjs";
 
 const MANIFEST = "release-manifest.json";
 
@@ -52,16 +51,10 @@ export function ownedFilesInclude(manifest, manifestDigest) {
   ].join("\r\n");
 }
 
-/** What keeps the bundle at `bundle` from being the one its manifest describes, by path. */
-export function bundleProblems(bundle, manifest) {
-  if (manifest?.product !== "urx-cli" || manifest?.format !== 1 || !Array.isArray(manifest.files)) return ["the bundle has no urx-cli format 1 manifest"];
-  const listed = new Set(manifest.files.map((file) => file.path));
-  const unlisted = filesUnder(bundle).filter((path) => path !== MANIFEST && !listed.has(path));
-  return [...recordedProblems(bundle, manifest.files), ...unlisted.map((path) => `${path} is not one of its files`)];
-}
+export { bundleProblems };
 
-/** The files a Windows bundle cannot be without: the launcher, the runtime, the addon and the CLI's entry. */
-const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js"];
+/** The files a Windows bundle cannot be without: the launcher, the runtime, the addon, the CLI's entry and the Rust crates' licenses. */
+const REQUIRED = ["bin/urx.exe", "runtime/node.exe", "native/urx-native.node", "app/main.js", "notices/rust-crates.txt"];
 
 /**
  * What keeps the bundle `manifest` describes from being a Windows x64 bundle
@@ -101,12 +94,13 @@ function main(argv) {
   const output = join(root, "dist-installer");
   // Checked before reading anything; the rename that publishes the setup program checks again.
   requireNoOutput(output, "installer build");
-  const tool = outputTool(root);
   let scratch;
   try {
     const inputs = JSON.parse(readFileSync(join(root, "build-inputs.json"), "utf8"));
     const innoVersion = innoVersionNumber(inputs.innoSetup?.version);
-    scratch = mkdtempSync(join(tmpdir(), "urx-installer-"));
+    scratch = scratchFolder("urx-installer-");
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     // The installer is compiled from this copy, the one checked, whatever happens to dist-bundle/ meanwhile.
     const snapshot = join(scratch, "bundle");
     snapshotRelease(bundle, snapshot);

@@ -4,9 +4,9 @@
 // other files 0644; a copy under a directory that declares CommonJS runs the
 // CLI with the bundled Node, holds exactly the modules the release's commits
 // compile to and loads each of them, opens the addon from the bundle's
-// `native` and loads the common package from the bundle's own `app`; and the launcher, run away from
+// `native` and loads the common package from the bundle's own `app`; the launcher, run away from
 // any bundle, starts nothing and exits 1 with one line, whatever is installed
-// on this machine.
+// on this machine; and on macOS the removal tool shows its help.
 //
 // Usage: node scripts/check-bundle.mjs [dist-bundle]
 
@@ -36,14 +36,17 @@ for (const file of manifest.files) {
   const bytes = readFileSync(join(bundle, ...file.path.split("/")));
   if (sha256(bytes) !== file.sha256 || bytes.length !== file.size) fail(`${file.path} does not match the manifest`);
 }
-for (const path of [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, "app/main.js", "native/urx-native.node"]) {
+const tools = platform.maintenance.map((tool) => `maintenance/${tool}`);
+for (const path of [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, "app/main.js", "native/urx-native.node", "notices/rust-crates.txt", ...tools]) {
   if (!listed.includes(path)) fail(`the bundle has no ${path}`);
 }
+if (listed.some((path) => path.startsWith("maintenance/") && !tools.includes(path))) fail("the bundle has a maintenance file it is not built with");
 if (listed.some((path) => path.startsWith("app/") && path.endsWith(".node"))) fail("the addon is inside app");
 
-// The modes it is distributed with: anyone can reach and run the launcher and the runtime, and only the owner can write.
+// The modes it is distributed with: anyone can reach and run the launcher, the runtime and the maintenance tools,
+// and only the owner can write.
 if (process.platform !== "win32") {
-  const executables = [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`];
+  const executables = [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, ...tools];
   const walk = (directory) => {
     const mode = (path) => statSync(path).mode & 0o7777;
     if (mode(directory) !== 0o755) fail(`${relative(bundle, directory) || "the bundle"} is not mode 0755`);
@@ -105,6 +108,11 @@ try {
   const launched = spawnSync(join(away, `urx${platform.exe}`), ["--version"], { cwd: scratch, encoding: "utf8" });
   if (launched.status !== 1 || launched.stdout !== "" || launched.stderr.split("\n").filter(Boolean).length !== 1) {
     fail(`the launcher away from any bundle exited ${launched.status} with ${JSON.stringify(launched.stdout)} and ${JSON.stringify(launched.stderr)}`);
+  }
+  // Each maintenance tool runs from the bundle; its help changes and reads nothing installed.
+  for (const tool of tools) {
+    const help = spawnSync(join(copy, ...tool.split("/")), ["--help"], { cwd: scratch, encoding: "utf8" });
+    if (help.status !== 0 || !help.stdout.startsWith("usage: ")) fail(`${tool} --help exited ${help.status} with ${JSON.stringify(help.stdout)}`);
   }
   process.stdout.write("the bundle is complete and runs on its own\n");
 } finally {
