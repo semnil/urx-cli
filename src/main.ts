@@ -7,13 +7,14 @@ import { fileURLToPath } from "node:url";
 import { BRIDGE_API_EXPECTED } from "./bridge.js";
 import { BUILD_INFO, type BuildInfo } from "./build-info.js";
 import { renderHelp } from "./cli/help.js";
-import { parse } from "./cli/parse.js";
+import { identifiedCommand, parse } from "./cli/parse.js";
+import { settingCommandOf } from "./cli/settings.js";
 import { renderVersion, type Runtime } from "./cli/version.js";
 import { Diagnostics } from "./diagnostics.js";
 import { ABANDONED, CommandInterruption, processInterrupts, type Interrupts } from "./interrupts.js";
 import type { AddonCheck } from "./native/addon.js";
 import { processOutput, stdoutFailureLine, writeWithDeadline, type OutputStream } from "./output.js";
-import { EXIT } from "./result.js";
+import { EXIT, jsonLine } from "./result.js";
 
 /** What a device command needs beyond the streams; tests supply their own. */
 export interface DeviceIo {
@@ -43,12 +44,26 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
       return emit(io, renderHelp(parsed.path, "one-shot"));
     case "version":
       return emit(io, renderVersion(io.build, BRIDGE_API_EXPECTED, io.runtime));
-    case "error":
+    case "error": {
+      // With --json, a refused line is a result too (O9): of its command where the line names
+      // one that takes --json, and of no command (null) where it names none. Help and version
+      // requests are not commands and keep their errors on standard error.
+      const command = identifiedCommand(args);
+      const requestsJson = args.includes("--json") && args[0] !== "--version" && args[0] !== "--help";
+      if (requestsJson && (command === undefined || command.arguments.some((argument) => argument.name === "json"))) {
+        const error = { code: "invalid_input" as const, message: parsed.message };
+        const failure = await writeWithDeadline(io.stdout, jsonLine({ type: "result", command: command?.path.join(" ") ?? null, data: null, error }));
+        if (failure === null) return EXIT.invalidInput;
+        await writeWithDeadline(io.stderr, stdoutFailureLine(failure));
+        return EXIT.failure;
+      }
       // An input error the user never sees is an output failure (exit 1), not exit 2.
       return (await writeWithDeadline(io.stderr, `urx: ${parsed.message}\n`)) === null ? EXIT.invalidInput : EXIT.failure;
+    }
     case "command": {
       const path = parsed.command.path.join(" ");
-      if (path === "device list") {
+      const setting = settingCommandOf(parsed.command.path);
+      if (path === "device list" || setting !== undefined) {
         const device = io.device ?? { interrupts: processInterrupts(), now: () => performance.now() };
         // From here until the result is written, Ctrl+C belongs to the command.
         const interruption = new CommandInterruption(device.interrupts);
@@ -57,11 +72,14 @@ export async function main(args: readonly string[], io: Io): Promise<number> {
             { stderr: io.stderr, verbose: parsed.arguments.has("verbose"), build: io.build, runtime: io.runtime, now: device.now, interruption },
             path,
           );
-          const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./native/addon.js")]));
+          const modules = await interruption.race(Promise.all([import("./device-list.js"), import("./setting.js"), import("./native/addon.js")]));
           if (modules === ABANDONED) return EXIT.interrupted;
-          const [{ runDeviceList }, { expectedIdentity, openAddon }] = modules;
+          const [{ runDeviceList }, { runSetting }, { expectedIdentity, openAddon }] = modules;
           const addon = device.addon ?? (() => openAddon(expectedIdentity(io.build)));
-          return await runDeviceList({ stdout: io.stdout, diagnostics, addon, interruption, listPort: device.listPort }, parsed.arguments.has("json"));
+          const json = parsed.arguments.has("json");
+          const shared = { stdout: io.stdout, diagnostics, addon, interruption, listPort: device.listPort };
+          if (setting === undefined) return await runDeviceList(shared, json);
+          return await runSetting(shared, { binding: setting.binding, verb: setting.verb, arguments: parsed.arguments }, json);
         } finally {
           interruption.dispose();
         }

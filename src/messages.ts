@@ -1,7 +1,7 @@
 // English explanations of failures, built only from the cause and the stage
 // (P5): no device ID, path, value or text from outside the CLI.
 
-import type { LifecycleFailure, LifecyclePhase } from "@urx/device-control/operations";
+import type { LaterCause, LifecycleFailure, LifecyclePhase, OperationFailure, OperationPhase } from "@urx/device-control/operations";
 import type { AddonProblem } from "./native/addon.js";
 import type { CauseCode, ResultError } from "./result.js";
 
@@ -56,6 +56,39 @@ export function lifecycleFailure(record: LifecycleFailure): ResultError {
   if (record.kind === "cancelled") return failure("interrupted");
   if (STAGED.has(record.code)) return failure(record.code);
   return { code: record.code, message: `${BASE[record.code]} ${DURING[record.phase]}.` };
+}
+
+const IN_REQUEST: Record<OperationPhase, string> = {
+  validation: "before the request was sent",
+  admission: "before the request was sent",
+  // A send that did not finish may have sent nothing; only its attempt is known.
+  send: "during the attempt to send the request",
+  response: "while its response was awaited",
+  // The result could not be handed back; whether a response arrived is not known.
+  delivery: "while its result was handed back",
+  // An operation's preparation may have made requests of its own already (the Console Lock
+  // guard's registration and lock read before a refused write); only its stage is named.
+  preparation: "while the operation was being prepared",
+};
+
+/** A shared operation's failure (K3), naming where its request stopped. */
+export function operationFailure(record: OperationFailure): ResultError {
+  if (STAGED.has(record.code) || record.code === "interrupted") return failure(record.code);
+  if (record.code === "invalid_input") return { code: "invalid_input", message: "The target or value is not valid for this device." };
+  if (record.code === "unsupported_operation") return { code: "unsupported_operation", message: "The setting or target is not supported on this device." };
+  return { code: record.code, message: `${BASE[record.code]} ${IN_REQUEST[record.phase]}.` };
+}
+
+/**
+ * A cause found after an operation's first stop (E3, `OperationFailure.later`),
+ * naming where it occurred: a request's phase as `operationFailure` names it,
+ * or, for a cleanup's failure whose record names no request, the lifecycle
+ * phase as `lifecycleFailure` does.
+ */
+export function laterFailure(later: LaterCause): ResultError {
+  if (later.phase in IN_REQUEST) return operationFailure({ code: later.code, phase: later.phase as OperationPhase, progress: null });
+  if (STAGED.has(later.code) || later.code === "interrupted") return failure(later.code);
+  return { code: later.code, message: `${BASE[later.code]} ${DURING[later.phase as LifecyclePhase]}.` };
 }
 
 /** A failed write of standard output, the stream that carries the result. */

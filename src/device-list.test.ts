@@ -193,7 +193,7 @@ describe("urx device list (D14)", () => {
     const result = await run(addon(listed([{ id: "<id-a>", model: "URX44", firmware: null }])), true, { verbose: true });
     expect(result.exit).toBe(0);
     const lines = result.stderr.trimEnd().split("\n");
-    expect(lines[0]).toBe(`urx: verbose: urx 0.1.0 (${"a".repeat(40)}), common 0.1.0 (${"b".repeat(40)}), bridge-api-expected 4, runtime 26.13.0 macos arm64`);
+    expect(lines[0]).toBe(`urx: verbose: urx 0.1.0 (${"a".repeat(40)}), common 0.1.0 (${"b".repeat(40)}), bridge-api-expected 5, runtime 26.13.0 macos arm64`);
     expect(lines.slice(1)).toEqual([
       "urx: verbose: device list: discovery started at 5 ms",
       "urx: verbose: device list: discovery finished at 10 ms",

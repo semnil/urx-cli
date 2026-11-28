@@ -33,7 +33,7 @@ describe("one-shot invocation", () => {
   it("print the version on stdout and exit 0", async () => {
     const run = io();
     expect(await main(["--version"], run.value)).toBe(0);
-    expect(run.stdout()).toBe("urx 0.1.0 (unknown)\ncommon 0.1.0 (unknown)\nbridge-api-expected 4\nruntime 26.13.0 macos arm64\n");
+    expect(run.stdout()).toBe("urx 0.1.0 (unknown)\ncommon 0.1.0 (unknown)\nbridge-api-expected 5\nruntime 26.13.0 macos arm64\n");
   });
 
   it("report an input error on stderr only and exit 2", async () => {
@@ -43,6 +43,25 @@ describe("one-shot invocation", () => {
       expect(run.stdout()).toBe("");
       expect(run.stderr()).toMatch(/^urx: .+\n$/);
     }
+  });
+
+  it("report an input error as a JSON result when --json is given, naming the command where the line names one", async () => {
+    const run = io();
+    expect(await main(["channel", "fader", "get", "--json"], run.value)).toBe(2);
+    expect(JSON.parse(run.stdout())).toEqual({
+      type: "result",
+      command: "channel fader get",
+      data: null,
+      error: { code: "invalid_input", message: "`urx channel fader get` needs --channel. See `urx channel fader get --help`." },
+    });
+    expect(run.stderr()).toBe("");
+    const unknown = io();
+    expect(await main(["channel", "mute", "get", "--json"], unknown.value)).toBe(2);
+    expect(JSON.parse(unknown.stdout())).toMatchObject({ command: null, data: null, error: { code: "invalid_input" } });
+    // A command without --json keeps its error on standard error.
+    const plain = io();
+    expect(await main(["console", "--json"], plain.value)).toBe(2);
+    expect(plain.stdout()).toBe("");
   });
 
   it("exit 1 when the input error cannot be written to stderr", async () => {

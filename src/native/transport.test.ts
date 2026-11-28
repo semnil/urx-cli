@@ -39,6 +39,33 @@ function native(overrides: Partial<NativeRequests> = {}) {
 const address = { paramId: 140, x: "0", y: "-1" };
 
 describe("the addon transport", () => {
+  it("cancel every operation it created and has not finished, and none it finished", () => {
+    const made: { name: string; calls: string[] }[] = [];
+    const connection = native({
+      createOperation: () => {
+        const entry = { name: `operation-${made.length + 1}`, calls: [] as string[] };
+        made.push(entry);
+        return { cancel: () => entry.calls.push("cancel"), finish: () => entry.calls.push("finish") };
+      },
+    }).connection;
+    const transport = new AddonTransport(connection);
+    const first = transport.createOperation();
+    const second = transport.createOperation();
+    const third = transport.createOperation();
+    third.finish();
+    transport.cancelAll("interrupted");
+    expect(made.map((entry) => [entry.name, entry.calls])).toEqual([
+      ["operation-1", ["cancel"]],
+      ["operation-2", ["cancel"]],
+      ["operation-3", ["finish"]],
+    ]);
+    // A cancelled operation is still finished by its owner, and is then not cancelled again.
+    first.finish();
+    second.finish();
+    transport.cancelAll("interrupted");
+    expect(made.map((entry) => entry.calls.length)).toEqual([2, 2, 1]);
+  });
+
   it("forward each request with its native owner, ticket and address, and return the native record as it came", async () => {
     const { connection, calls } = native();
     const transport = new AddonTransport(connection);
@@ -197,6 +224,34 @@ describe("subscriptions through the addon transport", () => {
     transport.prepareSubscription([address], transport.createOperation(), () => {});
     expect(() => transport.prepareSubscription([address], transport.createOperation(), () => {})).toThrow();
     expect(second.calls).toEqual([["release"]]);
+  });
+
+  it("report a subscription call cancelled by cancelAll with the cause it was cancelled for, and the first cause only", async () => {
+    const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
+    const sub = subscription("token-1", cancelled).native;
+    const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: sub }) }).connection);
+    const operation = transport.createOperation();
+    const handle = transport.prepareSubscription([address], operation, () => {});
+    transport.cancelAll("interrupted");
+    transport.cancelAll("internal_error");
+    expect(await failureOf(handle.activate())).toEqual({ code: "interrupted", phase: "send", progress: { cleanup: complete }, cancelled: true });
+    // An admission refused as cancelled after cancelAll reports that cause too.
+    const refusing = new AddonTransport(native({ prepareSubscription: () => ({ kind: "failure", failure: { kind: "cancelled", phase: "admission" }, cleanup: complete }) }).connection);
+    const owner = refusing.createOperation();
+    refusing.cancelAll("interrupted");
+    let thrown: unknown;
+    try {
+      refusing.prepareSubscription([address], owner, () => {});
+    } catch (error) {
+      thrown = error;
+    }
+    expect(operationFailureOf(thrown)).toEqual({ code: "interrupted", phase: "admission", progress: { cleanup: complete }, cancelled: true });
+    // A cancellation given no cause stays internal_error: the adapter knows no other cause.
+    const other = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: subscription("token-2", cancelled).native }) }).connection);
+    const own = other.createOperation();
+    const unasked = other.prepareSubscription([address], own, () => {});
+    own.cancel();
+    expect(await failureOf(unasked.activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete }, cancelled: true });
   });
 
   it("reject a failed activation or release with its cause, and an untrusted record as internal_error", async () => {

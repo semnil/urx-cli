@@ -14,6 +14,8 @@ export interface PeerUnit {
   readonly status?: string;
   /** The System firmware version, or null for a `firm_list` without one. */
   readonly firmware?: string | null;
+  /** The whole `/vd/device` `firm_list` to answer with, in place of the one `firmware` makes. */
+  readonly firmList?: unknown;
   /** The identity reported after the first `/vd/synchronize` (the discovery's). */
   readonly laterId?: string;
   /** Parameter values by `paramId:x:y`; a write replaces the value it accepts. */
@@ -29,6 +31,13 @@ export interface PeerUnit {
   readonly registrationResponses?: Readonly<Record<string, number>>;
   /** Hold every registration and unregistration reply until `Peer.answerHeld`. */
   readonly holdRegistrations?: boolean;
+  /**
+   * Response codes for parameter GETs by path, such as `/vd/parameters/895:0:0`,
+   * answered in place of the value.
+   */
+  readonly readResponses?: Readonly<Record<string, number>>;
+  /** Parameter GET paths whose replies are held until `Peer.answerHeld`. */
+  readonly holdReads?: readonly string[];
 }
 
 export interface PeerOptions {
@@ -55,7 +64,7 @@ export interface Peer {
    * with `current_value` when `value` is given.
    */
   notify(id: string, uri: string, value?: number | string): void;
-  /** Sends the registration and unregistration replies held so far, in order. */
+  /** Sends the registration, unregistration and parameter read replies held so far, in order. */
   answerHeld(): void;
   close(): Promise<void>;
 }
@@ -174,8 +183,13 @@ function unitServer(unit: PeerUnit, requests: string[], held: (() => void)[], ..
       }
       if (path.startsWith(METERS)) return;
       const key = path.slice(PARAMETERS.length);
-      if (vdp.method === "get" && parameters.has(key)) {
-        socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { current_value: parameters.get(key) } } }));
+      if (vdp.method === "get") {
+        const code = unit.readResponses?.[path];
+        if (code === undefined && !parameters.has(key)) return;
+        const data = code === undefined ? { current_value: parameters.get(key) } : { response_code: code };
+        const answer = () => socket.write(line({ vdp: { method: "get", uri: vdp.uri, data } }));
+        if (unit.holdReads?.includes(path) === true) held.push(answer);
+        else answer();
       } else if (vdp.method === "post") {
         const code = unit.writeResponse ?? 200;
         if (code === 200) parameters.set(key, vdp.data?.current_value as number | string);
@@ -189,7 +203,12 @@ function unitServer(unit: PeerUnit, requests: string[], held: (() => void)[], ..
       const id = synchronizations > 1 && unit.laterId !== undefined ? unit.laterId : unit.id;
       socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { sync_status: unit.status ?? "online", usb_id: id } } }));
     } else if (vdp.uri === "/vd/device") {
-      const firmList = unit.firmware === null ? [{ firm_name: "Boot", firm_version: "1.0" }] : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
+      const firmList =
+        unit.firmList !== undefined
+          ? unit.firmList
+          : unit.firmware === null
+            ? [{ firm_name: "Boot", firm_version: "1.0" }]
+            : [{ firm_name: "System", firm_version: unit.firmware ?? "1.5.0.1" }];
       socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { firm_list: firmList } } }));
     }
   }, ...trackers);

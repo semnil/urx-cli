@@ -115,6 +115,34 @@ describe("the connection lifecycle through the addon", () => {
     expect(peer.requests.slice(beforeClose)).toEqual([]);
   });
 
+  it("refuse a connection whose firm_list the version cannot be read from, closing it (D15-B, R1-F-A)", async () => {
+    const { addon, device } = await modules();
+    // An empty or missing System version, an entry without a name, no list, and System versions that disagree.
+    const unreadable: unknown[] = [
+      [{ firm_name: "System", firm_version: "" }],
+      [{ firm_name: "System" }],
+      [{ firm_name: "", firm_version: "1.0" }],
+      "not a list",
+      [
+        { firm_name: "System", firm_version: "1.5.0.1" },
+        { firm_name: "System", firm_version: "1.5.0.2" },
+      ],
+    ];
+    for (const firmList of unreadable) {
+      peer = await startPeer(units({ id: "<id-a>", model: "URX44", firmList }));
+      const control = new addon.Control();
+      expect((await device.discoverDevices(addon, control, false, peer.listPort)).kind).toBe("success");
+      expect(await device.openDevice(addon, control, "<id-a>"), JSON.stringify(firmList)).toEqual({
+        kind: "failure",
+        failure: { kind: "cause", code: "invalid_response", phase: "connect", request: null },
+        // The connection that was opened is closed again before the refusal.
+        cleanup: { state: "connection_closed", failure: null },
+      });
+      await peer.close();
+      peer = undefined;
+    }
+  });
+
   it("refuse a unit its control did not discover, without connecting", async () => {
     const { addon, device } = await modules();
     peer = await startPeer(units({ id: "<id-a>", model: "URX44" }));

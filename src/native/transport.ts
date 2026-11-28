@@ -178,7 +178,8 @@ class AdapterSubscription implements TransportSubscription {
   release(): Promise<void> {
     this.#released ??= (() => {
       this.#route.stop();
-      return settleUnit(() => this.#native.release(), "send");
+      // Releasing is not the operation's, so no cancellation of it is expected.
+      return settleUnit(() => this.#native.release(), "send", () => undefined);
     })();
     return this.#released;
   }
@@ -189,18 +190,25 @@ class AdapterSubscription implements TransportSubscription {
  * the first stopping cause its owner gave `cancel`.
  */
 class AdapterOperation implements TransportOperation {
+  readonly #finished: (operation: AdapterOperation) => void;
   #stopping: OperationCause | undefined;
-  constructor(readonly native: NativeOperation) {}
+  constructor(
+    readonly native: NativeOperation,
+    finished: (operation: AdapterOperation) => void,
+  ) {
+    this.#finished = finished;
+  }
   /** The first cause given to `cancel`, if any. */
   get stopping(): OperationCause | undefined {
     return this.#stopping;
   }
-  /** Records `cause` (the first one given stays) before the native cancellation. */
+  /** Records `cause` (the first one given stays) before the native cancellation (K34). */
   cancel(cause?: OperationCause): void {
     this.#stopping ??= cause;
     this.native.cancel();
   }
   finish(): void {
+    this.#finished(this);
     this.native.finish();
   }
 }
@@ -210,6 +218,8 @@ export class AddonTransport implements Transport {
   readonly #notifications: NotificationRouter;
   /** The operations this transport created; no other is forwarded to its connection. */
   readonly #operations = new WeakSet<AdapterOperation>();
+  /** The operations this transport created that are not finished yet. */
+  readonly #open = new Set<AdapterOperation>();
 
   /** `notifications` is the router `connection` was opened with. */
   constructor(connection: NativeRequests, notifications: NotificationRouter) {
@@ -218,9 +228,22 @@ export class AddonTransport implements Transport {
   }
 
   createOperation(): TransportOperation {
-    const operation = new AdapterOperation(this.#connection.createOperation());
+    const operation = new AdapterOperation(this.#connection.createOperation(), (finished) => this.#open.delete(finished));
     this.#operations.add(operation);
+    this.#open.add(operation);
     return operation;
+  }
+
+  /**
+   * Cancels every operation this transport created and has not finished,
+   * those that operations of its own create (a write guard's) included, for
+   * `cause`: a request still waiting is completed unsent, one already sent
+   * settles as it would, and a subscription call cancelled this way reports
+   * `cause`. Releasing what was registered is not an operation's and is not
+   * stopped.
+   */
+  cancelAll(cause: OperationCause): void {
+    for (const operation of [...this.#open]) operation.cancel(cause);
   }
 
   /** Issued by the connection, so two adapters over one connection never share a ticket. */

@@ -19,7 +19,7 @@ export interface NativeControl {
 
 /** The addon's connection object (K31): its lifecycle, requests and subscriptions. */
 export interface NativeConnection extends NativeRequests, NativeNotifications {
-  /** The System firmware the opening read; null when the unit reports none or its version cannot be read, which no command tells apart yet. */
+  /** The System firmware the opening read; null when the unit reports none. An unreadable version refuses the opening with invalid_response (D15-B, R1-F-A). */
   readonly firmware: string | null;
   close(): Promise<unknown>;
 }
