@@ -24,7 +24,7 @@ import { CommandRun } from "./command-run.js";
 import { connect, disconnect, type VerifiedDevice } from "./connect.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { ABANDONED, type CommandInterruption } from "./interrupts.js";
-import { addonFailure, failure, operationFailure } from "./messages.js";
+import { addonFailure, failure, laterFailure, operationFailure } from "./messages.js";
 import type { AddonCheck } from "./native/addon.js";
 import { AddonTransport } from "./native/transport.js";
 import type { OutputStream } from "./output.js";
@@ -123,7 +123,7 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
           // A cause found after the first stop, such as a sent lock read's own failure after a
           // Ctrl+C, is reported beside it once (E3), even with the stop's own code.
           const later = operation.later;
-          if (later !== undefined && !asked(later.code)) run.stop(operationFailure({ code: later.code, phase: later.phase, progress: null }));
+          if (later !== undefined && !asked(later.code)) run.stop(laterFailure(later));
           // A guard that could not release its own resources after failing reports that cause too.
           if (typeof evidence?.cleanup === "string") run.stop(failure(evidence.cleanup as CauseCode));
         };

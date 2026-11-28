@@ -62,7 +62,7 @@ describe("native lifecycle records", () => {
   });
 
   it("turn an invalid record or a rejected Promise into internal_error, never success", async () => {
-    const internal = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "discovery" }, cleanup: complete };
+    const internal = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "discovery", request: null }, cleanup: complete };
     for (const record of [null, {}, { kind: "success" }, { kind: "success", value: [{ id: "", model: "URX44" }] }, { kind: "success", value: [{ id: "x", model: "URX44", extra: 1 }] }]) {
       expect(await discoverDevices(fake(() => Promise.resolve(record)), control, false), JSON.stringify(record)).toEqual(internal);
     }
@@ -88,7 +88,7 @@ describe("native lifecycle records", () => {
     // The router receives what the addon calls the handler with.
     expect(Object.keys(handed[0] ?? {})).toEqual(["notifications"]);
     expect(handed[0]?.notifications).toBe(opened.value.notifications.receive);
-    const unconfirmed = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "connect" }, cleanup: { state: "incomplete", failure: null } };
+    const unconfirmed = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "connect", request: null }, cleanup: { state: "incomplete", failure: null } };
     for (const value of [{ firmware: "x", close: () => Promise.resolve(null) }, null, "connection"]) {
       expect(await openDevice(fake(() => Promise.resolve(null), () => Promise.resolve({ kind: "success", value })), control, "<id-a>")).toEqual(unconfirmed);
     }
@@ -96,15 +96,15 @@ describe("native lifecycle records", () => {
   });
 
   it("pass a declared open failure through as it is", async () => {
-    const failure = { kind: "failure", failure: { kind: "cause", code: "connect_timeout", phase: "identity" }, cleanup: complete };
+    const failure = { kind: "failure", failure: { kind: "cause", code: "connect_timeout", phase: "identity", request: null }, cleanup: complete };
     expect(await openDevice(fake(() => Promise.resolve(null), () => Promise.resolve(failure)), control, "<id-a>")).toEqual(failure);
   });
 
   it("validate a close record, and report an unconfirmed close as incomplete", async () => {
     expect(await closeConnection(new FakeConnection(() => Promise.resolve({ kind: "success", value: null })))).toEqual({ kind: "success", value: null });
-    const teardown = { kind: "failure", failure: { kind: "cause", code: "teardown_timeout", phase: "teardown" }, cleanup: { state: "incomplete", failure: null } };
+    const teardown = { kind: "failure", failure: { kind: "cause", code: "teardown_timeout", phase: "teardown", request: null }, cleanup: { state: "incomplete", failure: null } };
     expect(await closeConnection(new FakeConnection(() => Promise.resolve(teardown)))).toEqual(teardown);
-    const unconfirmed = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "teardown" }, cleanup: { state: "incomplete", failure: null } };
+    const unconfirmed = { kind: "failure", failure: { kind: "cause", code: "internal_error", phase: "teardown", request: null }, cleanup: { state: "incomplete", failure: null } };
     expect(await closeConnection(new FakeConnection(() => Promise.resolve({ kind: "success", value: 1 })))).toEqual(unconfirmed);
     expect(await closeConnection(new FakeConnection(() => Promise.reject(new Error("binding"))))).toEqual(unconfirmed);
   });

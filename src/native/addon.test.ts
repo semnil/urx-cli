@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { addonUrl, checkIdentity, expectedIdentity, loadAddon, openAddon, type ExpectedIdentity } from "./addon.js";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
-const expected: ExpectedIdentity = { bridgeRevision: 4, commonVersion: "0.1.0", commonCommit: commit };
-const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 4, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
+const expected: ExpectedIdentity = { bridgeRevision: 5, commonVersion: "0.1.0", commonCommit: commit };
+const reported = (overrides: Record<string, unknown> = {}) => ({ bridgeRevision: 5, commonVersion: "0.1.0", commonCommit: commit, ...overrides });
 const url = new URL("file:///nowhere/urx-native.node");
 /** An addon module with every export the loader requires. */
 /** A connection class with every method the loader requires. */
@@ -80,9 +80,13 @@ describe("addon loading", () => {
     expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 1 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
     // As the revision-2 addon: its connections have no subscription methods.
     expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 2 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
-    // As the revision-3 addon: it has every export and method, but opens a connection whose firmware cannot be read.
+    // As the revision-3 addon: it opens a connection whose firmware cannot be read, and its lifecycle
+    // cause records carry no request phase.
     expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 3 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
-    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 5 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    // As either revision-4 addon, each without the other's change: the firmware refusal, or the
+    // request phase in lifecycle cause records.
+    expect(openAddon(expected, url, () => addonWith(() => reported({ bridgeRevision: 4 })))).toEqual({ ok: false, problem: "bridge_mismatch" });
+    expect(openAddon(expected, url, () => ({ buildIdentity: () => reported({ bridgeRevision: 6 }) }))).toEqual({ ok: false, problem: "bridge_mismatch" });
   });
 
   it("refuse an addon of this revision that lacks an export or a connection method as malformed", () => {

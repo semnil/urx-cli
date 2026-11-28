@@ -49,11 +49,11 @@ describe("display escaping", () => {
 
 describe("lifecycle failures (E2)", () => {
   it("keep the cause and name the stage, and report a cancellation as interrupted", () => {
-    expect(lifecycleFailure({ kind: "cause", code: "discovery_timeout", phase: "discovery" })).toEqual({
+    expect(lifecycleFailure({ kind: "cause", code: "discovery_timeout", phase: "discovery", request: null })).toEqual({
       code: "discovery_timeout",
       message: "Discovery did not finish within 10 seconds.",
     });
-    expect(lifecycleFailure({ kind: "cause", code: "invalid_response", phase: "discovery" })).toEqual({
+    expect(lifecycleFailure({ kind: "cause", code: "invalid_response", phase: "discovery", request: null })).toEqual({
       code: "invalid_response",
       message: "A response could not be read during discovery.",
     });

@@ -123,7 +123,7 @@ describe("urx device list (D14)", () => {
       ["internal_error", "discovery", 1],
     ];
     for (const [code, phase, exit] of cases) {
-      const record = { kind: "failure", failure: { kind: "cause", code, phase }, cleanup: complete };
+      const record = { kind: "failure", failure: { kind: "cause", code, phase, request: null }, cleanup: complete };
       const human = await run(addon(() => Promise.resolve(record)), false);
       expect(human.exit, code).toBe(exit);
       expect(human.stdout).toBe("");
@@ -193,7 +193,7 @@ describe("urx device list (D14)", () => {
     const result = await run(addon(listed([{ id: "<id-a>", model: "URX44", firmware: null }])), true, { verbose: true });
     expect(result.exit).toBe(0);
     const lines = result.stderr.trimEnd().split("\n");
-    expect(lines[0]).toBe(`urx: verbose: urx 0.1.0 (${"a".repeat(40)}), common 0.1.0 (${"b".repeat(40)}), bridge-api-expected 4, runtime 26.13.0 macos arm64`);
+    expect(lines[0]).toBe(`urx: verbose: urx 0.1.0 (${"a".repeat(40)}), common 0.1.0 (${"b".repeat(40)}), bridge-api-expected 5, runtime 26.13.0 macos arm64`);
     expect(lines.slice(1)).toEqual([
       "urx: verbose: device list: discovery started at 5 ms",
       "urx: verbose: device list: discovery finished at 10 ms",
@@ -205,7 +205,7 @@ describe("urx device list (D14)", () => {
 });
 
 describe("urx device list when output fails or Ctrl+C overlaps (U5, I1, E3)", () => {
-  const record = (code: string) => ({ kind: "failure", failure: { kind: "cause", code, phase: "discovery" }, cleanup: complete });
+  const record = (code: string) => ({ kind: "failure", failure: { kind: "cause", code, phase: "discovery", request: null }, cleanup: complete });
   const counting = () => {
     let calls = 0;
     return { check: addon(() => (calls++, Promise.resolve({ kind: "success", value: [] }))), calls: () => calls };
@@ -293,7 +293,7 @@ describe("urx device list when output fails or Ctrl+C overlaps (U5, I1, E3)", ()
 });
 
 describe("urx device list after its result is decided (I3, E3)", () => {
-  const record = (code: string) => ({ kind: "failure", failure: { kind: "cause", code, phase: "discovery" }, cleanup: complete });
+  const record = (code: string) => ({ kind: "failure", failure: { kind: "cause", code, phase: "discovery", request: null }, cleanup: complete });
   /** A stream whose writes never complete, and whose first write calls `onWrite`. */
   const stuck = (onWrite: () => void = () => {}) => {
     let called = false;

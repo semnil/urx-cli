@@ -298,6 +298,7 @@ impl Subscription {
                     failure: Failure::Cause {
                         code: Cause::NotConnected,
                         phase: Phase::Subscription,
+                        request: None,
                     },
                     cleanup: Cleanup::COMPLETE,
                 }));
@@ -353,6 +354,7 @@ impl Connection {
             failure: Failure::Cause {
                 code,
                 phase: Phase::Admission,
+                request: None,
             }
             .into(),
             cleanup: CleanupRecord::complete(),

@@ -17,7 +17,7 @@ pub mod subscriptions;
 /// whenever an export, a method or a record shape changes, or what the
 /// JavaScript relies on the addon to do, such as an opening that refuses a
 /// connection whose firmware cannot be read.
-pub const BRIDGE_REVISION: u32 = 4;
+pub const BRIDGE_REVISION: u32 = 5;
 
 /// What the addon was built from, compared with the JavaScript's embedded
 /// expectations before any device access.

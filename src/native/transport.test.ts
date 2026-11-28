@@ -185,7 +185,7 @@ describe("subscriptions through the addon transport", () => {
   });
 
   it("throw an admission refusal with its cause and cleanup", () => {
-    const refusal = { kind: "failure", failure: { kind: "cause", code: "precondition_failed", phase: "admission" }, cleanup: complete };
+    const refusal = { kind: "failure", failure: { kind: "cause", code: "precondition_failed", phase: "admission", request: null }, cleanup: complete };
     const transport = new AddonTransport(native({ prepareSubscription: () => refusal }).connection);
     let thrown: unknown;
     try {
@@ -255,10 +255,10 @@ describe("subscriptions through the addon transport", () => {
   });
 
   it("reject a failed activation or release with its cause, and an untrusted record as internal_error", async () => {
-    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription" }, cleanup: complete };
+    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription", request: null }, cleanup: complete };
     const lost = {
       kind: "failure",
-      failure: { kind: "cause", code: "connection_lost", phase: "subscription" },
+      failure: { kind: "cause", code: "connection_lost", phase: "subscription", request: null },
       cleanup: { state: "connection_closed", failure: null },
     };
     const make = (activation: unknown, release: unknown = success) => {
@@ -282,9 +282,33 @@ describe("subscriptions through the addon transport", () => {
     }
   });
 
+  it("place a registration's own failure at the phase of its request where the record names one", async () => {
+    const make = (activation: unknown) => {
+      const sub = subscription("token-1", activation).native;
+      const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: sub }) }).connection);
+      return transport.prepareSubscription([address], transport.createOperation(), () => {});
+    };
+    const failed = (code: string, request: string | null, cleanup: unknown = complete) => ({
+      kind: "failure",
+      failure: { kind: "cause", code, phase: "subscription", request },
+      cleanup,
+    });
+    // A lost link while the reply was awaited is at the response, not at the send its cause would suggest.
+    expect(await failureOf(make(failed("connection_lost", "response", { state: "connection_closed", failure: null })).activate())).toMatchObject({
+      code: "connection_lost",
+      phase: "response",
+    });
+    expect(await failureOf(make(failed("response_timeout", "delivery")).activate())).toMatchObject({ code: "response_timeout", phase: "delivery" });
+    // Without a request phase, the cause places it.
+    expect(await failureOf(make(failed("connection_lost", null, { state: "connection_closed", failure: null })).activate())).toMatchObject({ phase: "send" });
+    // A request phase outside a subscription call is not a record the adapter trusts.
+    const admission = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "admission", request: "response" }, cleanup: complete };
+    expect(await failureOf(make(admission).activate())).toEqual({ code: "internal_error", phase: "send", progress: null });
+  });
+
   it("report a cancelled activation or admission with the first cause its operation's owner gave cancel", async () => {
     const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
-    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription" }, cleanup: complete };
+    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription", request: null }, cleanup: complete };
     const activated = (activation: unknown, causes: readonly (OperationCause | undefined)[]) => {
       const sub = subscription("token-1", activation).native;
       const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: sub }) }).connection);

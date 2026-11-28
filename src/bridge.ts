@@ -4,4 +4,4 @@
 // a method or a record shape of the addon changes, or what the JavaScript
 // relies on the addon to do, such as an opening that refuses a connection
 // whose firmware cannot be read.
-export const BRIDGE_API_EXPECTED = 4;
+export const BRIDGE_API_EXPECTED = 5;
