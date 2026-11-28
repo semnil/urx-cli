@@ -118,7 +118,12 @@ export async function runSetting(io: SettingIo, request: SettingRequest, json: b
           const evidence = operation.progress as (WriteProgress<unknown> & { cleanup?: unknown }) | null;
           if (verb === "set" && progress === null && evidence !== null && typeof evidence === "object" && "outcome" in evidence) progress = evidence;
           // The cancellation a Ctrl+C asked for is that Ctrl+C, already the stop.
-          if (!(operation.code === "interrupted" && run.interruption.interrupted)) run.stop(operationFailure(operation as OperationFailure));
+          const asked = (code: string) => code === "interrupted" && run.interruption.interrupted;
+          if (!asked(operation.code)) run.stop(operationFailure(operation as OperationFailure));
+          // A cause found after the first stop, such as a sent lock read's own failure after a
+          // Ctrl+C, is reported beside it once (E3), even with the stop's own code.
+          const later = operation.later;
+          if (later !== undefined && !asked(later.code)) run.stop(operationFailure({ code: later.code, phase: later.phase, progress: null }));
           // A guard that could not release its own resources after failing reports that cause too.
           if (typeof evidence?.cleanup === "string") run.stop(failure(evidence.cleanup as CauseCode));
         };

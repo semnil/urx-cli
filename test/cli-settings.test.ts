@@ -236,6 +236,22 @@ describe("set of a basic channel control", () => {
     expect(at.requests.filter((line) => line.endsWith("operation=value"))).toEqual([]);
   });
 
+  it.each([[[]], [["--dry-run"]]])("report a lock read that the unit refuses after a Ctrl+C beside that Ctrl+C, once (D25, E3) (%j)", async (extra: string[]) => {
+    const at = await unit({ parameters: { "895:0:0": 0 }, readResponses: { [LOCK]: 404 }, holdReads: [LOCK] });
+    const interrupt = interrupts();
+    const pending = urx(["channel", "on", "set", "--channel", "1", "--value", "on", ...extra, "--json"], at.listPort, { interrupts: interrupt });
+    await vi.waitFor(() => expect(at.requests).toContain(`<id-a> get ${LOCK}`));
+    interrupt.send();
+    // The sent lock read is answered, refused, after the Ctrl+C; later held replies are answered too.
+    const timer = setInterval(() => at.answerHeld(), 10);
+    const result = await pending;
+    clearInterval(timer);
+    expect(result.exit).toBe(130);
+    expect(JSON.parse(result.stdout)).toMatchObject({ data: { outcome: "not_sent" }, error: { code: "interrupted" } });
+    expect(result.stderr.split("\n").filter((line) => line.startsWith("urx: also:"))).toEqual(["urx: also: device_rejected: The device rejected the request while its response was awaited."]);
+    expect(at.requests.filter((line) => line.endsWith("operation=value"))).toEqual([]);
+  });
+
   it("report a device rejection as rejected with exit 4", async () => {
     const at = await unit({ writeResponse: 403 });
     const result = await urx(["channel", "on", "set", "--channel", "1", "--value", "on", "--json"], at.listPort);
