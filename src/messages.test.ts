@@ -14,5 +14,9 @@ describe("a shared operation's failure message", () => {
     expect(at("admission")).toBe("An internal error occurred before the request was sent.");
     expect(at("response")).toBe("An internal error occurred while its response was awaited.");
     expect(at("delivery")).toBe("An internal error occurred while its result was handed back.");
+    // A preparation may follow requests of its own, such as the Console Lock guard's.
+    expect(operationFailure({ code: "precondition_failed", phase: "preparation", progress: null }).message).toBe(
+      "A required condition was not met while the operation was being prepared.",
+    );
   });
 });

@@ -197,11 +197,16 @@ describe("set of a basic channel control", () => {
       const before = at.requests.length;
       const result = await urx(["channel", "on", "set", "--channel", "1", "--value", "on", ...dryRun, "--json"], at.listPort);
       expect(result.exit).toBe(1);
-      expect(JSON.parse(result.stdout)).toMatchObject({ data: { planned: true, outcome: "not_sent" }, error: { code: "precondition_failed" } });
+      // The guard's registration and lock read were sent; the message claims no less.
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        data: { planned: true, outcome: "not_sent" },
+        error: { code: "precondition_failed", message: "A required condition was not met while the operation was being prepared." },
+      });
       expect(at.requests.slice(before + CONNECT.length)).toEqual([`<id-a> post ${LOCK}?operation=regist`, `<id-a> get ${LOCK}`, `<id-a> post ${LOCK}?operation=unregist`]);
     }
     const human = await urx(["channel", "on", "set", "--channel", "1", "--value", "on"], at.listPort);
     expect(human.stdout).toBe("channel 1: on not sent\n");
+    expect(human.stderr).toContain("urx: precondition_failed: A required condition was not met while the operation was being prepared.");
   });
 
   it("start no request once standard error has failed", async () => {

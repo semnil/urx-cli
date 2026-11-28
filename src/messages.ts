@@ -66,7 +66,9 @@ const IN_REQUEST: Record<OperationPhase, string> = {
   response: "while its response was awaited",
   // The result could not be handed back; whether a response arrived is not known.
   delivery: "while its result was handed back",
-  preparation: "before any request",
+  // An operation's preparation may have made requests of its own already (the Console Lock
+  // guard's registration and lock read before a refused write); only its stage is named.
+  preparation: "while the operation was being prepared",
 };
 
 /** A shared operation's failure (K3), naming where its request stopped. */
