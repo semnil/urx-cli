@@ -84,6 +84,49 @@ describe("the controlled peer", () => {
     }
   });
 
+  it("answer a parameter read with its configured code in place of the value, and hold it on request", async () => {
+    const lock = "/vd/parameters/895:0:0";
+    const fader = "/vd/parameters/139:0:0";
+    const peer = await startPeer([{ id: "<id-a>", model: "URX44", parameters: { "895:0:0": 0, "139:0:0": -600 }, readResponses: { [lock]: 404 }, holdReads: [lock] }]);
+    const opened: Socket[] = [];
+    try {
+      const connected = (port: number) =>
+        new Promise<Socket>((resolve) => {
+          const socket = connect(port, "127.0.0.1", () => resolve(socket));
+          opened.push(socket);
+        });
+      const received: unknown[] = [];
+      const collect = (socket: Socket) => {
+        let buffer = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk: string) => {
+          buffer += chunk;
+          for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+            received.push(JSON.parse(buffer.slice(0, end)));
+            buffer = buffer.slice(end + 1);
+          }
+        });
+      };
+      const list = await connected(peer.listPort);
+      collect(list);
+      list.write('{"vddp":{"method":"get","uri":"/vddp_srv/devices"}}\n');
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      const port = (received[0] as { vddp: { data: { list: { vdpport: number }[] } } }).vddp.data.list[0]?.vdpport as number;
+      received.length = 0;
+      const unit = await connected(port);
+      collect(unit);
+      unit.write(`{"vdp":{"method":"get","uri":"${lock}"}}\n{"vdp":{"method":"get","uri":"${fader}"}}\n`);
+      // The read it holds waits; another is answered with its value.
+      await vi.waitFor(() => expect(received).toEqual([{ vdp: { method: "get", uri: fader, data: { current_value: -600 } } }]));
+      peer.answerHeld();
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(received[1]).toEqual({ vdp: { method: "get", uri: lock, data: { response_code: 404 } } });
+    } finally {
+      for (const socket of opened) socket.destroy();
+      await peer.close();
+    }
+  });
+
   it("reject with the original error and close what it opened when a port cannot listen", async () => {
     for (const failListenAt of [0, 1, 2]) {
       const listened: number[] = [];

@@ -31,6 +31,13 @@ export interface PeerUnit {
   readonly registrationResponses?: Readonly<Record<string, number>>;
   /** Hold every registration and unregistration reply until `Peer.answerHeld`. */
   readonly holdRegistrations?: boolean;
+  /**
+   * Response codes for parameter GETs by path, such as `/vd/parameters/895:0:0`,
+   * answered in place of the value.
+   */
+  readonly readResponses?: Readonly<Record<string, number>>;
+  /** Parameter GET paths whose replies are held until `Peer.answerHeld`. */
+  readonly holdReads?: readonly string[];
 }
 
 export interface PeerOptions {
@@ -57,7 +64,7 @@ export interface Peer {
    * with `current_value` when `value` is given.
    */
   notify(id: string, uri: string, value?: number | string): void;
-  /** Sends the registration and unregistration replies held so far, in order. */
+  /** Sends the registration, unregistration and parameter read replies held so far, in order. */
   answerHeld(): void;
   close(): Promise<void>;
 }
@@ -176,8 +183,13 @@ function unitServer(unit: PeerUnit, requests: string[], held: (() => void)[], ..
       }
       if (path.startsWith(METERS)) return;
       const key = path.slice(PARAMETERS.length);
-      if (vdp.method === "get" && parameters.has(key)) {
-        socket.write(line({ vdp: { method: "get", uri: vdp.uri, data: { current_value: parameters.get(key) } } }));
+      if (vdp.method === "get") {
+        const code = unit.readResponses?.[path];
+        if (code === undefined && !parameters.has(key)) return;
+        const data = code === undefined ? { current_value: parameters.get(key) } : { response_code: code };
+        const answer = () => socket.write(line({ vdp: { method: "get", uri: vdp.uri, data } }));
+        if (unit.holdReads?.includes(path) === true) held.push(answer);
+        else answer();
       } else if (vdp.method === "post") {
         const code = unit.writeResponse ?? 200;
         if (code === 200) parameters.set(key, vdp.data?.current_value as number | string);
