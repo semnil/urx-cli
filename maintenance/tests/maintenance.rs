@@ -1832,12 +1832,47 @@ fn an_entry_whose_mark_cannot_be_read_stops_both_tools_with_its_record() {
     }
 }
 
-fn run(command: &str, args: &[&Path]) {
-    let status = std::process::Command::new(command)
-        .args(args)
+/// Copies `from` to `to` as `cp` (`cp -R` for a folder) does on macOS: the
+/// data and the extended attributes, the mark among them. It copies in this
+/// process and starts no child: with `cp` started from this test binary,
+/// another test that had just let go of its own gate was now and then
+/// refused its next hold as busy.
+#[cfg(target_os = "macos")]
+fn copy_like_cp(from: &Path, to: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let path = |at: &Path| std::ffi::CString::new(at.as_os_str().as_bytes()).unwrap();
+    let (source, target) = (path(from), path(to));
+    let recursive = if from.is_dir() {
+        libc::COPYFILE_RECURSIVE
+    } else {
+        0
+    };
+    // SAFETY: both paths are NUL-terminated and live through the call; no state is passed.
+    let copied = unsafe {
+        libc::copyfile(
+            source.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_DATA | libc::COPYFILE_XATTR | recursive,
+        )
+    };
+    assert_eq!(
+        copied,
+        0,
+        "copyfile {from:?} {to:?}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_like_cp(from: &Path, to: &Path) {
+    let status = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(from)
+        .arg(to)
         .status()
         .unwrap();
-    assert!(status.success(), "{command} {args:?}");
+    assert!(status.success(), "cp -R {from:?} {to:?}");
 }
 
 #[test]
@@ -1853,14 +1888,8 @@ fn a_copy_that_took_the_mark_with_it_is_kept_and_the_original_goes_under_any_nam
         let work = work_folder(&scene, &expected);
         // Copies made in the work folder with their extended attributes, then changed; the
         // original renamed.
-        run(
-            "cp",
-            &[&work.join("app/main.js"), &work.join("app/main-copy.js")],
-        );
-        run(
-            "cp",
-            &[Path::new("-R"), &work.join("app"), &work.join("app-copy")],
-        );
+        copy_like_cp(&work.join("app/main.js"), &work.join("app/main-copy.js"));
+        copy_like_cp(&work.join("app"), &work.join("app-copy"));
         fs::write(work.join("app/main-copy.js"), "edited").unwrap();
         fs::write(work.join("app-copy/main.js"), "edited").unwrap();
         fs::rename(work.join("app/main.js"), work.join("app/renamed.js")).unwrap();
