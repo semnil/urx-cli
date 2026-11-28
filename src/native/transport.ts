@@ -106,21 +106,28 @@ function phaseOf(failure: LifecycleFailure): OperationPhase {
 
 /**
  * The structured failure of a subscription call's failure record. A
- * cancellation reports internal_error, marked `cancelled`: the adapter does
- * not know the owner's stopping cause, and K34 invents none.
+ * cancellation reports `stopping`, the first cause the owner gave its
+ * operation's `cancel`, marked `cancelled`, so the operation that owns the
+ * subscription can tell it from the call's own failure; internal_error when
+ * the owner gave none, since K34 invents no cause. A call's own failure keeps
+ * its cause and carries no mark.
  */
-function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup): OperationFailureError<SubscriptionProgress> {
+function subscriptionFailure(failure: LifecycleFailure, cleanup: Cleanup, stopping?: OperationCause): OperationFailureError<SubscriptionProgress> {
+  if (failure.kind === "cancelled") {
+    return new OperationFailureError({ code: stopping ?? "internal_error", phase: phaseOf(failure), progress: { cleanup }, cancelled: true });
+  }
   const code: OperationCause = failure.kind === "cause" && REQUEST_CAUSES.includes(failure.code) ? (failure.code as OperationCause) : "internal_error";
-  // A cancellation is marked as one (the transport contract of urx-device 0.3.0), so the
-  // operation that owns the subscription can tell it from the call's own failure.
-  return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup }, ...(failure.kind === "cancelled" ? { cancelled: true as const } : {}) });
+  return new OperationFailureError({ code, phase: phaseOf(failure), progress: { cleanup } });
 }
 
 /** A record or a binding failure the adapter cannot trust: nothing is known of its effect. */
 const untrusted = (phase: OperationPhase) => new OperationFailureError({ code: "internal_error", phase, progress: null });
 
-/** Validates a subscription call's unit record; throws its failure. */
-async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase): Promise<void> {
+/**
+ * Validates a subscription call's unit record; throws its failure, a
+ * cancellation's with the cause `stopping` gives when it fails.
+ */
+async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase, stopping: () => OperationCause | undefined = () => undefined): Promise<void> {
   let record: unknown;
   try {
     record = await call();
@@ -129,7 +136,7 @@ async function settleUnit(call: () => Promise<unknown>, phase: OperationPhase): 
   }
   const outcome = validateLifecycle(record, (value) => (value === null ? null : undefined));
   if (outcome === undefined) throw untrusted(phase);
-  if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup);
+  if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup, stopping());
 }
 
 const isNativeSubscription = (value: unknown): value is NativeSubscription => {
@@ -151,11 +158,11 @@ const isNativeSubscription = (value: unknown): value is NativeSubscription => {
  */
 class AdapterSubscription implements TransportSubscription {
   readonly #native: NativeSubscription;
-  readonly #operation: NativeOperation;
+  readonly #operation: AdapterOperation;
   readonly #route: Route;
   #released: Promise<void> | undefined;
 
-  constructor(native: NativeSubscription, operation: NativeOperation, route: Route) {
+  constructor(native: NativeSubscription, operation: AdapterOperation, route: Route) {
     this.#native = native;
     this.#operation = operation;
     this.#route = route;
@@ -163,7 +170,7 @@ class AdapterSubscription implements TransportSubscription {
 
   activate(): Promise<void> {
     this.#route.start();
-    return settleUnit(() => this.#native.activate(this.#operation), "send");
+    return settleUnit(() => this.#native.activate(this.#operation.native), "send", () => this.#operation.stopping);
   }
 
   release(): Promise<void> {
@@ -175,10 +182,20 @@ class AdapterSubscription implements TransportSubscription {
   }
 }
 
-/** The TransportOperation the adapter hands out, keeping its native owner. */
+/**
+ * The TransportOperation the adapter hands out, keeping its native owner and
+ * the first stopping cause its owner gave `cancel`.
+ */
 class AdapterOperation implements TransportOperation {
+  #stopping: OperationCause | undefined;
   constructor(readonly native: NativeOperation) {}
-  cancel(): void {
+  /** The first cause given to `cancel`, if any. */
+  get stopping(): OperationCause | undefined {
+    return this.#stopping;
+  }
+  /** Records `cause` (the first one given stays) before the native cancellation. */
+  cancel(cause?: OperationCause): void {
+    this.#stopping ??= cause;
     this.native.cancel();
   }
   finish(): void {
@@ -249,7 +266,7 @@ export class AddonTransport implements Transport {
     }
     const outcome = validateLifecycle(record, (value) => (isNativeSubscription(value) ? value : undefined));
     if (outcome === undefined) throw untrusted("admission");
-    if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup);
+    if (outcome.kind === "failure") throw subscriptionFailure(outcome.failure, outcome.cleanup, operation.stopping);
     const native = outcome.value;
     let route: Route;
     try {
@@ -263,7 +280,7 @@ export class AddonTransport implements Transport {
       }
       throw untrusted("admission");
     }
-    return new AdapterSubscription(native, operation.native, route);
+    return new AdapterSubscription(native, operation, route);
   }
 
   async adoptResult(requestTicket: string): Promise<void> {
