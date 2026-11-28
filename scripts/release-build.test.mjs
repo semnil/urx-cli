@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, sha256, writeReleaseFiles } from "./release-build.mjs";
+import { cargoArtifact, cargoEnvironment, cleanUp, exportRelease, isModuleFormat, isRecordedPath, launcherArtifact, maintenanceTools, outputTool, publishOutput, recordedProblems, releaseRecord, removeExport, requireNoOutput, scratchFolder, sha256, writeReleaseFiles } from "./release-build.mjs";
 import { COMMON_PATH } from "./release-source.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -293,6 +293,50 @@ describe("release output", () => {
 
 });
 
+describe("the cargo builds' environment", () => {
+  it("names one folder as both the target and the build directory, over the caller's settings of either", () => {
+    expect(cargoEnvironment({ PATH: "/bin", CARGO_TARGET_DIR: "/mine/target", CARGO_BUILD_BUILD_DIR: "/mine/build" }, "/scratch/target")).toEqual({
+      PATH: "/bin",
+      CARGO_TARGET_DIR: "/scratch/target",
+      CARGO_BUILD_BUILD_DIR: "/scratch/target",
+    });
+  });
+});
+
+describe("a build's scratch folder", () => {
+  it("is made by its absolute path, also when the temporary folder is named relative to the working folder", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "urx-scratch-"));
+    const named = relative(process.cwd(), temporary);
+    const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+    try {
+      Object.assign(process.env, { TMPDIR: named, TMP: named, TEMP: named });
+      const made = scratchFolder("urx-build-");
+      expect(isAbsolute(made)).toBe(true);
+      expect(dirname(made)).toBe(resolve(named));
+      expect(statSync(made).isDirectory()).toBe(true);
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the output tool", () => {
+  it("is built in the Cargo folder a build gives it, not the caller's", () => {
+    const folder = mkdtempSync(join(tmpdir(), "urx-output-tool-"));
+    try {
+      const tool = outputTool(fileURLToPath(new URL("../", import.meta.url)), folder);
+      expect(tool.startsWith(`${folder}/`) || tool.startsWith(`${folder}\\`)).toBe(true);
+      expect(existsSync(tool)).toBe(true);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }, 300_000);
+});
+
 describe("the launcher's location", () => {
   const artifact = (name, kind, executable) => JSON.stringify({ reason: "compiler-artifact", target: { name, kind }, executable });
 
@@ -304,5 +348,13 @@ describe("the launcher's location", () => {
 
   it("is refused when cargo reports building no urx executable", () => {
     expect(() => launcherArtifact(artifact("urx_launcher", ["lib"], null))).toThrow(/no urx executable/);
+  });
+
+  it("names the maintenance tool by its own executable, built for macOS only", () => {
+    const executable = "/scratch/target/release/urx-uninstall";
+    expect(cargoArtifact(artifact("urx-uninstall", ["bin"], executable), "urx-uninstall")).toBe(executable);
+    expect(() => cargoArtifact(artifact("urx-install", ["bin"], "/x"), "urx-uninstall")).toThrow(/no urx-uninstall executable/);
+    expect(maintenanceTools("darwin")).toEqual(["urx-uninstall"]);
+    expect(maintenanceTools("win32")).toEqual([]);
   });
 });

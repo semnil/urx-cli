@@ -15,18 +15,19 @@
 //   runtime/node[.exe]           the bundled Node
 //   app/                         the compiled CLI and the real common package
 //   native/urx-native.node       the addon
-//   notices/                     the licenses of the CLI, urx-device and Node
+//   maintenance/urx-uninstall    the removal tool (macOS only, K20)
+//   notices/                     the licenses of the CLI, urx-device, Node and
+//                                the third-party Rust crates in the programs
 //   release-manifest.json        relative paths, hashes and identities
 //
 // Usage: node scripts/build-bundle.mjs --node-archive <path>
 //        node scripts/build-bundle.mjs --archive-url   (prints where this platform's archive is published)
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, sha256 } from "./release-build.mjs";
+import { cleanUp, describeFiles, filesUnder, isModuleFormat, isRecordedPath, maintenanceTools, outputTool, PACKAGE_FILES, publishOutput, recordedProblems, releaseRecord, requireNoOutput, RUST_NOTICES, scratchFolder, sha256 } from "./release-build.mjs";
 import { compiledModules, moduleProblems } from "./compiled-modules.mjs";
 import { withoutGitLocation } from "./source-info.mjs";
 
@@ -35,8 +36,8 @@ const FORMAT = 1;
 
 /** This platform's key in build-inputs.json and its executable names. */
 export function platformOf(platform = process.platform, arch = process.arch) {
-  if (platform === "darwin" && arch === "arm64") return { key: "darwin-arm64", exe: "", runtimeInArchive: ["bin", "node"] };
-  if (platform === "win32" && arch === "x64") return { key: "win-x64", exe: ".exe", runtimeInArchive: ["node.exe"] };
+  if (platform === "darwin" && arch === "arm64") return { key: "darwin-arm64", exe: "", runtimeInArchive: ["bin", "node"], maintenance: maintenanceTools("darwin") };
+  if (platform === "win32" && arch === "x64") return { key: "win-x64", exe: ".exe", runtimeInArchive: ["node.exe"], maintenance: maintenanceTools("win32") };
   throw new Error(`no bundle is built for ${platform}-${arch} (K16)`);
 }
 
@@ -100,23 +101,37 @@ export function snapshotRelease(release, snapshot, copy = cpSync) {
 
 export { filesUnder };
 
+/** What keeps the bundle at `bundle` from being the one its manifest describes, by path. */
+export function bundleProblems(bundle, manifest) {
+  if (manifest?.product !== PRODUCT || manifest?.format !== FORMAT || !Array.isArray(manifest.files)) return ["the bundle has no urx-cli format 1 manifest"];
+  const listed = new Set(manifest.files.map((file) => file.path));
+  const unlisted = filesUnder(bundle).filter((path) => path !== "release-manifest.json" && !listed.has(path));
+  return [...recordedProblems(bundle, manifest.files), ...unlisted.map((path) => `${path} is not one of its files`)];
+}
+
 /**
  * Gives the bundle at `root` the modes it is distributed with, whatever the
  * umask or its sources gave it: 0755 for directories and for the
  * `executables` (relative paths), 0644 for every other file. Windows has no
- * such modes.
+ * such modes. The tree is first checked to hold only directories and regular
+ * files, so that no mode is set through a link on anything outside it.
  */
 export function normalizeModes(root, executables, platform = process.platform) {
   if (platform === "win32") return;
-  const walk = (directory) => {
-    chmodSync(directory, 0o755);
+  const entries = [];
+  const collect = (directory) => {
+    if (!lstatSync(directory).isDirectory()) throw new Error(`${directory} is not a directory`);
+    entries.push({ path: directory, mode: 0o755 });
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else chmodSync(path, executables.includes(relative(root, path).split(sep).join("/")) ? 0o755 : 0o644);
+      const inside = relative(root, path).split(sep).join("/");
+      if (entry.isDirectory()) collect(path);
+      else if (entry.isFile()) entries.push({ path, mode: executables.includes(inside) ? 0o755 : 0o644 });
+      else throw new Error(`${inside} is not a regular file or a directory`);
     }
   };
-  walk(root);
+  collect(root);
+  for (const { path, mode } of entries) chmodSync(path, mode);
 }
 
 /** The release manifest of the bundle at `root`: identities, then each owned file with its hash and size. */
@@ -137,20 +152,25 @@ export function assemble({ release, releaseFiles, node, notices, staging, platfo
   };
   const launcher = `launcher/urx${platform.exe}`;
   const addon = "native/urx-native.node";
+  const tools = platform.maintenance.map((tool) => `maintenance/${tool}`);
   // Each named file is one file inside `release`, and lands in one place inside `staging`.
   const bad = releaseFiles.find((path) => !isRecordedPath(path));
   if (bad !== undefined) throw new Error(`the release output's record names a path outside it: ${JSON.stringify(bad)}`);
   if (new Set(releaseFiles.map((path) => path.toLowerCase())).size !== releaseFiles.length) throw new Error("the release output's record names a file twice");
-  for (const required of [launcher, addon, "main.js"]) {
+  for (const required of [launcher, addon, "main.js", RUST_NOTICES, ...tools]) {
     if (!releaseFiles.includes(required)) throw new Error(`the release output's record names no ${required}`);
   }
   copy(join(release, ...launcher.split("/")), "bin", `urx${platform.exe}`);
   copy(join(node, ...platform.runtimeInArchive), "runtime", `node${platform.exe}`);
   copy(join(release, ...addon.split("/")), "native", "urx-native.node");
-  // The compiled CLI and the common package; the addon and the launcher have places of their own.
+  for (const tool of tools) copy(join(release, ...tool.split("/")), ...tool.split("/"));
+  copy(join(release, ...RUST_NOTICES.split("/")), ...RUST_NOTICES.split("/"));
+  // The compiled CLI and the common package; the addon, the launcher and the maintenance tools have places of their own.
   for (const path of releaseFiles) {
-    if (path === launcher || path === addon) continue;
+    if (path === launcher || path === addon || path === RUST_NOTICES || tools.includes(path)) continue;
     if (path.startsWith("launcher/")) throw new Error(`the release output's record names an unknown launcher file ${path}`);
+    if (path.startsWith("notices/")) throw new Error(`the release output's record names an unknown notices file ${path}`);
+    if (path.startsWith("maintenance/")) throw new Error(`the release output's record names an unknown maintenance file ${path}`);
     copy(join(release, ...path.split("/")), "app", ...path.split("/"));
   }
   for (const [name, path] of Object.entries(notices)) copy(path, "notices", name);
@@ -171,12 +191,13 @@ async function main(argv) {
   const output = join(root, "dist-bundle");
   // Checked before reading anything; the rename that publishes the bundle checks again.
   requireNoOutput(output, "bundle build");
-  const tool = outputTool(root);
   let scratch;
   try {
     const recorded = inputs.node.archives[platform.key];
     const archive = verifiedArchive(argv[1], recorded.sha256);
-    scratch = mkdtempSync(join(tmpdir(), "urx-bundle-"));
+    scratch = scratchFolder("urx-bundle-");
+    // The output tool is built in this build's own Cargo folder, not the caller's.
+    const tool = outputTool(root, join(scratch, "target"));
     const snapshot = join(scratch, "release");
     snapshotRelease(release, snapshot);
     // Only what the release build made goes into the bundle, each file as it was built.
@@ -233,7 +254,7 @@ async function main(argv) {
       runtime: { version: inputs.node.version, archive: recorded.file, sha256: recorded.sha256 },
     });
     writeFileSync(join(staging, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`]);
+    normalizeModes(staging, [`bin/urx${platform.exe}`, `runtime/node${platform.exe}`, ...platform.maintenance.map((tool) => `maintenance/${tool}`)]);
     publishOutput(staging, output, { last: "release-manifest.json", label: "bundle build", tool });
     process.stderr.write(`bundle written to ${output} (${manifest.files.length} files)\n`);
   } finally {

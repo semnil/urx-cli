@@ -22,8 +22,8 @@ const write = (root, path, text = path) => {
 
 describe("the installed bundle (K18, K38)", () => {
   it("is built for the two distributed platforms only (K16)", () => {
-    expect(platformOf("darwin", "arm64")).toMatchObject({ key: "darwin-arm64", exe: "" });
-    expect(platformOf("win32", "x64")).toMatchObject({ key: "win-x64", exe: ".exe" });
+    expect(platformOf("darwin", "arm64")).toMatchObject({ key: "darwin-arm64", exe: "", maintenance: ["urx-uninstall"] });
+    expect(platformOf("win32", "x64")).toMatchObject({ key: "win-x64", exe: ".exe", maintenance: [] });
     expect(() => platformOf("linux", "x64")).toThrow();
     expect(() => platformOf("darwin", "x64")).toThrow();
   });
@@ -71,13 +71,40 @@ describe("the installed bundle (K18, K38)", () => {
     expect([mode(), mode("app"), mode("bin"), mode("bin", "urx"), mode("app", "main.js")]).toEqual([0o755, 0o755, 0o755, 0o755, 0o644]);
   });
 
+  it.skipIf(process.platform === "win32")("refuses a tree with a link before setting any mode, so nothing outside it changes", () => {
+    for (const make of [(dir, outside) => symlinkSync(join(outside, "file"), join(dir, "app", "link")), (dir, outside) => symlinkSync(outside, join(dir, "app", "folder"))]) {
+      const dir = scratch();
+      const outside = scratch();
+      write(dir, "app/main.js");
+      write(outside, "file");
+      chmodSync(join(outside, "file"), 0o600);
+      chmodSync(outside, 0o700);
+      chmodSync(join(dir, "app", "main.js"), 0o600);
+      make(dir, outside);
+      expect(() => normalizeModes(dir, [])).toThrow(/is not a regular file or a directory/);
+      expect([statSync(outside).mode & 0o7777, statSync(join(outside, "file")).mode & 0o7777]).toEqual([0o700, 0o600]);
+      // Nothing inside it was changed either.
+      expect(statSync(join(dir, "app", "main.js")).mode & 0o7777).toBe(0o600);
+    }
+  });
+
   it("lays out the release output, the runtime and the notices in the fixed places", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    const releaseFiles = ["main.js", "build-info.js", "package.json", "native/addon.js", "native/urx-native.node", "launcher/urx", "node_modules/@urx/device-control/package.json"];
+    const releaseFiles = [
+      "main.js",
+      "build-info.js",
+      "package.json",
+      "native/addon.js",
+      "native/urx-native.node",
+      "launcher/urx",
+      "maintenance/urx-uninstall",
+      "node_modules/@urx/device-control/package.json",
+      "notices/rust-crates.txt",
+    ];
     for (const path of releaseFiles) write(release, path);
     // Beside the release, not made by it: never copied.
-    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt"]) write(release, path);
+    for (const path of ["release-files.json", "download.tar.gz", "native/measurements.txt", "launcher/notes.txt", "maintenance/notes.txt", "notices/other.txt"]) write(release, path);
     const node = join(dir, "node-v26");
     write(node, "bin/node", "node");
     write(node, "LICENSE", "node license");
@@ -92,8 +119,10 @@ describe("the installed bundle (K18, K38)", () => {
       "app/node_modules/@urx/device-control/package.json",
       "app/package.json",
       "bin/urx",
+      "maintenance/urx-uninstall",
       "native/urx-native.node",
       "notices/node.txt",
+      "notices/rust-crates.txt",
       "notices/urx-cli.txt",
       "runtime/node",
     ]);
@@ -103,15 +132,31 @@ describe("the installed bundle (K18, K38)", () => {
   it("refuses a record path outside the release output, and a file named twice", () => {
     const dir = scratch();
     const release = join(dir, "release");
-    for (const path of ["main.js", "native/urx-native.node", "launcher/urx"]) write(release, path);
+    const named = ["main.js", "native/urx-native.node", "launcher/urx", "maintenance/urx-uninstall", "notices/rust-crates.txt"];
+    for (const path of named) write(release, path);
     write(dir, "outside.js");
+    write(dir, "bin/node");
+    write(release, "maintenance/other");
+    write(release, "notices/other.txt");
     const lay = (...extra) => {
       const staging = mkdtempSync(join(dir, "bundle-"));
-      assemble({ release, releaseFiles: ["main.js", "native/urx-native.node", "launcher/urx", ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
+      assemble({ release, releaseFiles: [...named, ...extra], node: dir, staging, platform: platformOf("darwin", "arm64"), notices: {} });
     };
     expect(() => lay("../outside.js")).toThrow(/a path outside it/);
     expect(() => lay("/outside.js")).toThrow(/a path outside it/);
     expect(() => lay("Main.js")).toThrow(/a file twice/);
+    expect(() => lay("maintenance/other")).toThrow(/an unknown maintenance file/);
+    expect(() => lay("notices/other.txt")).toThrow(/an unknown notices file/);
+    // Every bundle holds the licenses of the Rust crates in its programs.
+    const unnoticed = mkdtempSync(join(dir, "bundle-"));
+    expect(() =>
+      assemble({ release, releaseFiles: named.filter((path) => !path.startsWith("notices/")), node: dir, staging: unnoticed, platform: platformOf("darwin", "arm64"), notices: {} }),
+    ).toThrow(/names no notices\/rust-crates.txt/);
+    // A macOS bundle cannot be without its removal tool (K20); a Windows one has none from the release.
+    const without = mkdtempSync(join(dir, "bundle-"));
+    expect(() =>
+      assemble({ release, releaseFiles: named.filter((path) => !path.startsWith("maintenance/")), node: dir, staging: without, platform: platformOf("darwin", "arm64"), notices: {} }),
+    ).toThrow(/names no maintenance\/urx-uninstall/);
   });
 
   it("lists every file but the manifest itself, with its hash and size, after the identities", () => {
