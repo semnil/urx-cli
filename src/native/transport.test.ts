@@ -1,4 +1,4 @@
-import { operationFailureOf } from "@urx/device-control/operations";
+import { operationFailureOf, type OperationCause } from "@urx/device-control/operations";
 import { describe, expect, it } from "vitest";
 import { NotificationRouter, type NativeNotifications } from "./notifications.js";
 import { AddonTransport as Adapter, type NativeOperation, type NativeRequests, type NativeSubscription } from "./transport.js";
@@ -218,9 +218,43 @@ describe("subscriptions through the addon transport", () => {
       progress: { cleanup: { state: "connection_closed", failure: null } },
     });
     const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
-    expect(await failureOf(make(cancelled).activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete } });
+    // A cancellation with no cause given reports internal_error, marked.
+    expect(await failureOf(make(cancelled).activate())).toEqual({ code: "internal_error", phase: "send", progress: { cleanup: complete }, cancelled: true });
+    // Only a cancellation is marked.
+    expect(await failureOf(make(rejected).activate())).not.toHaveProperty("cancelled");
     for (const record of [{ kind: "success", value: 1 }, {}, null]) {
       expect(await failureOf(make(record).activate()), JSON.stringify(record)).toEqual({ code: "internal_error", phase: "send", progress: null });
     }
+  });
+
+  it("report a cancelled activation or admission with the first cause its operation's owner gave cancel", async () => {
+    const cancelled = { kind: "failure", failure: { kind: "cancelled", phase: "subscription" }, cleanup: complete };
+    const rejected = { kind: "failure", failure: { kind: "cause", code: "device_rejected", phase: "subscription" }, cleanup: complete };
+    const activated = (activation: unknown, causes: readonly (OperationCause | undefined)[]) => {
+      const sub = subscription("token-1", activation).native;
+      const transport = new AddonTransport(native({ prepareSubscription: () => ({ kind: "success", value: sub }) }).connection);
+      const operation = transport.createOperation();
+      const prepared = transport.prepareSubscription([address], operation, () => {});
+      for (const cause of causes) operation.cancel(cause);
+      return failureOf(prepared.activate());
+    };
+    expect(await activated(cancelled, ["interrupted"])).toEqual({ code: "interrupted", phase: "send", progress: { cleanup: complete }, cancelled: true });
+    // The first cause given stays; a cancel with none before it gives none.
+    expect(await activated(cancelled, ["response_timeout", "interrupted"])).toMatchObject({ code: "response_timeout", cancelled: true });
+    expect(await activated(cancelled, [undefined, "interrupted"])).toMatchObject({ code: "interrupted", cancelled: true });
+    // A call's own failure keeps its cause and carries no mark, whatever the owner gave.
+    const own = await activated(rejected, ["interrupted"]);
+    expect(own).toEqual({ code: "device_rejected", phase: "response", progress: { cleanup: complete } });
+    // An admission the cancellation refused names the cause too.
+    const transport = new AddonTransport(native({ prepareSubscription: () => cancelled }).connection);
+    const operation = transport.createOperation();
+    operation.cancel("interrupted");
+    let refused: unknown;
+    try {
+      transport.prepareSubscription([address], operation, () => {});
+    } catch (error) {
+      refused = operationFailureOf(error);
+    }
+    expect(refused).toMatchObject({ code: "interrupted", cancelled: true });
   });
 });
