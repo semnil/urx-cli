@@ -15,7 +15,7 @@ pub mod subscriptions;
 /// JavaScript. The JavaScript side refuses device access when it expects a
 /// different one (src/bridge.ts holds its expectation). Both change together
 /// whenever an export, a method or a record shape changes.
-pub const BRIDGE_REVISION: u32 = 3;
+pub const BRIDGE_REVISION: u32 = 4;
 
 /// What the addon was built from, compared with the JavaScript's embedded
 /// expectations before any device access.
