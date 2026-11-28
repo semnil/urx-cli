@@ -47,7 +47,7 @@ export interface DeviceConnection {
 /** The failure the CLI reports for a record it could not trust. */
 const internal = <T>(phase: "discovery" | "connect" | "teardown", state: "complete" | "incomplete"): LifecycleOutcome<T> => ({
   kind: "failure",
-  failure: { kind: "cause", code: "internal_error", phase },
+  failure: { kind: "cause", code: "internal_error", phase, request: null },
   cleanup: { state, failure: null },
 });
 

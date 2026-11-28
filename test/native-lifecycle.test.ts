@@ -68,7 +68,7 @@ describe("discovery through the addon", () => {
     peer = await startPeer(units({ id: "<id-a>", model: "URX44" }), { malformedList: true });
     expect(await device.discoverDevices(addon, new addon.Control(), false, peer.listPort)).toMatchObject({
       kind: "failure",
-      failure: { kind: "cause", code: "invalid_response", phase: "discovery" },
+      failure: { kind: "cause", code: "invalid_response", phase: "discovery", request: null },
       cleanup: { state: "complete", failure: null },
     });
     expect(peer.requests).toEqual(["list get /vddp_srv/devices"]);
@@ -77,7 +77,7 @@ describe("discovery through the addon", () => {
     peer = undefined;
     expect(await device.discoverDevices(addon, new addon.Control(), false, closedPort)).toMatchObject({
       kind: "failure",
-      failure: { kind: "cause", code: "connection_failed", phase: "discovery" },
+      failure: { kind: "cause", code: "connection_failed", phase: "discovery", request: null },
     });
   });
 
@@ -120,7 +120,7 @@ describe("the connection lifecycle through the addon", () => {
     peer = await startPeer(units({ id: "<id-a>", model: "URX44" }));
     expect(await device.openDevice(addon, new addon.Control(), "<id-a>")).toEqual({
       kind: "failure",
-      failure: { kind: "cause", code: "device_not_found", phase: "connect" },
+      failure: { kind: "cause", code: "device_not_found", phase: "connect", request: null },
       cleanup: { state: "complete", failure: null },
     });
     expect(peer.requests).toEqual([]);
@@ -139,7 +139,7 @@ describe("the connection lifecycle through the addon", () => {
     const discovered = peer.requests.length;
     expect(await device.openDevice(addon, control, "<id-a>")).toEqual({
       kind: "failure",
-      failure: { kind: "cause", code: "device_not_found", phase: "identity" },
+      failure: { kind: "cause", code: "device_not_found", phase: "identity", request: null },
       cleanup: { state: "complete", failure: null },
     });
     // The firmware is not read from a unit whose identity did not match.

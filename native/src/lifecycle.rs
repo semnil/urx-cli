@@ -262,6 +262,7 @@ impl Task for OpenTask {
                 Failure::Cause {
                     code: Cause::DeviceNotFound,
                     phase: Phase::Connect,
+                    request: None,
                 },
                 Cleanup::COMPLETE,
             )));
@@ -293,6 +294,7 @@ impl Task for OpenTask {
                 Failure::Cause {
                     code: Cause::InternalError,
                     phase: Phase::Connect,
+                    request: None,
                 },
                 closed_cleanup(opened.close(TEARDOWN_DEADLINE)),
             ))),
@@ -376,6 +378,7 @@ pub fn closed_cleanup(outcome: CloseOutcome) -> Cleanup {
             Some(Failure::Cause {
                 code: Cause::InternalError,
                 phase: Phase::Teardown,
+                request: None,
             }),
         ),
     }
@@ -403,6 +406,7 @@ pub fn close_record(outcome: CloseOutcome) -> UnitRecord {
             Failure::Cause {
                 code: Cause::InternalError,
                 phase: Phase::Teardown,
+                request: None,
             },
             CleanupState::Incomplete,
         ),
@@ -418,6 +422,7 @@ mod tests {
         Failure::Cause {
             code,
             phase: Phase::Teardown,
+            request: None,
         }
     }
 
@@ -469,7 +474,8 @@ mod tests {
             failure,
             FailureRecord::Cause {
                 code: CauseName::DeviceRejected,
-                phase: PhaseName::Teardown
+                phase: PhaseName::Teardown,
+                request: Either::B(Null),
             }
         ));
         assert!(matches!(cleanup.state, CleanupStateName::ConnectionClosed));

@@ -77,15 +77,17 @@ const REQUEST_CAUSES: readonly string[] = [
 
 /**
  * Where a subscription call stopped, as an operation phase. Admission is its
- * own phase. Registration and unregistration requests are native-owned, so
- * their record names the lifecycle phase only; the operation phase follows
- * the cause as K34 places it: causes before sending at admission, a send
- * deadline, a lost link or a cancellation while sending, a verdict or its
- * absence at the response, and the remaining causes at delivery.
+ * own phase. A registration's own failure is at the phase of its request
+ * where the record names one (`request`, urx-device 0.6.0's transport
+ * contract). Otherwise the operation phase follows the cause as K34 places
+ * it: causes before sending at admission, a send deadline, a lost link or a
+ * cancellation while sending, a verdict or its absence at the response, and
+ * the remaining causes at delivery.
  */
 function phaseOf(failure: LifecycleFailure): OperationPhase {
   if (failure.phase === "admission") return "admission";
   if (failure.kind === "cancelled") return "send";
+  if (failure.request !== null) return failure.request;
   switch (failure.code) {
     case "invalid_input":
     case "precondition_failed":
