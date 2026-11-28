@@ -134,7 +134,7 @@ describe("the connection lifecycle through the addon", () => {
       expect((await device.discoverDevices(addon, control, false, peer.listPort)).kind).toBe("success");
       expect(await device.openDevice(addon, control, "<id-a>"), JSON.stringify(firmList)).toEqual({
         kind: "failure",
-        failure: { kind: "cause", code: "invalid_response", phase: "connect" },
+        failure: { kind: "cause", code: "invalid_response", phase: "connect", request: null },
         // The connection that was opened is closed again before the refusal.
         cleanup: { state: "connection_closed", failure: null },
       });
