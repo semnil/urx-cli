@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { operationFailure } from "./messages.js";
+import { laterFailure, operationFailure } from "./messages.js";
 
 describe("a shared operation's failure message", () => {
   it("say of a send that did not finish only that it was attempted, never that the request was sent", () => {
@@ -18,5 +18,14 @@ describe("a shared operation's failure message", () => {
     expect(operationFailure({ code: "precondition_failed", phase: "preparation", progress: null }).message).toBe(
       "A required condition was not met while the operation was being prepared.",
     );
+  });
+});
+
+describe("a cause found after an operation's first stop", () => {
+  it("name a request's phase as an operation failure does, and a lifecycle phase as a lifecycle failure does", () => {
+    expect(laterFailure({ code: "device_rejected", phase: "response" }).message).toBe("The device rejected the request while its response was awaited.");
+    // A cleanup failure whose record names no request is placed at its lifecycle phase.
+    expect(laterFailure({ code: "connection_lost", phase: "subscription" }).message).toBe("The connection was lost while registering for notifications.");
+    expect(laterFailure({ code: "teardown_timeout", phase: "subscription" })).toEqual(operationFailure({ code: "teardown_timeout", phase: "send", progress: null }));
   });
 });

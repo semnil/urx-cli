@@ -241,6 +241,28 @@ describe("set of a basic channel control", () => {
     expect(at.requests.filter((line) => line.endsWith("operation=value"))).toEqual([]);
   });
 
+  it.each([[[]], [["--dry-run"]]])("report the unit's refusal of the lock registration's automatic release after a Ctrl+C beside that Ctrl+C, once (D30, E3) (%j)", async (extra: string[]) => {
+    const at = await unit({ holdRegistrations: true, registrationResponses: { [`${LOCK}?operation=unregist`]: 403 } });
+    const interrupt = interrupts();
+    const pending = urx(["channel", "on", "set", "--channel", "1", "--value", "on", ...extra, "--json"], at.listPort, { interrupts: interrupt });
+    await vi.waitFor(() => expect(at.requests).toContain(`<id-a> post ${LOCK}?operation=regist`));
+    interrupt.send();
+    // The held registration is accepted after the Ctrl+C, and the transport's release of it refused.
+    const timer = setInterval(() => at.answerHeld(), 10);
+    const result = await pending;
+    clearInterval(timer);
+    expect(result.exit).toBe(130);
+    expect(JSON.parse(result.stdout)).toMatchObject({ data: { outcome: "not_sent" }, error: { code: "interrupted" } });
+    expect(at.requests).toContain(`<id-a> post ${LOCK}?operation=unregist`);
+    // The refused release, then the guard's own release, which finds the connection the transport
+    // closed once it could not release what it had registered (K37's connection_closed cleanup).
+    expect(result.stderr.split("\n").filter((line) => line.startsWith("urx: also:"))).toEqual([
+      "urx: also: device_rejected: The device rejected the request while its response was awaited.",
+      "urx: also: not_connected: There is no usable connection.",
+    ]);
+    expect(at.requests.filter((line) => line.endsWith("operation=value"))).toEqual([]);
+  });
+
   it.each([[[]], [["--dry-run"]]])("report a lock read that the unit refuses after a Ctrl+C beside that Ctrl+C, once (D25, E3) (%j)", async (extra: string[]) => {
     const at = await unit({ parameters: { "895:0:0": 0 }, readResponses: { [LOCK]: 404 }, holdReads: [LOCK] });
     const interrupt = interrupts();
